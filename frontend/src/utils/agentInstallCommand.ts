@@ -191,7 +191,7 @@ export function buildAgentInstallCommand({
   const scriptRef = options.scriptRef?.trim();
   const installMode = ['system', 'user'].includes(options.installMode) ? options.installMode : '';
   const dir = options.dir.trim();
-  const serviceName = options.serviceName.trim();
+  const serviceName = options.serviceName.trim() || 'cf-vps-monitor-agent';
   const effectiveInstanceId = normalizeInstanceId(instanceId || nodeName);
   const effectiveNodeName = nodeName?.trim();
   const mountInclude = options.mountInclude.trim();

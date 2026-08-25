@@ -31,7 +31,9 @@ import {
 import {
   buildPingChartRows,
   fetchPingTaskSeries,
+  formatPingLossRate,
   formatPingMs,
+  getPingLossRate,
   getPingSeriesAverage,
   getPingSeriesWithRecords,
   getPingTimeDomain,
@@ -84,6 +86,18 @@ const timeRangePointLimit: Record<TimeRange, number> = {
 };
 
 const monitorChartMargin = { top: 12, right: 16, bottom: 4, left: 4 };
+
+// recharts 的 Tooltip 默认是白底黑字，不会跟随应用的暗色主题走，
+// 这里统一用 CSS 变量适配当前主题（跟 MiniPingChart.tsx 保持一致）。
+const chartTooltipContentStyle = {
+  border: '1px solid var(--gray-5)',
+  borderRadius: 8,
+  background: 'var(--color-panel-solid)',
+  color: 'var(--gray-12)',
+  fontSize: 12,
+};
+const chartTooltipLabelStyle = { color: 'var(--gray-11)' };
+
 const monitorChartHeight = 296;
 const pingChartHeight = 210;
 
@@ -375,6 +389,8 @@ export default function Instance() {
                       `${Number(value).toFixed(1)}${name === '温度 °C' ? ' °C' : '%'}`,
                       name,
                     ]}
+                    contentStyle={chartTooltipContentStyle}
+                    labelStyle={chartTooltipLabelStyle}
                   />
                   <Line type="monotone" dataKey="utilization" stroke="var(--accent-9)" dot={false} strokeWidth={2} name="利用率 %" isAnimationActive={false} />
                   <Line type="monotone" dataKey="memory" stroke="var(--green-9)" dot={false} strokeWidth={2} name="显存 %" isAnimationActive={false} />
@@ -399,6 +415,8 @@ export default function Instance() {
                   <Tooltip
                     labelFormatter={chartTimeFormatter}
                     formatter={(value: number, name) => [formatSpeed(Number(value)), name]}
+                    contentStyle={chartTooltipContentStyle}
+                    labelStyle={chartTooltipLabelStyle}
                   />
                   <Area type="monotone" dataKey="net_in" stroke="var(--green-9)" fill="var(--green-3)" fillOpacity={0.32} dot={false} name="下载" isAnimationActive={false} />
                   <Area type="monotone" dataKey="net_out" stroke="var(--blue-9)" fill="var(--blue-3)" fillOpacity={0.32} dot={false} name="上传" isAnimationActive={false} />
@@ -422,6 +440,8 @@ export default function Instance() {
                   <Tooltip
                     labelFormatter={chartTimeFormatter}
                     formatter={(value: number, name) => [Number(value).toFixed(0), name]}
+                    contentStyle={chartTooltipContentStyle}
+                    labelStyle={chartTooltipLabelStyle}
                   />
                   <Line type="monotone" dataKey="connections" stroke="var(--accent-9)" dot={false} strokeWidth={2} name="TCP" isAnimationActive={false} />
                   <Line type="monotone" dataKey="connections_udp" stroke="var(--cyan-9)" dot={false} strokeWidth={2} name="UDP" isAnimationActive={false} />
@@ -445,6 +465,8 @@ export default function Instance() {
                   <Tooltip
                     labelFormatter={chartTimeFormatter}
                     formatter={(value: number) => [Number(value).toFixed(0), '进程数']}
+                    contentStyle={chartTooltipContentStyle}
+                    labelStyle={chartTooltipLabelStyle}
                   />
                   <Line type="monotone" dataKey="process_count" stroke="var(--accent-9)" dot={false} strokeWidth={2} isAnimationActive={false} />
                 </LineChart>
@@ -477,6 +499,8 @@ export default function Instance() {
                       if (chartTab === 'temp') return [`${Number(value).toFixed(1)} °C`, '温度'];
                       return [`${Number(value).toFixed(1)}%`, chartTab === 'cpu' ? 'CPU' : chartTab === 'ram' ? '内存' : '磁盘'];
                     }}
+                    contentStyle={chartTooltipContentStyle}
+                    labelStyle={chartTooltipLabelStyle}
                   />
                   <Line type="monotone" dataKey={chartTab} stroke="var(--accent-9)" dot={false} strokeWidth={2} isAnimationActive={false} />
                 </LineChart>
@@ -539,6 +563,8 @@ export default function Instance() {
                     formatPingMs(value),
                     name,
                   ]}
+                  contentStyle={chartTooltipContentStyle}
+                  labelStyle={chartTooltipLabelStyle}
                 />
                 {pingSeriesWithRecords.map((item) => (
                   <Line
@@ -559,6 +585,7 @@ export default function Instance() {
             <div className="instance-ping-series-grid">
               {pingSeriesWithRecords.map((item) => {
                 const avg = getPingSeriesAverage(item.records);
+                const lossRate = getPingLossRate(item.records);
                 return (
                   <div
                     key={item.task.key}
@@ -584,8 +611,14 @@ export default function Instance() {
                         {item.task.label}
                       </Text>
                     </Flex>
-                    <Text size="1" color="gray" className="instance-ping-series-stat">
-                      {avg === null ? '全部超时' : `平均 ${formatPingMs(avg)}`}
+                    <Text
+                      size="1"
+                      color={lossRate !== null && lossRate >= 20 ? 'red' : lossRate !== null && lossRate > 0 ? 'amber' : 'gray'}
+                      className="instance-ping-series-stat"
+                    >
+                      {avg === null
+                        ? '全部超时'
+                        : `平均 ${formatPingMs(avg)} · 丢包 ${formatPingLossRate(lossRate)}`}
                     </Text>
                   </div>
                 );

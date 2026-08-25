@@ -12,7 +12,9 @@ import {
 import {
   buildPingChartRows,
   fetchPingTaskSeries,
+  formatPingLossRate,
   formatPingMs,
+  getPingLossRate,
   getPingSeriesAverage,
   getPingSeriesWithRecords,
   getPingTimeDomain,
@@ -191,6 +193,7 @@ export default function MiniPingChart({
       <Box className="mini-ping-chart-legend">
         {seriesWithRecords.map((item) => {
           const avg = getPingSeriesAverage(item.records);
+          const lossRate = getPingLossRate(item.records);
           return (
             <Box
               key={item.task.key}
@@ -217,8 +220,14 @@ export default function MiniPingChart({
                   {item.task.label}
                 </Text>
               </Flex>
-              <Text size="1" color="gray" className="mini-ping-chart-legend-stat">
-                {avg === null ? '全部超时' : `平均 ${formatPingMs(avg)}`}
+              <Text
+                size="1"
+                color={lossRate !== null && lossRate >= 20 ? 'red' : lossRate !== null && lossRate > 0 ? 'amber' : 'gray'}
+                className="mini-ping-chart-legend-stat"
+              >
+                {avg === null
+                  ? '全部超时'
+                  : `平均 ${formatPingMs(avg)} · 丢包 ${formatPingLossRate(lossRate)}`}
               </Text>
             </Box>
           );

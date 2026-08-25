@@ -281,6 +281,55 @@ export function getPingSeriesAverage(records: PingRecord[]): number | null {
   return sum / chronological.length;
 }
 
+// 丢包率不需要新增字段：每条记录本来就是单次探测的成功(ms)/失败(-1)结果。
+//
+// 注意：worker 落库时做了去重（连续同状态只在跳变/满30分钟心跳时才写一行，
+// 见 live-data.ts 的 shouldPersistPingResult），所以“记录条数”不等于“探测次数”。
+// 一段连续 25 分钟的丢包在库里可能只有 1 条记录——如果直接按条数算占比会严重低估。
+// 这里改成按“每条记录代表的时间段”做加权：一条记录的持续时间 = 它到下一条记录
+// （或窗口末尾）之间的时间差，丢包率 = 丢包时长 / 总时长。
+export function getPingLossRate(records: PingRecord[], windowEndMs?: number): number | null {
+  const points = records
+    .map((record) => ({
+      timestamp: new Date(record.time).getTime(),
+      value: Number(record.value),
+    }))
+    .filter((point) => Number.isFinite(point.timestamp) && Number.isFinite(point.value))
+    .sort((a, b) => a.timestamp - b.timestamp);
+
+  if (points.length === 0) return null;
+
+  const endMs = Number.isFinite(windowEndMs) ? (windowEndMs as number) : Date.now();
+
+  let totalMs = 0;
+  let lostMs = 0;
+  for (let i = 0; i < points.length; i += 1) {
+    const current = points[i];
+    const next = points[i + 1];
+    const segmentEnd = next ? next.timestamp : endMs;
+    const duration = Math.max(0, segmentEnd - current.timestamp);
+    if (duration === 0) continue;
+
+    totalMs += duration;
+    if (current.value < 0) lostMs += duration;
+  }
+
+  if (totalMs <= 0) {
+    // 兜底：所有记录时间戳重合（比如只有一条），退化成按条数算。
+    const lostCount = points.filter((point) => point.value < 0).length;
+    return (lostCount / points.length) * 100;
+  }
+
+  return (lostMs / totalMs) * 100;
+}
+
+export function formatPingLossRate(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '-';
+  if (value <= 0) return '0%';
+  // 小于 1% 的丢包也值得展示，避免被四舍五入抹平成 0%。
+  return value < 1 ? `${value.toFixed(1)}%` : `${Math.round(value)}%`;
+}
+
 export function formatPingMs(value: number | null | undefined): string {
   if (value === null || value === undefined) return '-';
   const numberValue = Number(value);

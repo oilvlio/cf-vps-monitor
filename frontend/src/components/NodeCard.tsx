@@ -376,7 +376,9 @@ export default function NodeCard({ client, live, online, includeHidden = false }
                 <CompactMetric
                   label="月度"
                   value={trafficLimitLabel ? `${trafficPct?.toFixed(0) || 0}%` : '-'}
-                  detail={trafficLimitLabel || '未设置'}
+                  detail={client.traffic_limit > 0
+                    ? `${formatBytes(trafficUsed)} / ${formatBytes(client.traffic_limit)}`
+                    : trafficLimitLabel || '未设置'}
                   percent={trafficLimitLabel ? trafficPct : undefined}
                 />
               </div>

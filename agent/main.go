@@ -42,6 +42,9 @@ const minReportInterval = 3 * time.Second
 const maxHTTPErrorBodyBytes = 4096
 const publicIPProbeTimeout = 3 * time.Second
 const publicIPProbeBodyLimit = 4096
+const tcpRetestTriggerMS = 1000
+const tcpRetestDifferenceMS = 800
+const tcpRetestAttempts = 3
 const maxReasonableCgroupLimit = uint64(1 << 60)
 
 var defaultExcludedNetworkInterfacePrefixes = []string{
@@ -967,15 +970,45 @@ func executeTCPPing(target string) float64 {
 		return -1
 	}
 
-	start := time.Now()
-	conn, err := dialResolvedTCP(ctx, "tcp", ips, port, 3*time.Second)
-	elapsed := time.Since(start).Milliseconds()
+	result := resolveTCPPingSamples(func() float64 { return executeResolvedTCPPing(ips, port) })
+	if result < 0 {
+		log.Printf("TCP ping failed for %q", address)
+	}
+	return result
+}
 
+func resolveTCPPingSamples(probe func() float64) float64 {
+	first := probe()
+	if first < 0 || first <= tcpRetestTriggerMS {
+		return first
+	}
+
+	// Match komari-agent: make up to three additional measurements. A retry
+	// only becomes usable once it is <= 1000ms. For TCP, a drop of >800ms from
+	// the first measurement is treated as a suspicious SYN retransmission.
+	for attempt := 0; attempt < tcpRetestAttempts; attempt++ {
+		second := probe()
+		if second < 0 {
+			return -1
+		}
+		if second <= tcpRetestTriggerMS {
+			if first-second > tcpRetestDifferenceMS {
+				return -1
+			}
+			return second
+		}
+	}
+	return -1
+}
+
+func executeResolvedTCPPing(ips []net.IP, port string) float64 {
+	start := time.Now()
+	conn, err := dialResolvedTCP(context.Background(), "tcp", ips, port, 3*time.Second)
+	elapsed := time.Since(start).Milliseconds()
 	if err != nil {
-		log.Printf("TCP ping failed for %q: %v", address, err)
 		return -1
 	}
-	conn.Close()
+	_ = conn.Close()
 	return float64(elapsed)
 }
 

@@ -1,0 +1,134 @@
+diff --git a/frontend/src/components/MiniPingChart.tsx b/frontend/src/components/MiniPingChart.tsx
+index c7a8853..b192274 100644
+--- a/frontend/src/components/MiniPingChart.tsx
++++ b/frontend/src/components/MiniPingChart.tsx
+@@ -15,7 +15,7 @@ import {
+   formatPingLossRate,
+   formatPingMs,
+   getPingLossRate,
+-  getPingSeriesAverage,
++  getPingSeriesP75,
+   getPingSeriesWithRecords,
+   getPingTimeDomain,
+   getPingYAxisDomain,
+@@ -58,7 +58,6 @@ export default function MiniPingChart({
+       try {
+         const nextSeries = await fetchPingTaskSeries(uuid, {
+           limit,
+-          maxTasks: 8,
+           rangeHours,
+           includeHidden,
+           signal: controller.signal,
+@@ -192,7 +191,7 @@ export default function MiniPingChart({
+ 
+       <Box className="mini-ping-chart-legend">
+         {seriesWithRecords.map((item) => {
+-          const avg = getPingSeriesAverage(item.records);
++          const p75 = getPingSeriesP75(item.records);
+           const lossRate = getPingLossRate(item.records);
+           return (
+             <Box
+@@ -225,9 +224,9 @@ export default function MiniPingChart({
+                 color={lossRate !== null && lossRate >= 20 ? 'red' : lossRate !== null && lossRate > 0 ? 'amber' : 'gray'}
+                 className="mini-ping-chart-legend-stat"
+               >
+-                {avg === null
++                {p75 === null
+                   ? '全部超时'
+-                  : `平均 ${formatPingMs(avg)} · 丢包 ${formatPingLossRate(lossRate)}`}
++                  : `P75 ${formatPingMs(p75)} · 丢包 ${formatPingLossRate(lossRate)}`}
+               </Text>
+             </Box>
+           );
+diff --git a/frontend/src/pages/Instance.tsx b/frontend/src/pages/Instance.tsx
+index 12b8908..2183987 100644
+--- a/frontend/src/pages/Instance.tsx
++++ b/frontend/src/pages/Instance.tsx
+@@ -34,7 +34,7 @@ import {
+   formatPingLossRate,
+   formatPingMs,
+   getPingLossRate,
+-  getPingSeriesAverage,
++  getPingSeriesP75,
+   getPingSeriesWithRecords,
+   getPingTimeDomain,
+   getPingYAxisDomain,
+@@ -225,7 +225,7 @@ export default function Instance() {
+     setPingError(null);
+     setPingLoading(true);
+ 
+-    fetchPingTaskSeries(uuid, { limit: 360, maxTasks: 8, rangeHours: timeRangeHours[timeRange], cursor: new Date().toISOString(), includeHidden: isAuthenticated, signal: controller.signal })
++    fetchPingTaskSeries(uuid, { limit: 360, rangeHours: timeRangeHours[timeRange], cursor: new Date().toISOString(), includeHidden: isAuthenticated, signal: controller.signal })
+       .then((series) => {
+         if (!controller.signal.aborted) setPingSeries(series);
+       })
+@@ -584,7 +584,7 @@ export default function Instance() {
+ 
+             <div className="instance-ping-series-grid">
+               {pingSeriesWithRecords.map((item) => {
+-                const avg = getPingSeriesAverage(item.records);
++                const p75 = getPingSeriesP75(item.records);
+                 const lossRate = getPingLossRate(item.records);
+                 return (
+                   <div
+@@ -616,9 +616,9 @@ export default function Instance() {
+                       color={lossRate !== null && lossRate >= 20 ? 'red' : lossRate !== null && lossRate > 0 ? 'amber' : 'gray'}
+                       className="instance-ping-series-stat"
+                     >
+-                      {avg === null
++                      {p75 === null
+                         ? '全部超时'
+-                        : `平均 ${formatPingMs(avg)} · 丢包 ${formatPingLossRate(lossRate)}`}
++                        : `P75 ${formatPingMs(p75)} · 丢包 ${formatPingLossRate(lossRate)}`}
+                     </Text>
+                   </div>
+                 );
+diff --git a/frontend/src/utils/pingChart.ts b/frontend/src/utils/pingChart.ts
+index 3827563..c4263b6 100644
+--- a/frontend/src/utils/pingChart.ts
++++ b/frontend/src/utils/pingChart.ts
+@@ -271,14 +271,19 @@ export function getPingYAxisDomain(series: PingTaskSeries[]): [number, number] {
+   return [lower, upper];
+ }
+ 
+-export function getPingSeriesAverage(records: PingRecord[]): number | null {
+-  const chronological = records
++export function getPingSeriesP75(records: PingRecord[]): number | null {
++  const values = records
+     .map((record) => Number(record.value))
+     .filter((value) => Number.isFinite(value) && value >= 0);
+-  if (chronological.length === 0) return null;
++  if (values.length === 0) return null;
+ 
+-  const sum = chronological.reduce((total, value) => total + value, 0);
+-  return sum / chronological.length;
++  values.sort((a, b) => a - b);
++  const rank = (values.length - 1) * 0.75;
++  const lower = Math.floor(rank);
++  const upper = Math.ceil(rank);
++  if (lower === upper) return values[lower];
++
++  return values[lower] + (values[upper] - values[lower]) * (rank - lower);
+ }
+ 
+ // 丢包率不需要新增字段：每条记录本来就是单次探测的成功(ms)/失败(-1)结果。
+@@ -341,7 +346,7 @@ export async function fetchPingTaskSeries(
+   uuid: string,
+   {
+     limit = 180,
+-    maxTasks = 8,
++    maxTasks,
+     rangeHours,
+     cursor = new Date().toISOString(),
+     includeHidden = false,
+@@ -364,7 +369,9 @@ export async function fetchPingTaskSeries(
+     .filter((task) => pingTaskAppliesToClient(task, uuid))
+     .map((task, index) => normalizePingTask(task, index))
+     .filter((task): task is NormalizedPingTask => Boolean(task));
+-  const tasks = applicableTasks.slice(0, maxTasks);
++  const tasks = Number.isFinite(maxTasks) && (maxTasks as number) >= 0
++    ? applicableTasks.slice(0, maxTasks as number)
++    : applicableTasks;
+ 
+   const requestLimitForTask = (task: NormalizedPingTask) => {
+     if (rangeHours && rangeHours > 0) {

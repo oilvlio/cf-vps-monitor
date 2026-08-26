@@ -271,14 +271,19 @@ export function getPingYAxisDomain(series: PingTaskSeries[]): [number, number] {
   return [lower, upper];
 }
 
-export function getPingSeriesAverage(records: PingRecord[]): number | null {
-  const chronological = records
+export function getPingSeriesP75(records: PingRecord[]): number | null {
+  const values = records
     .map((record) => Number(record.value))
     .filter((value) => Number.isFinite(value) && value >= 0);
-  if (chronological.length === 0) return null;
+  if (values.length === 0) return null;
 
-  const sum = chronological.reduce((total, value) => total + value, 0);
-  return sum / chronological.length;
+  values.sort((a, b) => a - b);
+  const rank = (values.length - 1) * 0.75;
+  const lower = Math.floor(rank);
+  const upper = Math.ceil(rank);
+  if (lower === upper) return values[lower];
+
+  return values[lower] + (values[upper] - values[lower]) * (rank - lower);
 }
 
 // 丢包率不需要新增字段：每条记录本来就是单次探测的成功(ms)/失败(-1)结果。
@@ -341,7 +346,7 @@ export async function fetchPingTaskSeries(
   uuid: string,
   {
     limit = 180,
-    maxTasks = 8,
+    maxTasks,
     rangeHours,
     cursor = new Date().toISOString(),
     includeHidden = false,
@@ -364,7 +369,9 @@ export async function fetchPingTaskSeries(
     .filter((task) => pingTaskAppliesToClient(task, uuid))
     .map((task, index) => normalizePingTask(task, index))
     .filter((task): task is NormalizedPingTask => Boolean(task));
-  const tasks = applicableTasks.slice(0, maxTasks);
+  const tasks = Number.isFinite(maxTasks) && (maxTasks as number) >= 0
+    ? applicableTasks.slice(0, maxTasks as number)
+    : applicableTasks;
 
   const requestLimitForTask = (task: NormalizedPingTask) => {
     if (rangeHours && rangeHours > 0) {

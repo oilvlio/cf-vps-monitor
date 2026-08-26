@@ -34,7 +34,7 @@ import {
   formatPingLossRate,
   formatPingMs,
   getPingLossRate,
-  getPingSeriesAverage,
+  getPingSeriesP75,
   getPingSeriesWithRecords,
   getPingTimeDomain,
   getPingYAxisDomain,
@@ -225,7 +225,7 @@ export default function Instance() {
     setPingError(null);
     setPingLoading(true);
 
-    fetchPingTaskSeries(uuid, { limit: 360, maxTasks: 8, rangeHours: timeRangeHours[timeRange], cursor: new Date().toISOString(), includeHidden: isAuthenticated, signal: controller.signal })
+    fetchPingTaskSeries(uuid, { limit: 360, rangeHours: timeRangeHours[timeRange], cursor: new Date().toISOString(), includeHidden: isAuthenticated, signal: controller.signal })
       .then((series) => {
         if (!controller.signal.aborted) setPingSeries(series);
       })
@@ -584,7 +584,7 @@ export default function Instance() {
 
             <div className="instance-ping-series-grid">
               {pingSeriesWithRecords.map((item) => {
-                const avg = getPingSeriesAverage(item.records);
+                const p75 = getPingSeriesP75(item.records);
                 const lossRate = getPingLossRate(item.records);
                 return (
                   <div
@@ -616,9 +616,9 @@ export default function Instance() {
                       color={lossRate !== null && lossRate >= 20 ? 'red' : lossRate !== null && lossRate > 0 ? 'amber' : 'gray'}
                       className="instance-ping-series-stat"
                     >
-                      {avg === null
+                      {p75 === null
                         ? '全部超时'
-                        : `平均 ${formatPingMs(avg)} · 丢包 ${formatPingLossRate(lossRate)}`}
+                        : `P75 ${formatPingMs(p75)} · 丢包 ${formatPingLossRate(lossRate)}`}
                     </Text>
                   </div>
                 );

@@ -15,7 +15,7 @@ import {
   formatPingLossRate,
   formatPingMs,
   getPingLossRate,
-  getPingSeriesAverage,
+  getPingSeriesP75,
   getPingSeriesWithRecords,
   getPingTimeDomain,
   getPingYAxisDomain,
@@ -58,7 +58,6 @@ export default function MiniPingChart({
       try {
         const nextSeries = await fetchPingTaskSeries(uuid, {
           limit,
-          maxTasks: 8,
           rangeHours,
           includeHidden,
           signal: controller.signal,
@@ -192,7 +191,7 @@ export default function MiniPingChart({
 
       <Box className="mini-ping-chart-legend">
         {seriesWithRecords.map((item) => {
-          const avg = getPingSeriesAverage(item.records);
+          const p75 = getPingSeriesP75(item.records);
           const lossRate = getPingLossRate(item.records);
           return (
             <Box
@@ -225,9 +224,9 @@ export default function MiniPingChart({
                 color={lossRate !== null && lossRate >= 20 ? 'red' : lossRate !== null && lossRate > 0 ? 'amber' : 'gray'}
                 className="mini-ping-chart-legend-stat"
               >
-                {avg === null
+                {p75 === null
                   ? '全部超时'
-                  : `平均 ${formatPingMs(avg)} · 丢包 ${formatPingLossRate(lossRate)}`}
+                  : `P75 ${formatPingMs(p75)} · 丢包 ${formatPingLossRate(lossRate)}`}
               </Text>
             </Box>
           );

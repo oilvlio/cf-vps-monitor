@@ -602,7 +602,7 @@ start_pre() {
   export CF_MONITOR_MOUNT_INCLUDE CF_MONITOR_MOUNT_EXCLUDE CF_MONITOR_NIC_INCLUDE CF_MONITOR_NIC_EXCLUDE
   export CF_MONITOR_TRAFFIC_RESET_DAY CF_MONITOR_TRAFFIC_STATE_FILE
   checkpath -d -m 0755 -o ${AGENT_USER}:${AGENT_USER} "${STATE_DIR}"
-  checkpath -f -m 0644 -o cf-vps-monitor-agent:cf-vps-monitor-agent "/var/log/${RC_SVCNAME}.log"
+  checkpath -f -m 0644 -o cf-vps-monitor-agent:cf-vps-monitor-agent "/var/log/\${RC_SVCNAME}.log"
 }
 EOF
 )

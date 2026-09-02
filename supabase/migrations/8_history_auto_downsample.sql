@@ -139,12 +139,12 @@ stable
 set search_path = public
 as $$
 declare
-  task_id integer;
+  tid integer;
   safe_bucket integer := least(greatest(coalesce(input_bucket_sec, 900), 60), 3600);
   safe_limit integer := least(greatest(coalesce(input_limit, 1000), 1), 1000);
   result jsonb := '{}'::jsonb;
 begin
-  for task_id in
+  for tid in
     select distinct value::integer
     from jsonb_array_elements_text(
       case when jsonb_typeof(input_task_ids) = 'array' then input_task_ids else '[]'::jsonb end
@@ -152,7 +152,7 @@ begin
     where value ~ '^[0-9]+$' and value::integer > 0
   loop
     result := result || jsonb_build_object(
-      task_id::text,
+      tid::text,
       coalesce((
         select jsonb_agg(to_jsonb(row_data) order by time asc)
         from (
@@ -161,16 +161,16 @@ begin
             select
               id,
               client,
-              task_id,
+              tid as task_id,
               time,
-              (values_json ->> task_id::text)::integer as value,
+              (values_json ->> tid::text)::integer as value,
               row_number() over (
                 partition by floor(extract(epoch from time) / safe_bucket)
                 order by time desc, id desc
               ) as rn
             from ping_snapshots
             where client = input_client
-              and values_json ? task_id::text
+              and values_json ? tid::text
               and (input_start is null or time >= input_start::timestamptz)
               and (input_end is null or time <= input_end::timestamptz)
           ) ranked
@@ -189,3 +189,9 @@ revoke all on function public.cfm_ping_records_for_tasks_range_bucketed(text, js
   from public, anon, authenticated;
 grant execute on function public.cfm_ping_records_for_tasks_range_bucketed(text, jsonb, text, text, integer, integer)
   to service_role;
+
+update settings set value = '168'
+where key in ('record_preserve_time', 'ping_record_preserve_time')
+  and value in ('72', '720');
+
+notify pgrst, 'reload schema';

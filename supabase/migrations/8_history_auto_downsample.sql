@@ -156,25 +156,28 @@ begin
       coalesce((
         select jsonb_agg(to_jsonb(row_data) order by time asc)
         from (
-          select id, client, task_id, time, value
+          select
+            to_timestamp(bucket_start) as time,
+            tid as task_id,
+            coalesce(round(avg(nullif(raw_value, -1)) filter (where raw_value >= 0))::integer, -1) as value,
+            count(*)::integer as sample_count,
+            count(*) filter (where raw_value >= 0)::integer as success_count,
+            count(*) filter (where raw_value < 0)::integer as loss_count,
+            avg(nullif(raw_value, -1)) filter (where raw_value >= 0) as avg_latency,
+            min(nullif(raw_value, -1)) filter (where raw_value >= 0) as min_latency,
+            max(nullif(raw_value, -1)) filter (where raw_value >= 0) as max_latency,
+            percentile_cont(0.75) within group (order by raw_value) filter (where raw_value >= 0) as p75_latency
           from (
             select
-              id,
-              client,
-              tid as task_id,
-              time,
-              (values_json ->> tid::text)::integer as value,
-              row_number() over (
-                partition by floor(extract(epoch from time) / safe_bucket)
-                order by time desc, id desc
-              ) as rn
+              floor(extract(epoch from time) / safe_bucket)::bigint * safe_bucket as bucket_start,
+              (values_json ->> tid::text)::integer as raw_value
             from ping_snapshots
             where client = input_client
               and values_json ? tid::text
               and (input_start is null or time >= input_start::timestamptz)
               and (input_end is null or time <= input_end::timestamptz)
-          ) ranked
-          where rn = 1
+          ) raw
+          group by bucket_start
           order by time asc
           limit safe_limit
         ) row_data

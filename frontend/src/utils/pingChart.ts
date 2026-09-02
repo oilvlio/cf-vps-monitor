@@ -15,6 +15,13 @@ export interface PingRecord {
   time: string;
   value: number;
   task_id?: number | string;
+  sample_count?: number;
+  success_count?: number;
+  loss_count?: number;
+  avg_latency?: number;
+  min_latency?: number;
+  max_latency?: number;
+  p75_latency?: number;
 }
 
 export interface NormalizedPingTask {
@@ -159,6 +166,13 @@ export function normalizePingRecord(payload: unknown): PingRecord | null {
     time: record.time,
     value: record.value,
     ...(typeof taskId === 'number' || typeof taskId === 'string' ? { task_id: taskId } : {}),
+    ...(typeof record.sample_count === 'number' ? { sample_count: record.sample_count } : {}),
+    ...(typeof record.success_count === 'number' ? { success_count: record.success_count } : {}),
+    ...(typeof record.loss_count === 'number' ? { loss_count: record.loss_count } : {}),
+    ...(typeof record.avg_latency === 'number' ? { avg_latency: record.avg_latency } : {}),
+    ...(typeof record.min_latency === 'number' ? { min_latency: record.min_latency } : {}),
+    ...(typeof record.max_latency === 'number' ? { max_latency: record.max_latency } : {}),
+    ...(typeof record.p75_latency === 'number' ? { p75_latency: record.p75_latency } : {}),
   };
 }
 
@@ -272,6 +286,15 @@ export function getPingYAxisDomain(series: PingTaskSeries[]): [number, number] {
 }
 
 export function getPingSeriesP75(records: PingRecord[]): number | null {
+  // 分桶聚合数据：每个桶已带 p75_latency，直接取其中位数展示。
+  const bucketP75s = records
+    .map((record) => Number(record.p75_latency))
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  if (bucketP75s.length > 0) {
+    bucketP75s.sort((a, b) => a - b);
+    return bucketP75s[Math.floor(bucketP75s.length / 2)];
+  }
+
   const values = records
     .map((record) => Number(record.value))
     .filter((value) => Number.isFinite(value) && value >= 0);
@@ -286,14 +309,23 @@ export function getPingSeriesP75(records: PingRecord[]): number | null {
   return values[lower] + (values[upper] - values[lower]) * (rank - lower);
 }
 
-// 丢包率不需要新增字段：每条记录本来就是单次探测的成功(ms)/失败(-1)结果。
-//
-// 注意：worker 落库时做了去重（连续同状态只在跳变/满30分钟心跳时才写一行，
+// 分桶聚合数据：每个桶已带 loss_count/sample_count，直接加权汇总。
+// 原始数据（24h 内）：worker 落库时做了去重（连续同状态只在跳变/满30分钟心跳时才写一行，
 // 见 live-data.ts 的 shouldPersistPingResult），所以“记录条数”不等于“探测次数”。
 // 一段连续 25 分钟的丢包在库里可能只有 1 条记录——如果直接按条数算占比会严重低估。
 // 这里改成按“每条记录代表的时间段”做加权：一条记录的持续时间 = 它到下一条记录
 // （或窗口末尾）之间的时间差，丢包率 = 丢包时长 / 总时长。
 export function getPingLossRate(records: PingRecord[], windowEndMs?: number): number | null {
+  const withCounts = records.filter(
+    (r) => Number.isFinite(r.loss_count) && Number.isFinite(r.sample_count) && (r.sample_count as number) > 0,
+  );
+  if (withCounts.length > 0) {
+    const totalSamples = withCounts.reduce((sum, r) => sum + (r.sample_count as number), 0);
+    const totalLoss = withCounts.reduce((sum, r) => sum + (r.loss_count as number), 0);
+    if (totalSamples <= 0) return null;
+    return (totalLoss / totalSamples) * 100;
+  }
+
   const points = records
     .map((record) => ({
       timestamp: new Date(record.time).getTime(),

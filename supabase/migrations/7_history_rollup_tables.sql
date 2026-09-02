@@ -64,28 +64,6 @@ create or replace function public.cfm_build_history_rollup(input_before text def
 returns jsonb language plpgsql set search_path = public as $$
 declare before_ts timestamptz := coalesce(nullif(input_before, '')::timestamptz, now() - interval '24 hours');
 begin
-  insert into records_rollup (client, bucket_start, sample_count, avg_values, min_values, max_values, first_values, last_values, first_time, last_time)
-  select client, date_trunc('hour', time), count(*)::integer,
-    jsonb_build_object('cpu',avg(cpu),'ram',avg(ram),'load',avg(load),'disk',avg(disk),'temp',avg(temp),'net_in',avg(net_in),'net_out',avg(net_out),'process_count',avg(process_count),'connections',avg(connections),'connections_udp',avg(connections_udp)),
-    jsonb_build_object('cpu',min(cpu),'ram',min(ram),'load',min(load),'disk',min(disk),'temp',min(temp),'net_in',min(net_in),'net_out',min(net_out),'process_count',min(process_count),'connections',min(connections),'connections_udp',min(connections_udp)),
-    jsonb_build_object('cpu',max(cpu),'ram',max(ram),'load',max(load),'disk',max(disk),'temp',max(temp),'net_in',max(net_in),'net_out',max(net_out),'process_count',max(process_count),'connections',max(connections),'connections_udp',max(connections_udp)),
-    (array_agg(to_jsonb(records) order by time asc))[1], (array_agg(to_jsonb(records) order by time desc))[1], min(time), max(time)
-  from records where time < before_ts and time >= before_ts - interval '2 hours'
-  group by client, date_trunc('hour', time)
-  on conflict (client,bucket_start) do update set sample_count=excluded.sample_count, avg_values=excluded.avg_values, min_values=excluded.min_values, max_values=excluded.max_values, first_values=excluded.first_values, last_values=excluded.last_values, first_time=excluded.first_time, last_time=excluded.last_time;
-
-  insert into ping_rollup (client, task_id, bucket_start, sample_count, success_count, loss_count, avg_latency, min_latency, max_latency, first_time, last_time)
-  select p.client, (item.key)::bigint, date_trunc('hour', p.time), count(*)::integer,
-    count(*) filter (where (item.value)::integer >= 0)::integer,
-    count(*) filter (where (item.value)::integer < 0)::integer,
-    avg(nullif((item.value)::integer, -1)) filter (where (item.value)::integer >= 0),
-    min(nullif((item.value)::integer, -1)) filter (where (item.value)::integer >= 0),
-    max(nullif((item.value)::integer, -1)) filter (where (item.value)::integer >= 0), min(p.time), max(p.time)
-  from ping_snapshots p cross join lateral jsonb_each(p.values_json) item
-  where p.time < before_ts and p.time >= before_ts - interval '2 hours'
-  group by p.client, item.key, date_trunc('hour',p.time)
-  on conflict (client,task_id,bucket_start) do update set sample_count=excluded.sample_count, success_count=excluded.success_count, loss_count=excluded.loss_count, avg_latency=excluded.avg_latency, min_latency=excluded.min_latency, max_latency=excluded.max_latency, first_time=excluded.first_time, last_time=excluded.last_time;
-
   insert into gpu_rollup (client, device_index, bucket_start, sample_count, avg_values, min_values, max_values, first_time, last_time)
   select s.client, coalesce((d->>'device_index')::integer,0), date_trunc('hour',s.time), count(*)::integer,
     jsonb_build_object('utilization',avg((d->>'utilization')::double precision),'mem_used',avg((d->>'mem_used')::double precision),'temperature',avg((d->>'temperature')::double precision)),

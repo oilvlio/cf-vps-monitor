@@ -31,8 +31,10 @@ import {
 import {
   buildPingChartRows,
   fetchPingTaskSeries,
+  formatPingLossRate,
   formatPingMs,
-  getPingSeriesAverage,
+  getPingLossRate,
+  getPingSeriesP75,
   getPingSeriesWithRecords,
   getPingTimeDomain,
   getPingYAxisDomain,
@@ -59,31 +61,43 @@ const formatUptime = (seconds: number): string => {
   return `${m}m ${s}s`;
 };
 
-type TimeRange = '1h' | '4h' | '24h' | '3d';
+type TimeRange = '1h' | '24h' | '3d' | '7d';
 type ChartTab = 'cpu' | 'ram' | 'disk' | 'network' | 'connections' | 'process' | 'temp' | 'gpu';
 
 const timeRangeMs: Record<TimeRange, number> = {
   '1h': 3600000,
-  '4h': 14400000,
   '24h': 86400000,
   '3d': 259200000,
+  '7d': 604800000,
 };
 
 const timeRangeHours: Record<TimeRange, number> = {
   '1h': 1,
-  '4h': 4,
   '24h': 24,
   '3d': 72,
+  '7d': 168,
 };
 
 const timeRangePointLimit: Record<TimeRange, number> = {
   '1h': 240,
-  '4h': 360,
   '24h': 720,
-  '3d': 1000,
+  '3d': 400,
+  '7d': 400,
 };
 
 const monitorChartMargin = { top: 12, right: 16, bottom: 4, left: 4 };
+
+// recharts 的 Tooltip 默认是白底黑字，不会跟随应用的暗色主题走，
+// 这里统一用 CSS 变量适配当前主题（跟 MiniPingChart.tsx 保持一致）。
+const chartTooltipContentStyle = {
+  border: '1px solid var(--gray-5)',
+  borderRadius: 8,
+  background: 'var(--color-panel-solid)',
+  color: 'var(--gray-12)',
+  fontSize: 12,
+};
+const chartTooltipLabelStyle = { color: 'var(--gray-11)' };
+
 const monitorChartHeight = 296;
 const pingChartHeight = 210;
 
@@ -111,6 +125,8 @@ export default function Instance() {
   const [pingLoading, setPingLoading] = useState(false);
   const [pingError, setPingError] = useState<string | null>(null);
   const [shouldLoadPing, setShouldLoadPing] = useState(false);
+  // 空集合表示未筛选，即显示全部测速点。
+  const [selectedPingTaskKeys, setSelectedPingTaskKeys] = useState<string[]>([]);
   const [gpuRecords, setGpuRecords] = useState<PublicGpuRecord[]>([]);
   const pingSectionRef = useRef<HTMLDivElement | null>(null);
   const { liveData } = useLiveData();
@@ -169,7 +185,7 @@ export default function Instance() {
     setRecordsRangeEnd(endTs);
 
     try {
-      const data = await publicFetch(`/records/load?${historyQuery({ uuid, start, end, cursor: end, limit, include_hidden: isAuthenticated ? 1 : undefined })}`);
+      const data = await publicFetch(`/records/load?${historyQuery({ uuid, start, end, limit, include_hidden: isAuthenticated ? 1 : undefined })}`);
       setRecords(normalizePublicMonitorRecords(data));
     } catch {}
     setRecordsLoading(false);
@@ -182,6 +198,7 @@ export default function Instance() {
   useEffect(() => {
     setShouldLoadPing(false);
     setPingSeries([]);
+    setSelectedPingTaskKeys([]);
     setPingError(null);
     setPingLoading(false);
   }, [uuid]);
@@ -211,7 +228,9 @@ export default function Instance() {
     setPingError(null);
     setPingLoading(true);
 
-    fetchPingTaskSeries(uuid, { limit: 360, maxTasks: 8, rangeHours: timeRangeHours[timeRange], cursor: new Date().toISOString(), includeHidden: isAuthenticated, signal: controller.signal })
+    const end = new Date().toISOString();
+    const start = new Date(Date.now() - timeRangeMs[timeRange]).toISOString();
+    fetchPingTaskSeries(uuid, { limit: timeRangePointLimit[timeRange], rangeHours: timeRangeHours[timeRange], start, end, includeHidden: isAuthenticated, signal: controller.signal })
       .then((series) => {
         if (!controller.signal.aborted) setPingSeries(series);
       })
@@ -236,7 +255,7 @@ export default function Instance() {
     const start = new Date(startTs).toISOString();
     const end = new Date(endTs).toISOString();
 
-    publicFetch(`/records/gpu?${historyQuery({ uuid, start, end, cursor: end, limit: 200, include_hidden: isAuthenticated ? 1 : undefined })}`)
+    publicFetch(`/records/gpu?${historyQuery({ uuid, start, end, limit: timeRangePointLimit[timeRange], include_hidden: isAuthenticated ? 1 : undefined })}`)
       .then((data) => setGpuRecords(normalizePublicGpuRecords(data)))
       .catch(() => {});
   }, [uuid, timeRange, client?.gpu_name, authLoading, isAuthenticated]);
@@ -267,7 +286,7 @@ export default function Instance() {
     const dateInput = typeof value === 'string' || typeof value === 'number' || value instanceof Date ? value : '';
     const date = new Date(dateInput);
     if (Number.isNaN(date.getTime())) return '';
-    return timeRange === '24h' || timeRange === '3d'
+    return timeRange !== '1h'
       ? date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
       : date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
   };
@@ -284,9 +303,24 @@ export default function Instance() {
   }));
 
   const pingSeriesWithRecords = getPingSeriesWithRecords(pingSeries);
-  const pingChartRows = buildPingChartRows(pingSeriesWithRecords);
-  const pingYAxisDomain = getPingYAxisDomain(pingSeriesWithRecords);
-  const pingXAxisDomain = getPingTimeDomain(pingSeriesWithRecords, timeRangeHours[timeRange]);
+  const selectedPingTaskKeySet = new Set(selectedPingTaskKeys);
+  const visiblePingSeries = selectedPingTaskKeys.length === 0
+    ? pingSeriesWithRecords
+    : pingSeriesWithRecords.filter((item) => selectedPingTaskKeySet.has(item.task.key));
+  const pingChartRows = buildPingChartRows(visiblePingSeries);
+  const pingYAxisDomain = getPingYAxisDomain(visiblePingSeries);
+  const pingXAxisDomain = getPingTimeDomain(visiblePingSeries, timeRangeHours[timeRange]);
+
+  const togglePingTask = (taskKey: string) => {
+    setSelectedPingTaskKeys((current) => {
+      if (current.length === 0) return [taskKey];
+      if (current.includes(taskKey)) {
+        const next = current.filter((key) => key !== taskKey);
+        return next;
+      }
+      return [...current, taskKey];
+    });
+  };
 
   return (
     <div className="instance-page">
@@ -326,13 +360,13 @@ export default function Instance() {
       {/* Chart section */}
       <Card mb="4">
         <Flex justify="between" align="center" mb="3" gap="3" wrap="wrap">
-          <Text weight="bold">监控图表 · {timeRange === '1h' ? '最近1小时' : timeRange === '4h' ? '最近4小时' : timeRange === '24h' ? '最近24小时' : '最近3天'}</Text>
+          <Text weight="bold">监控图表 · {timeRange === '1h' ? '最近1小时' : timeRange === '24h' ? '最近24小时' : timeRange === '3d' ? '最近3天' : '最近7天'}</Text>
           <Flex align="center" gap="3" wrap="wrap">
             <SegmentedControl.Root size="1" value={timeRange} onValueChange={handleTimeRangeChange}>
               <SegmentedControl.Item value="1h">1小时</SegmentedControl.Item>
-              <SegmentedControl.Item value="4h">4小时</SegmentedControl.Item>
               <SegmentedControl.Item value="24h">24小时</SegmentedControl.Item>
               <SegmentedControl.Item value="3d">3天</SegmentedControl.Item>
+              <SegmentedControl.Item value="7d">7天</SegmentedControl.Item>
             </SegmentedControl.Root>
             <Text size="1" color="gray">{records.length} 个数据点</Text>
           </Flex>
@@ -375,6 +409,8 @@ export default function Instance() {
                       `${Number(value).toFixed(1)}${name === '温度 °C' ? ' °C' : '%'}`,
                       name,
                     ]}
+                    contentStyle={chartTooltipContentStyle}
+                    labelStyle={chartTooltipLabelStyle}
                   />
                   <Line type="monotone" dataKey="utilization" stroke="var(--accent-9)" dot={false} strokeWidth={2} name="利用率 %" isAnimationActive={false} />
                   <Line type="monotone" dataKey="memory" stroke="var(--green-9)" dot={false} strokeWidth={2} name="显存 %" isAnimationActive={false} />
@@ -399,6 +435,8 @@ export default function Instance() {
                   <Tooltip
                     labelFormatter={chartTimeFormatter}
                     formatter={(value: number, name) => [formatSpeed(Number(value)), name]}
+                    contentStyle={chartTooltipContentStyle}
+                    labelStyle={chartTooltipLabelStyle}
                   />
                   <Area type="monotone" dataKey="net_in" stroke="var(--green-9)" fill="var(--green-3)" fillOpacity={0.32} dot={false} name="下载" isAnimationActive={false} />
                   <Area type="monotone" dataKey="net_out" stroke="var(--blue-9)" fill="var(--blue-3)" fillOpacity={0.32} dot={false} name="上传" isAnimationActive={false} />
@@ -422,6 +460,8 @@ export default function Instance() {
                   <Tooltip
                     labelFormatter={chartTimeFormatter}
                     formatter={(value: number, name) => [Number(value).toFixed(0), name]}
+                    contentStyle={chartTooltipContentStyle}
+                    labelStyle={chartTooltipLabelStyle}
                   />
                   <Line type="monotone" dataKey="connections" stroke="var(--accent-9)" dot={false} strokeWidth={2} name="TCP" isAnimationActive={false} />
                   <Line type="monotone" dataKey="connections_udp" stroke="var(--cyan-9)" dot={false} strokeWidth={2} name="UDP" isAnimationActive={false} />
@@ -445,6 +485,8 @@ export default function Instance() {
                   <Tooltip
                     labelFormatter={chartTimeFormatter}
                     formatter={(value: number) => [Number(value).toFixed(0), '进程数']}
+                    contentStyle={chartTooltipContentStyle}
+                    labelStyle={chartTooltipLabelStyle}
                   />
                   <Line type="monotone" dataKey="process_count" stroke="var(--accent-9)" dot={false} strokeWidth={2} isAnimationActive={false} />
                 </LineChart>
@@ -477,7 +519,11 @@ export default function Instance() {
                       if (chartTab === 'temp') return [`${Number(value).toFixed(1)} °C`, '温度'];
                       return [`${Number(value).toFixed(1)}%`, chartTab === 'cpu' ? 'CPU' : chartTab === 'ram' ? '内存' : '磁盘'];
                     }}
+                    contentStyle={chartTooltipContentStyle}
+                    labelStyle={chartTooltipLabelStyle}
                   />
+                  <Line type="monotone" dataKey={`${chartTab}_max`} stroke="var(--accent-9)" strokeOpacity={0.28} dot={false} strokeWidth={1} isAnimationActive={false} />
+                  <Line type="monotone" dataKey={`${chartTab}_min`} stroke="var(--accent-9)" strokeOpacity={0.28} dot={false} strokeWidth={1} isAnimationActive={false} />
                   <Line type="monotone" dataKey={chartTab} stroke="var(--accent-9)" dot={false} strokeWidth={2} isAnimationActive={false} />
                 </LineChart>
               </ResponsiveContainer>
@@ -490,7 +536,14 @@ export default function Instance() {
       <div ref={pingSectionRef}>
       <Card mb="4">
         <Flex justify="between" align="center" mb="3" gap="3" wrap="wrap">
-          <Text weight="bold">Ping 延迟</Text>
+          <Flex align="center" gap="2">
+            <Text weight="bold">Ping 延迟</Text>
+            {pingSeriesWithRecords.length > 0 && (
+              <Text size="1" color="gray">
+                测速点：{selectedPingTaskKeys.length === 0 ? '全部' : `${visiblePingSeries.length} 个已选`}
+              </Text>
+            )}
+          </Flex>
           {pingSeries.length > 0 && (
             <Text size="1" color="gray">
               {pingSeriesWithRecords.length} / {pingSeries.length} 个任务有记录
@@ -539,6 +592,8 @@ export default function Instance() {
                     formatPingMs(value),
                     name,
                   ]}
+                  contentStyle={chartTooltipContentStyle}
+                  labelStyle={chartTooltipLabelStyle}
                 />
                 {pingSeriesWithRecords.map((item) => (
                   <Line
@@ -558,11 +613,16 @@ export default function Instance() {
 
             <div className="instance-ping-series-grid">
               {pingSeriesWithRecords.map((item) => {
-                const avg = getPingSeriesAverage(item.records);
+                const p75 = getPingSeriesP75(item.records);
+                const lossRate = getPingLossRate(item.records);
+                const isSelected = selectedPingTaskKeys.length === 0 || selectedPingTaskKeySet.has(item.task.key);
                 return (
-                  <div
+                  <button
                     key={item.task.key}
-                    className="instance-ping-series-item"
+                    type="button"
+                    className={`instance-ping-series-item${isSelected ? ' is-selected' : ' is-unselected'}`}
+                    aria-pressed={isSelected}
+                    onClick={() => togglePingTask(item.task.key)}
                     style={{
                       borderColor: item.task.color,
                       background: `color-mix(in srgb, ${item.task.color} 9%, var(--color-panel-solid))`,
@@ -584,10 +644,16 @@ export default function Instance() {
                         {item.task.label}
                       </Text>
                     </Flex>
-                    <Text size="1" color="gray" className="instance-ping-series-stat">
-                      {avg === null ? '全部超时' : `平均 ${formatPingMs(avg)}`}
+                    <Text
+                      size="1"
+                      color={lossRate !== null && lossRate >= 20 ? 'red' : lossRate !== null && lossRate > 0 ? 'amber' : 'gray'}
+                      className="instance-ping-series-stat"
+                    >
+                      {p75 === null
+                        ? '全部超时'
+                        : `P75 ${formatPingMs(p75)} · 丢包 ${formatPingLossRate(lossRate)}`}
                     </Text>
-                  </div>
+                  </button>
                 );
               })}
             </div>

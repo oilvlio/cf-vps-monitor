@@ -349,6 +349,16 @@ export function deleteSupabaseOldPingRecords(
   });
 }
 
+export function compactSupabaseHistory(env: SupabaseApiEnv, now: string): Promise<Record<string, number>> {
+  return callSupabaseRpc<Record<string, number>>(env, 'cfm_compact_history', {
+    input_now: now,
+  });
+}
+
+export function buildSupabaseHistoryRollup(env: SupabaseApiEnv, before: string): Promise<Record<string, unknown>> {
+  return callSupabaseRpc<Record<string, unknown>>(env, 'cfm_build_history_rollup', { input_before: before });
+}
+
 export function deleteSupabaseOldAuditLogs(
   env: SupabaseApiEnv,
   beforeTime: string,
@@ -586,6 +596,23 @@ export function getSupabaseRecordsByTimeRange(
   });
 }
 
+export function getSupabaseRecordsByTimeRangeBucketed(
+  env: SupabaseApiEnv,
+  client: string,
+  start: string,
+  end: string,
+  bucketSec: number,
+  limit = 1000,
+): Promise<MonitorRecord[]> {
+  return callSupabaseRpc<MonitorRecord[]>(env, 'cfm_records_range_bucketed', {
+    input_client: client,
+    input_start: start,
+    input_end: end,
+    input_bucket_sec: bucketSec,
+    input_limit: limit,
+  });
+}
+
 export function getSupabaseRecordsByTimeRangeLimited(
   env: SupabaseApiEnv,
   client: string,
@@ -738,6 +765,58 @@ export function getSupabasePingRecordsForTasks(
     input_task_ids: taskIds,
     input_limit: limit,
     input_cursor: cursor,
+  });
+}
+
+export function getSupabaseGpuRollupRange(env: SupabaseApiEnv, client: string, start: string, end: string): Promise<GPUHistoryRecord[]> {
+  return callSupabaseRpc<GPUHistoryRecord[]>(env, 'cfm_gpu_rollup_range', { input_client: client, input_start: start, input_end: end });
+}
+
+export function getSupabaseRecordsRollupRange(env: SupabaseApiEnv, client: string, start: string, end: string): Promise<MonitorRecord[]> {
+  return callSupabaseRpc<MonitorRecord[]>(env, 'cfm_records_rollup_range', {
+    input_client: client, input_start: start, input_end: end,
+  });
+}
+
+export function getSupabasePingRecordsForTasksRange(
+  env: SupabaseApiEnv,
+  client: string,
+  taskIds: number[],
+  start: string | undefined,
+  end: string | undefined,
+  limit: number,
+): Promise<Record<string, PingHistoryRecord[]>> {
+  return callSupabaseRpc<Record<string, PingHistoryRecord[]>>(env, 'cfm_ping_records_for_tasks_range', {
+    input_client: client,
+    input_task_ids: taskIds,
+    input_start: start,
+    input_end: end,
+    input_limit: limit,
+  });
+}
+
+export function getSupabasePingRecordsForTasksRangeBucketed(
+  env: SupabaseApiEnv,
+  client: string,
+  taskIds: number[],
+  start: string | undefined,
+  end: string | undefined,
+  bucketSec: number,
+  limit = 1000,
+): Promise<Record<string, PingHistoryRecord[]>> {
+  return callSupabaseRpc(env, 'cfm_ping_records_for_tasks_range_bucketed', {
+    input_client: client,
+    input_task_ids: taskIds,
+    input_start: start,
+    input_end: end,
+    input_bucket_sec: bucketSec,
+    input_limit: limit,
+  });
+}
+
+export function getSupabasePingRollupRange(env: SupabaseApiEnv, client: string, taskId: number, start: string, end: string): Promise<PingHistoryRecord[]> {
+  return callSupabaseRpc<PingHistoryRecord[]>(env, 'cfm_ping_rollup_range', {
+    input_client: client, input_task_id: taskId, input_start: start, input_end: end,
   });
 }
 

@@ -92,17 +92,17 @@ export const SETTING_SCHEMA = {
   },
   record_preserve_time: {
     type: 'integer',
-    defaultValue: '72',
+    defaultValue: '168',
     public: false,
     min: 1,
-    max: 72,
+    max: 168,
   },
   ping_record_preserve_time: {
     type: 'integer',
-    defaultValue: '72',
+    defaultValue: '168',
     public: false,
     min: 1,
-    max: 72,
+    max: 168,
   },
   record_persist_interval_sec: {
     type: 'integer',

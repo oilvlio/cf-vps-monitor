@@ -90,8 +90,8 @@ interface CapacityEstimate {
   };
 }
 
-const DEFAULT_RETENTION_HOURS = 72;
-const MAX_RETENTION_HOURS = 72;
+const DEFAULT_RETENTION_HOURS = 168;
+const MAX_RETENTION_HOURS = 168;
 const DEFAULT_ACTIVE_SAMPLE_SEC = 3;
 const DEFAULT_IDLE_UPLOAD_SEC = 120;
 const MIN_IDLE_UPLOAD_SEC = 60;
@@ -172,6 +172,12 @@ function sumRowCounts(counts: CapacityEstimate['expired_row_counts']): number {
 
 function dailySamplesPerClient(intervalSec: number): number {
   return intervalSec > 0 ? Math.ceil(86400 / intervalSec) : 0;
+}
+
+function rollupRowsPerClient(retentionHours: number, rawSamplesPerDay: number): number {
+  const hours = Math.max(0, Math.min(retentionHours, 168));
+  return Math.ceil(Math.min(hours, 24) * rawSamplesPerDay / 24)
+    + Math.ceil(Math.max(0, hours - 24));
 }
 
 function estimateCapacityCountCheckIntervalSec(estimatedRows: number, highWatermarkRows: number): number {
@@ -430,9 +436,18 @@ export default function SettingsGeneral() {
     const pingResultReportsPerDay = hasLocalCapacityEdits
       ? localPingResultReportsPerDay
       : Math.max(localPingResultReportsPerDay, Number(capacity?.ping_result_reports_per_day || 0));
-    const estimatedMonitorRowsRetained = Math.ceil(monitorWritesPerDay * retentionHours / 24);
-    const estimatedGpuRowsRetained = Math.ceil(gpuSnapshotsPerDay * retentionHours / 24);
-    const estimatedPingRowsRetained = Math.ceil(pingRowsPerDay * retentionHours / 24);
+    const monitorRollupRows = rollupRowsPerClient(retentionHours, monitorWritesPerDay / Math.max(1, clients));
+    const gpuRollupRows = rollupRowsPerClient(retentionHours, gpuSnapshotsPerDay / Math.max(1, gpuClients));
+    const pingRollupRows = rollupRowsPerClient(retentionHours, pingRowsPerDay / Math.max(1, pingCoveredClients));
+    const estimatedMonitorRowsRetained = recordEnabled
+      ? Math.min(Math.ceil(monitorWritesPerDay * retentionHours / 24), clients * monitorRollupRows)
+      : 0;
+    const estimatedGpuRowsRetained = recordEnabled
+      ? Math.min(Math.ceil(gpuSnapshotsPerDay * retentionHours / 24), gpuClients * gpuRollupRows)
+      : 0;
+    const estimatedPingRowsRetained = recordEnabled
+      ? Math.min(Math.ceil(pingRowsPerDay * retentionHours / 24), pingCoveredClients * pingRollupRows)
+      : 0;
     const localEstimatedRowsRetained = estimatedMonitorRowsRetained + estimatedGpuRowsRetained + estimatedPingRowsRetained;
     const freeStorageBytes = capacity?.quota_reference?.database?.storage_bytes?.free_project_reference ||
       SUPABASE_FREE_DATABASE_STORAGE_REFERENCE_BYTES;
@@ -665,11 +680,11 @@ export default function SettingsGeneral() {
               </div>
               <SettingInput
                 label="数据保留时间（小时）"
-                description="单位为小时，最大 72 小时（3 天）；同时作用于监控历史和 Ping 历史"
+                description="单位为小时，最长 7 天；最近 24 小时保留原始采样，之后按 1 小时自动降采样"
                 value={getSettingValue(settings, 'record_preserve_time', getSettingValue(settings, 'ping_record_preserve_time', String(DEFAULT_RETENTION_HOURS)))}
                 onChange={updateRetentionHours}
                 type="number"
-                placeholder="72"
+                placeholder="168"
                 width="100%"
               />
               <SettingInput
@@ -805,7 +820,7 @@ export default function SettingsGeneral() {
                     tone={derived.cappedRowCounts ? 'amber' : derived.hasActualRowCounts ? 'green' : 'blue'}
                     density="short"
                   />
-                  <EstimateMetric label="保留时间" value={`${derived.retentionHours} 小时`} density="short" />
+                  <EstimateMetric label="保留时间" value={`${derived.retentionHours} 小时（降采样）`} density="short" />
                   <EstimateMetric label="Ping 间隔" value={`${derived.pingRecordPersistIntervalSec} 秒`} density="short" />
                 </div>
                 <div className="quota-estimate-metric-column quota-estimate-metric-column-medium">

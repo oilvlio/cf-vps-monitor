@@ -1,4 +1,4 @@
-import { CF_MONITOR_REPOSITORY } from './projectLinks';
+import { CF_MONITOR_AGENT_REPOSITORY } from './projectLinks';
 
 export type AgentInstallPlatform = 'unix' | 'windows';
 
@@ -38,8 +38,8 @@ export const defaultAgentInstallOptions: AgentInstallOptions = {
 
 export const CF_MONITOR_BRANCH = 'main';
 export const CF_MONITOR_AGENT_SCRIPT_REF = `refs/heads/${CF_MONITOR_BRANCH}`;
-export const CF_MONITOR_RELEASE_BASE = `https://github.com/${CF_MONITOR_REPOSITORY}/releases/latest/download`;
-export const CF_MONITOR_AGENT_SCRIPT_BASE = `https://raw.githubusercontent.com/${CF_MONITOR_REPOSITORY}/${CF_MONITOR_AGENT_SCRIPT_REF}/agent`;
+export const CF_MONITOR_RELEASE_BASE = `https://github.com/${CF_MONITOR_AGENT_REPOSITORY}/releases/latest/download`;
+export const CF_MONITOR_AGENT_SCRIPT_BASE = `https://raw.githubusercontent.com/${CF_MONITOR_AGENT_REPOSITORY}/${CF_MONITOR_AGENT_SCRIPT_REF}/agent`;
 
 function isLocalHttpHost(hostname: string) {
   const host = hostname.toLowerCase();
@@ -130,8 +130,8 @@ export function cfMonitorAgentScriptUrl(
   const ref = normalizeScriptRef(scriptRef);
   const tag = normalizeReleaseTag(releaseTag);
   const base = tag
-      ? `https://github.com/${CF_MONITOR_REPOSITORY}/releases/download/${tag}`
-      : `https://raw.githubusercontent.com/${CF_MONITOR_REPOSITORY}/${ref}/agent`;
+      ? `https://github.com/${CF_MONITOR_AGENT_REPOSITORY}/releases/download/${tag}`
+      : `https://raw.githubusercontent.com/${CF_MONITOR_AGENT_REPOSITORY}/${ref}/agent`;
   return proxiedUrl(`${base}/${scriptFile}`, ghproxy);
 }
 
@@ -191,7 +191,7 @@ export function buildAgentInstallCommand({
   const scriptRef = options.scriptRef?.trim();
   const installMode = ['system', 'user'].includes(options.installMode) ? options.installMode : '';
   const dir = options.dir.trim();
-  const serviceName = options.serviceName.trim();
+  const serviceName = options.serviceName.trim() || 'cf-vps-monitor-agent';
   const effectiveInstanceId = normalizeInstanceId(instanceId || nodeName);
   const effectiveNodeName = nodeName?.trim();
   const mountInclude = options.mountInclude.trim();

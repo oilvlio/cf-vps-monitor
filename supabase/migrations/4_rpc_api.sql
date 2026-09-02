@@ -818,9 +818,13 @@ declare
   old_order integer;
 begin
   for input_id in
-    select distinct value::integer
-    from jsonb_array_elements_text(case when jsonb_typeof(input_ids) = 'array' then input_ids else '[]'::jsonb end) as value
-    where value ~ '^[0-9]+$' and value::integer > 0
+    select item.value::integer
+    from jsonb_array_elements_text(
+      case when jsonb_typeof(input_ids) = 'array' then input_ids else '[]'::jsonb end
+    ) with ordinality as item(value, ord)
+    where item.value ~ '^[0-9]+$' and item.value::integer > 0
+    group by item.value::integer
+    order by min(item.ord)
   loop
     final_ids := array_append(final_ids, input_id);
   end loop;

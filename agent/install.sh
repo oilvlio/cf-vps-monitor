@@ -26,7 +26,7 @@ YES="0"
 KEEP_FILES="0"
 INSTALL_GHPROXY=""
 PROXY=""
-CF_MONITOR_REPOSITORY="kadidalax/cf-vps-monitor"
+CF_MONITOR_REPOSITORY="oilvlio/cf-vps-monitor"
 CF_MONITOR_BRANCH="main"
 CF_MONITOR_RELEASE_TAG=""
 CF_MONITOR_RELEASE_BASE="https://github.com/${CF_MONITOR_REPOSITORY}/releases/latest/download"
@@ -587,9 +587,12 @@ description="CF VPS Monitor Agent"
 command="${INSTALL_DIR}/cf-vps-monitor-agent"
 command_args="--interval ${INTERVAL} --ping-interval ${PING_INTERVAL} --traffic-reset-day ${TRAFFIC_RESET_DAY}"
 command_user="${AGENT_USER}:${AGENT_USER}"
-command_background=true
 pidfile="/run/\${RC_SVCNAME}.pid"
 directory="${INSTALL_DIR}"
+supervisor="supervise-daemon"
+respawn_delay=5
+respawn_max=0
+respawn_period=60
 output_log="/var/log/\${RC_SVCNAME}.log"
 error_log="/var/log/\${RC_SVCNAME}.log"
 
@@ -602,6 +605,7 @@ start_pre() {
   export CF_MONITOR_MOUNT_INCLUDE CF_MONITOR_MOUNT_EXCLUDE CF_MONITOR_NIC_INCLUDE CF_MONITOR_NIC_EXCLUDE
   export CF_MONITOR_TRAFFIC_RESET_DAY CF_MONITOR_TRAFFIC_STATE_FILE
   checkpath -d -m 0755 -o ${AGENT_USER}:${AGENT_USER} "${STATE_DIR}"
+  checkpath -f -m 0644 -o ${AGENT_USER}:${AGENT_USER} "/var/log/\${RC_SVCNAME}.log"
 }
 EOF
 )

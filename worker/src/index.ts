@@ -308,9 +308,9 @@ app.use('/api/*', async (c, next) => {
   return undefined;
 });
 
-app.get('/agent/install.sh', (c) => c.redirect('https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/agent/install.sh', 302));
-app.get('/agent/install-linux.sh', (c) => c.redirect('https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/agent/install-linux.sh', 302));
-app.get('/agent/install-windows.ps1', (c) => c.redirect('https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/agent/install-windows.ps1', 302));
+app.get('/agent/install.sh', (c) => c.redirect('https://raw.githubusercontent.com/oilvlio/cf-vps-monitor/main/agent/install.sh', 302));
+app.get('/agent/install-linux.sh', (c) => c.redirect('https://raw.githubusercontent.com/oilvlio/cf-vps-monitor/main/agent/install-linux.sh', 302));
+app.get('/agent/install-windows.ps1', (c) => c.redirect('https://raw.githubusercontent.com/oilvlio/cf-vps-monitor/main/agent/install-windows.ps1', 302));
 
 // 公开 API，无认证
 app.route('/api/setup', setupRoutes);
@@ -509,14 +509,15 @@ async function runRecordCleanup(context: ScheduledRunContext, now: Date): Promis
   if (Number.isFinite(lastCleanupAt) && now.getTime() - lastCleanupAt < RECORD_CLEANUP_INTERVAL_MS) {
     return;
   }
-  const recordHours = Math.min(72, Math.max(1, Number(settings['record_preserve_time'] || 72)));
-  const pingHours = Math.min(72, Math.max(1, Number(settings['ping_record_preserve_time'] || recordHours)));
+  const recordHours = Math.min(168, Math.max(1, Number(settings['record_preserve_time'] || 168)));
+  const pingHours = Math.min(168, Math.max(1, Number(settings['ping_record_preserve_time'] || recordHours)));
   const auditHours = Math.max(24, Number(settings['audit_log_preserve_time'] || 2160));
 
   const recordBefore = new Date(now.getTime() - recordHours * 60 * 60 * 1000).toISOString();
   const pingBefore = new Date(now.getTime() - pingHours * 60 * 60 * 1000).toISOString();
   const auditBefore = new Date(now.getTime() - auditHours * 60 * 60 * 1000).toISOString();
 
+  const rolledUp = await db.buildHistoryRollup(context.database, new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString());
   const recordDeleted = await db.deleteOldRecords(context.database, recordBefore);
   const websiteDeleted = await db.deleteOldWebsiteChecks(context.database, recordBefore);
   const pingDeleted = await db.deleteOldPingRecords(context.database, pingBefore);
@@ -538,6 +539,7 @@ async function runRecordCleanup(context: ScheduledRunContext, now: Date): Promis
       ping_records: pingBefore,
       audit_logs: auditBefore,
     },
+    rolled_up: rolledUp,
     deleted,
   })}`);
 }

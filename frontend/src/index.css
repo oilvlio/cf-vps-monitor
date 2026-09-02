@@ -3940,10 +3940,31 @@ html[data-monitor-theme='aurora'] .nav-logo-mark {
 
 .instance-ping-series-item {
   min-width: 0;
+  width: 100%;
+  display: block;
+  font: inherit;
+  color: inherit;
+  text-align: left;
   border: 1px solid;
   border-left-width: 4px;
   border-radius: 7px;
   padding: 7px 8px;
+  cursor: pointer;
+  transition: opacity 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+}
+
+.instance-ping-series-item:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--gray-12) 12%, transparent);
+}
+
+.instance-ping-series-item:focus-visible {
+  outline: 2px solid var(--accent-8);
+  outline-offset: 2px;
+}
+
+.instance-ping-series-item.is-unselected {
+  opacity: 0.42;
 }
 
 .instance-ping-series-stat {

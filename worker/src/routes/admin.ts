@@ -1020,6 +1020,12 @@ function estimatePingSnapshotRowsPerDay(
   return rowsPerDay;
 }
 
+function estimateRollupRowsPerClient(retentionHours: number, rawSamplesPerDay: number): number {
+  const hours = Math.max(0, Math.min(retentionHours, 168));
+  return Math.ceil(Math.min(hours, 24) * rawSamplesPerDay / 24)
+    + Math.ceil(Math.max(0, hours - 24));
+}
+
 function estimateAgentPingTaskPullsPerDay(
   clientCount: number,
   pingTasks: db.PingTaskEstimateRow[],
@@ -1061,8 +1067,8 @@ async function getCapacityRowCounts(
   settings: Record<string, string>,
   forceRefresh = false,
 ): Promise<CapacityRowCountSnapshot> {
-  const recordHours = Math.min(72, parsePositiveNumber(settings.record_preserve_time, 72));
-  const pingHours = Math.min(72, parsePositiveNumber(settings.ping_record_preserve_time, recordHours));
+  const recordHours = Math.min(168, parsePositiveNumber(settings.record_preserve_time, 168));
+  const pingHours = Math.min(168, parsePositiveNumber(settings.ping_record_preserve_time, recordHours));
   const auditHours = Math.max(24, parsePositiveNumber(settings.audit_log_preserve_time, 2160));
   const cacheKey = `${recordHours}:${pingHours}:${auditHours}`;
   const nowMs = Date.now();
@@ -1124,8 +1130,8 @@ export async function buildCapacityEstimate(database: db.QueryDatabase, options:
   const gpuClientCount = clientCapacityCounts.gpu_clients;
   const settings = buildAdminSettings(rawSettings);
   const recordEnabled = settings.record_enabled !== 'false';
-  const recordPreserveHours = Math.min(72, parsePositiveNumber(settings.record_preserve_time, 72));
-  const pingPreserveHours = Math.min(72, parsePositiveNumber(settings.ping_record_preserve_time, recordPreserveHours));
+  const recordPreserveHours = Math.min(168, parsePositiveNumber(settings.record_preserve_time, 168));
+  const pingPreserveHours = Math.min(168, parsePositiveNumber(settings.ping_record_preserve_time, recordPreserveHours));
   const sampleIntervalSec = Math.max(3, parsePositiveNumber(settings.live_poll_active_interval_sec, 3));
   const idleIntervalSec = Math.max(60, parsePositiveNumber(settings.live_poll_idle_interval_sec, 120));
   const persistIntervalSec = Math.max(3, parsePositiveNumber(settings.record_persist_interval_sec, 120));
@@ -1195,9 +1201,18 @@ export async function buildCapacityEstimate(database: db.QueryDatabase, options:
     agentWebsocketConnectsPerDay;
   const pingRecordsSavedPerDay = Math.max(0, legacyPingRecordsPerDay - pingRecordsPerDay);
   const totalEstimatedBusinessRowsPerDay = monitorRecordsPerDay + gpuSnapshotsPerDay + pingRecordsPerDay;
-  const estimatedMonitorRecordsRetained = Math.ceil(monitorRecordsPerDay * recordPreserveHours / 24);
-  const estimatedGpuSnapshotsRetained = Math.ceil(gpuSnapshotsPerDay * recordPreserveHours / 24);
-  const estimatedPingRecordsRetained = Math.ceil(pingRecordsPerDay * pingPreserveHours / 24);
+  const monitorRollupRows = estimateRollupRowsPerClient(recordPreserveHours, monitorRecordsPerDay / Math.max(1, clientCount));
+  const pingRollupRows = estimateRollupRowsPerClient(pingPreserveHours, pingRecordsPerDay / Math.max(1, clientCount));
+  const estimatedMonitorRecordsRetained = recordEnabled
+    ? Math.min(Math.ceil(monitorRecordsPerDay * recordPreserveHours / 24), clientCount * monitorRollupRows)
+    : 0;
+  const estimatedGpuSnapshotsRetained = recordEnabled
+    ? Math.min(Math.ceil(gpuSnapshotsPerDay * recordPreserveHours / 24), gpuClientCount * monitorRollupRows)
+    : 0;
+  const estimatedPingRecordsRetained = recordEnabled
+    ? Math.min(Math.ceil(pingRecordsPerDay * pingPreserveHours / 24),
+      (pingRecordsPerDay > 0 ? Math.ceil(pingRecordsPerDay / Math.max(1, Math.ceil(86400 / unifiedPingIntervalSec))) : 0) * pingRollupRows)
+    : 0;
   const estimatedLegacyPingRecordsRetained = Math.ceil(legacyPingRecordsPerDay * pingPreserveHours / 24);
   const estimatedRowsRetained = estimatedMonitorRecordsRetained + estimatedGpuSnapshotsRetained + estimatedPingRecordsRetained;
   const estimatedStorageBytes = estimatedMonitorRecordsRetained * ESTIMATED_MONITOR_RECORD_BYTES
@@ -1281,14 +1296,15 @@ export async function buildCapacityEstimate(database: db.QueryDatabase, options:
 
 async function runMaintenanceCleanup(database: db.QueryDatabase, username: string, now = new Date()) {
   const settings = buildAdminSettings(await db.getSettingsByKeys(database, MAINTENANCE_CLEANUP_SETTING_KEYS));
-  const recordHours = Math.min(72, Math.max(1, Number(settings.record_preserve_time || 72)));
-  const pingHours = Math.min(72, Math.max(1, Number(settings.ping_record_preserve_time || recordHours)));
+  const recordHours = Math.min(168, Math.max(1, Number(settings.record_preserve_time || 168)));
+  const pingHours = Math.min(168, Math.max(1, Number(settings.ping_record_preserve_time || recordHours)));
   const auditHours = Math.max(24, Number(settings.audit_log_preserve_time || 2160));
   const before = {
     records: new Date(now.getTime() - recordHours * 60 * 60 * 1000).toISOString(),
     ping_records: new Date(now.getTime() - pingHours * 60 * 60 * 1000).toISOString(),
     audit_logs: new Date(now.getTime() - auditHours * 60 * 60 * 1000).toISOString(),
   };
+  const rolledUp = await db.buildHistoryRollup(database, new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString());
   const expiredBacklogBefore = await db.getExpiredRowCounts(database, before);
   const maxExpiredBacklog = Math.max(
     expiredBacklogBefore.records,
@@ -1310,6 +1326,7 @@ async function runMaintenanceCleanup(database: db.QueryDatabase, username: strin
   const result = {
     success: true,
     before,
+    rolled_up: rolledUp,
     cleanup_options: cleanupOptions,
     deleted,
     orphan_cleanup: orphanCleanup,

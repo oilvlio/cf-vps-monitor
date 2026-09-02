@@ -399,6 +399,17 @@ export async function getRecordsByTimeRangeLimited(
   return sba.getSupabaseRecordsByTimeRangeLimited(database.env, client, start, end, limit);
 }
 
+export async function getRecordsByTimeRangeBucketed(
+  database: QueryDatabase,
+  client: string,
+  start: string,
+  end: string,
+  bucketSec: number,
+  limit = 1000,
+): Promise<t.MonitorRecord[]> {
+  return sba.getSupabaseRecordsByTimeRangeBucketed(database.env, client, start, end, bucketSec, limit);
+}
+
 export async function getRecordsByTimeRangePaged(
   database: QueryDatabase,
   client: string,
@@ -490,6 +501,22 @@ export async function deleteOldPingRecords(
   return sba.deleteSupabaseOldPingRecords(database.env, beforeTime, options);
 }
 
+export async function getGPURollupRange(database: QueryDatabase, client: string, start: string, end: string): Promise<t.GPUHistoryRecord[]> {
+  return sba.getSupabaseGpuRollupRange(database.env, client, start, end);
+}
+
+export async function getRecordsRollupRange(database: QueryDatabase, client: string, start: string, end: string): Promise<t.MonitorRecord[]> {
+  return sba.getSupabaseRecordsRollupRange(database.env, client, start, end);
+}
+
+export async function compactHistory(database: QueryDatabase, now: string): Promise<Record<string, number>> {
+  return sba.compactSupabaseHistory(database.env, now);
+}
+
+export async function buildHistoryRollup(database: QueryDatabase, before: string): Promise<Record<string, unknown>> {
+  return sba.buildSupabaseHistoryRollup(database.env, before);
+}
+
 export async function clearAllRecords(
   database: QueryDatabase,
 ): Promise<t.ClearAllRecordsResult> {
@@ -517,6 +544,41 @@ export async function getPingRecordsForTasks(
   cursor?: string,
 ): Promise<Record<string, t.PingHistoryRecord[]>> {
   return sba.getSupabasePingRecordsForTasks(database.env, client, taskIds, limit, cursor);
+}
+
+export async function getPingRecordsForTasksRange(
+  database: QueryDatabase,
+  client: string,
+  taskIds: number[],
+  start: string | undefined,
+  end: string | undefined,
+  limit: number = 1000,
+): Promise<Record<string, t.PingHistoryRecord[]>> {
+  return sba.getSupabasePingRecordsForTasksRange(database.env, client, taskIds, start, end, limit);
+}
+
+export async function getPingRecordsForTasksRangeBucketed(
+  database: QueryDatabase,
+  client: string,
+  taskIds: number[],
+  start: string | undefined,
+  end: string | undefined,
+  bucketSec: number,
+  limit = 1000,
+): Promise<Record<string, t.PingHistoryRecord[]>> {
+  return sba.getSupabasePingRecordsForTasksRangeBucketed(
+    database.env,
+    client,
+    taskIds,
+    start,
+    end,
+    bucketSec,
+    limit,
+  );
+}
+
+export async function getPingRollupRange(database: QueryDatabase, client: string, taskId: number, start: string, end: string): Promise<t.PingHistoryRecord[]> {
+  return sba.getSupabasePingRollupRange(database.env, client, taskId, start, end);
 }
 
 export async function getPingRecordsPaged(

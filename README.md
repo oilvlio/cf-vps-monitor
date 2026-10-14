@@ -28,7 +28,7 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 
 | 目录 | 说明 |
 | --- | --- |
-| `frontend/` | React + Vite + Radix UI + Tailwind，构建产物由 Workers Static Assets 托管 |
+| `frontend/` | React + Vite + Radix UI，构建产物由 Workers Static Assets 托管 |
 | `worker/` | Hono Worker、Durable Objects、Cron Triggers、Supabase HTTP RPC 数据层 |
 | `agent/` | Go Agent，支持 WebSocket/HTTP 上报和 Unix/Windows 安装脚本 |
 | `supabase/migrations/` | Supabase 表、索引、RLS、RPC、授权和默认数据 |

@@ -130,7 +130,7 @@ OpenRC 每次启动会准备服务账户专用日志并检查启动后进程存�
 卸载单个 Unix 实例：
 
 ```bash
-wget -qO- 'https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/refs/heads/main/agent/install.sh' | sh -s -- --uninstall -i 实例ID
+wget -qO- 'https://raw.githubusercontent.com/oilvlio/cf-vps-monitor/refs/heads/main/agent/install.sh' | sh -s -- --uninstall -i 实例ID
 ```
 
 卸载单个 Windows 实例：

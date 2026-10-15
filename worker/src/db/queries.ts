@@ -342,77 +342,6 @@ export async function deletePingTask(database: QueryDatabase, id: number): Promi
   return sba.deleteSupabasePingTask(database.env, id);
 }
 
-export async function getWebsiteMonitor(database: QueryDatabase, id: number): Promise<t.WebsiteMonitor | null> {
-  return sba.getSupabaseWebsiteMonitor(database.env, id);
-}
-
-export async function listWebsiteMonitors(database: QueryDatabase, _fresh = false): Promise<t.WebsiteMonitor[]> {
-  return sba.listSupabaseWebsiteMonitors(database.env);
-}
-
-export async function listPublicWebsiteMonitors(database: QueryDatabase, checkLimit: number = 60, _fresh = false, periodHours = 24, includeHidden = false): Promise<t.PublicWebsiteMonitor[]> {
-  return sba.getSupabasePublicWebsites(database.env, periodHours, checkLimit, includeHidden);
-}
-
-export async function getPublicWebsiteMonitorById(database: QueryDatabase, id: number, checkLimit: number = 120, includeHidden = false): Promise<t.PublicWebsiteMonitor | null> {
-  return sba.getSupabasePublicWebsiteMonitorById(database.env, id, checkLimit, includeHidden);
-}
-
-export async function createWebsiteMonitor(database: QueryDatabase, monitor: t.WebsiteMonitorInput): Promise<t.WebsiteMonitor> {
-  return sba.createSupabaseWebsiteMonitor(database.env, monitor);
-}
-
-export async function updateWebsiteMonitor(database: QueryDatabase, id: number, monitor: Partial<t.WebsiteMonitorInput>): Promise<boolean> {
-  return sba.updateSupabaseWebsiteMonitor(database.env, id, monitor);
-}
-
-export async function updateWebsiteMonitorAndReturn(database: QueryDatabase, id: number, monitor: Partial<t.WebsiteMonitorInput>): Promise<t.WebsiteMonitor | null> {
-  return sba.updateSupabaseWebsiteMonitorAndReturn(database.env, id, monitor);
-}
-
-export async function deleteWebsiteMonitor(database: QueryDatabase, id: number): Promise<void> {
-  return sba.deleteSupabaseWebsiteMonitor(database.env, id);
-}
-
-export async function reorderWebsiteMonitors(database: QueryDatabase, orderedIds: number[]): Promise<number> {
-  return sba.reorderSupabaseWebsiteMonitors(database.env, orderedIds);
-}
-
-export async function setWebsiteMonitorVisibility(database: QueryDatabase, id: number, hidden: boolean): Promise<boolean> {
-  return sba.setSupabaseWebsiteMonitorVisibility(database.env, id, hidden);
-}
-
-export async function setWebsiteMonitorEnabled(database: QueryDatabase, id: number, enabled: boolean): Promise<boolean> {
-  return sba.setSupabaseWebsiteMonitorEnabled(database.env, id, enabled);
-}
-
-export async function listDueWebsiteMonitors(database: QueryDatabase, now: string, limit: number = 50): Promise<t.WebsiteMonitor[]> {
-  return sba.listSupabaseDueWebsiteMonitors(database.env, now, limit);
-}
-
-export async function recordWebsiteCheck(database: QueryDatabase, check: t.WebsiteCheckInput): Promise<t.WebsiteMonitor | null> {
-  return sba.recordSupabaseWebsiteCheck(database.env, check);
-}
-
-export async function listAgentWebsiteProbeTasks(
-  database: QueryDatabase,
-  client: string,
-  now: string,
-  limit: number = 20,
-): Promise<t.WebsiteMonitor[]> {
-  return sba.listSupabaseAgentWebsiteProbeTasks(database.env, client, now, limit);
-}
-
-export async function listWebsiteChecks(database: QueryDatabase, monitorId: number, limit: number = 60): Promise<t.WebsiteCheck[]> {
-  return sba.listSupabaseWebsiteChecks(database.env, monitorId, limit);
-}
-
-export async function markWebsiteMonitorNotified(
-  database: QueryDatabase, id: number, time: string | null, expected: t.WebsiteNotificationExpectation,
-): Promise<boolean> {
-  return sba.markSupabaseWebsiteMonitorNotified(database.env, id, time, expected);
-}
-
 export async function insertRecord(database: QueryDatabase, record: t.MonitorRecord): Promise<void> {
   return sba.insertSupabaseMonitorRecord(database.env, record);
 }
@@ -519,14 +448,6 @@ export async function deleteOldRecords(
   options: t.DeleteOldRowsOptions = {},
 ): Promise<{ records: number; gpu_records: number; gpu_snapshots: number; has_more: boolean }> {
   return sba.deleteSupabaseOldRecords(database.env, beforeTime, options);
-}
-
-export async function deleteOldWebsiteChecks(
-  database: QueryDatabase,
-  beforeTime: string,
-  options: t.DeleteOldRowsOptions = {},
-): Promise<{ website_checks: number; has_more: boolean }> {
-  return sba.deleteSupabaseOldWebsiteChecks(database.env, beforeTime, options);
 }
 
 export async function deleteOldPingRecords(

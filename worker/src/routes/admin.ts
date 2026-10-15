@@ -36,7 +36,6 @@ import { TELEGRAM_MESSAGE_MAX_CHARS } from '../utils/telegram';
 import { EMAIL_MESSAGE_MAX_CHARS } from '../utils/email';
 import { WEBHOOK_MESSAGE_MAX_CHARS } from '../utils/webhook';
 import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
-import { checkWebsiteMonitorHttp, validateWebsiteMonitorInput } from '../utils/website-monitor';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { readJsonWithLimit, readRequestBytesWithLimit } from '../utils/request-body';
 import { bytesToBase64 } from '../utils/theme-package';
@@ -597,54 +596,6 @@ async function broadcastLiveMetadataChanged(c: AdminContext, detail: Record<stri
   } catch {
     // Cache invalidation is enough for correctness; live broadcast only improves freshness.
   }
-}
-
-type WebsiteMonitorMetadataDetail = true | {
-  upsert?: unknown[];
-  remove?: number[];
-  reorder?: number[];
-};
-
-/**
- * 网站监控的公开广播载荷。
- *
- * 广播默认投递给**所有**观众（含游客），而管理端写操作推的是完整 monitor 记录，
- * 因此必须在此裁剪，否则「对游客隐藏」只是前端不渲染、数据仍在 WebSocket 帧里。
- * - 勾了「对游客隐藏此监控」：整条不进公开载荷
- * - 勾了「对游客隐藏地址」：url 置为 null
- */
-function publicWebsiteMetadataDetail(detail: WebsiteMonitorMetadataDetail): WebsiteMonitorMetadataDetail {
-  if (detail === true) return true;
-  if (!Array.isArray(detail.upsert)) return detail;
-  const isRecord = (v: unknown): v is Record<string, unknown> =>
-    Boolean(v) && typeof v === 'object' && !Array.isArray(v);
-  const upsert = detail.upsert
-    .filter(item => !(isRecord(item) && item.hidden === true))
-    .map(item => (isRecord(item) && item.hide_url === true ? { ...item, url: null } : item));
-  return { ...detail, upsert };
-}
-const WEBSITE_MONITOR_REQUIRED_EDIT_FIELDS = [
-  'name',
-  'url',
-  'method',
-  'expected_status_min',
-  'expected_status_max',
-  'interval_sec',
-  'timeout_sec',
-  'grace_period_sec',
-  'enabled',
-  'hidden',
-];
-
-function invalidateWebsiteMonitorPublicState(c: AdminContext, websites: WebsiteMonitorMetadataDetail = true): void {
-  invalidateAdminPublicMetadata(c);
-  // 分两份投递：管理员收完整记录，游客收裁剪后的载荷
-  runAdminBackground(c, broadcastLiveMetadataChanged(c, { websites, audience: 'admin' }));
-  runAdminBackground(c, broadcastLiveMetadataChanged(c, {
-    websites: publicWebsiteMetadataDetail(websites),
-    audience: 'public',
-  }));
-  runAdminBackground(c, refreshLiveAgentPolicy(c));
 }
 
 type PingTaskAuditSource = Pick<db.PingTask, 'name' | 'type' | 'target' | 'all_clients' | 'clients' | 'interval_sec'>;
@@ -1348,9 +1299,8 @@ async function runMaintenanceCleanup(database: db.QueryDatabase, username: strin
   const { has_more: recordsMore, ...recordDeleted } = await db.deleteOldRecords(database, before.records, cleanupOptions);
   const { has_more: pingMore, ...pingDeleted } = await db.deleteOldPingRecords(database, before.ping_records, cleanupOptions);
   const { has_more: auditMore, ...auditDeleted } = await db.deleteOldAuditLogs(database, before.audit_logs, cleanupOptions);
-  const { has_more: websitesMore, ...websiteDeleted } = await db.deleteOldWebsiteChecks(database, before.records, cleanupOptions);
-  const hasMore = recordsMore || pingMore || auditMore || websitesMore;
-  const deleted = { ...recordDeleted, ...pingDeleted, ...auditDeleted, ...websiteDeleted };
+  const hasMore = recordsMore || pingMore || auditMore;
+  const deleted = { ...recordDeleted, ...pingDeleted, ...auditDeleted };
   const orphanCleanup = await db.cleanupOrphanClientData(database);
   const expiredBacklogAfter = await db.getExpiredRowCounts(database, before);
   invalidateCapacityEstimateCache();
@@ -1611,12 +1561,23 @@ adminRoutes.post('/clients/:uuid/edit', async (c) => {
   }
 });
 
+const HOME_PING_MIGRATION_HINT = '数据库还没有执行迁移 9_home_ping_task，请打开 /db-init 页面，输入 Supabase Access Token 更新数据库后再试。';
+
+// 迁移还没跑时，PostgREST 会对不存在的函数返回 404（PGRST202）。
+// 按 status / message 鸭子类型判断，不依赖 instanceof（模块被重复加载时 instanceof 会失效）。
+function isMissingHomePingSchema(e: unknown): boolean {
+  const err = e as { status?: unknown; message?: unknown } | null;
+  const message = typeof err?.message === 'string' ? err.message : '';
+  return Number(err?.status) === 404 || /PGRST20\d|could not find the function/i.test(message);
+}
+
 // 首页探测点：节点 -> ping 任务 id。后台编辑节点时用它回填下拉框。
 adminRoutes.get('/home-ping', async (c) => {
   try {
     const assignments = await db.getHomePingAssignments(getDatabase(c.env));
     return c.json({ assignments: assignments || {} });
   } catch (e) {
+    if (isMissingHomePingSchema(e)) return c.json({ error: HOME_PING_MIGRATION_HINT, code: 'migration_required' }, 503);
     return c.json({ error: '读取首页探测点失败' }, 500);
   }
 });
@@ -1654,6 +1615,7 @@ adminRoutes.post('/clients/:uuid/home-ping', async (c) => {
     ));
     return c.json({ success: true, client: uuid, task_id: taskId });
   } catch (e) {
+    if (isMissingHomePingSchema(e)) return c.json({ error: HOME_PING_MIGRATION_HINT, code: 'migration_required' }, 503);
     const detail = String((e as { detail?: unknown; message?: unknown })?.detail ?? (e as Error)?.message ?? '');
     if (detail.includes('client_not_found')) return c.json({ error: '客户端不存在' }, 404);
     if (detail.includes('task_not_applicable')) return c.json({ error: '该探测任务没有应用到这个节点' }, 400);
@@ -2081,185 +2043,6 @@ adminRoutes.post('/ping/delete', async (c) => {
     return c.json({ success: true, id });
   } catch {
     return c.json({ error: '删除失败' }, 500);
-  }
-});
-
-// ============ 网站监控 ============
-
-adminRoutes.get('/websites', async (c) => {
-  const database = getDatabase(c.env);
-  return c.json(await db.listWebsiteMonitors(database, true));
-});
-
-adminRoutes.get('/websites/:id/checks', async (c) => {
-  const id = Number(c.req.param('id'));
-  if (!Number.isInteger(id) || id <= 0) {
-    return c.json({ error: '网站监控 ID 无效' }, 400);
-  }
-  const limit = Math.min(500, Math.max(1, Number(c.req.query('limit') || 120)));
-  const database = getDatabase(c.env);
-  return c.json(await db.listWebsiteChecks(database, id, limit));
-});
-
-adminRoutes.post('/websites/add', async (c) => {
-  try {
-    const parsed = await readAdminJsonObject(c);
-    if (!parsed.ok) return parsed.response;
-    const body = parsed.body;
-    const validated = validateWebsiteMonitorInput(body);
-    if (!validated.ok) return c.json({ error: '网站监控校验失败', code: validated.error }, 400);
-
-    const database = getDatabase(c.env);
-    const monitor = await db.createWebsiteMonitor(database, validated.value);
-    invalidateWebsiteMonitorPublicState(c, { upsert: [monitor] });
-    runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'website_add', `添加网站监控: ${monitor.name} ${monitor.url}`));
-    return c.json({ success: true, monitor });
-  } catch (error) {
-    console.error('[admin] website add failed:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '添加失败' }, 500);
-  }
-});
-
-adminRoutes.post('/websites/edit', async (c) => {
-  try {
-    const parsed = await readAdminJsonObject(c);
-    if (!parsed.ok) return parsed.response;
-    const body = parsed.body;
-    const id = Number(body.id);
-    if (!Number.isInteger(id) || id <= 0) {
-      return c.json({ error: '网站监控 ID 无效' }, 400);
-    }
-
-    const database = getDatabase(c.env);
-    const hasFullPayload = WEBSITE_MONITOR_REQUIRED_EDIT_FIELDS.every((field) => Object.prototype.hasOwnProperty.call(body, field));
-    const existing = hasFullPayload ? null : await db.getWebsiteMonitor(database, id);
-    if (!hasFullPayload && !existing) return c.json({ error: '网站监控不存在' }, 404);
-
-    const candidate = hasFullPayload ? body : { ...existing, ...body };
-    const validated = validateWebsiteMonitorInput(candidate);
-    if (!validated.ok) return c.json({ error: '网站监控校验失败', code: validated.error }, 400);
-
-    const monitor = await db.updateWebsiteMonitorAndReturn(database, id, validated.value);
-    if (!monitor) return c.json({ error: '网站监控不存在' }, 404);
-    invalidateWebsiteMonitorPublicState(c, { upsert: [monitor] });
-    runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'website_edit', `编辑网站监控: ${existing?.name || id} -> ${monitor.name}`));
-    return c.json({ success: true, changed: 1, monitor });
-  } catch (error) {
-    console.error('[admin] website edit failed:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '编辑失败' }, 500);
-  }
-});
-
-adminRoutes.post('/websites/visibility', async (c) => {
-  try {
-    const parsed = await readAdminJsonObject(c);
-    if (!parsed.ok) return parsed.response;
-    const body = parsed.body;
-    const id = Number(body.id);
-    const hidden = body.hidden;
-    if (!Number.isInteger(id) || id <= 0 || typeof hidden !== 'boolean') {
-      return c.json({ error: '网站监控显隐参数无效' }, 400);
-    }
-    const database = getDatabase(c.env);
-    const changed = await db.setWebsiteMonitorVisibility(database, id, hidden);
-    const monitor = await db.getWebsiteMonitor(database, id);
-    invalidateWebsiteMonitorPublicState(c, monitor ? {
-      upsert: [monitor],
-      remove: hidden ? [id] : undefined,
-    } : true);
-    runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'website_visibility', `网站监控 ${id} ${hidden ? '隐藏' : '显示'}`));
-    return c.json({ success: true, changed: changed ? 1 : 0 });
-  } catch (error) {
-    console.error('[admin] website visibility failed:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '设置失败' }, 500);
-  }
-});
-
-adminRoutes.post('/websites/enabled', async (c) => {
-  try {
-    const parsed = await readAdminJsonObject(c);
-    if (!parsed.ok) return parsed.response;
-    const body = parsed.body;
-    const id = Number(body.id);
-    const enabled = body.enabled;
-    if (!Number.isInteger(id) || id <= 0 || typeof enabled !== 'boolean') {
-      return c.json({ error: '网站监控启停参数无效' }, 400);
-    }
-    const database = getDatabase(c.env);
-    const changed = await db.setWebsiteMonitorEnabled(database, id, enabled);
-    const monitor = await db.getWebsiteMonitor(database, id);
-    invalidateWebsiteMonitorPublicState(c, monitor ? { upsert: [monitor] } : true);
-    runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'website_enabled', `网站监控 ${id} ${enabled ? '启用' : '停用'}`));
-    return c.json({ success: true, changed: changed ? 1 : 0 });
-  } catch (error) {
-    console.error('[admin] website enabled failed:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '设置失败' }, 500);
-  }
-});
-
-adminRoutes.post('/websites/reorder', async (c) => {
-  try {
-    const parsed = await readAdminJsonObject(c);
-    if (!parsed.ok) return parsed.response;
-    const body = parsed.body;
-    const ids = Array.isArray(body.ids)
-      ? body.ids.map((id: unknown) => Number(id)).filter((id: number) => Number.isInteger(id) && id > 0)
-      : [];
-    if (ids.length === 0) return c.json({ error: '网站监控排序列表不能为空' }, 400);
-    if (new Set(ids).size !== ids.length) return c.json({ error: '网站监控排序列表不能包含重复 ID' }, 400);
-
-    const database = getDatabase(c.env);
-    const updated = await db.reorderWebsiteMonitors(database, ids);
-    invalidateWebsiteMonitorPublicState(c, { reorder: ids });
-    runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'website_reorder', `调整网站监控排序: ${ids.join(',')}`));
-    return c.json({ success: true, updated });
-  } catch (error) {
-    console.error('[admin] website reorder failed:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '排序失败' }, 400);
-  }
-});
-
-adminRoutes.post('/websites/delete', async (c) => {
-  try {
-    const parsed = await readAdminJsonObject(c);
-    if (!parsed.ok) return parsed.response;
-    const body = parsed.body;
-    const database = getDatabase(c.env);
-    const id = Number(body.id);
-    if (!Number.isInteger(id) || id <= 0) {
-      return c.json({ error: '网站监控 ID 无效' }, 400);
-    }
-    const existing = await db.getWebsiteMonitor(database, id);
-    if (!existing) return c.json({ error: '网站监控不存在' }, 404);
-    await db.deleteWebsiteMonitor(database, id);
-    invalidateWebsiteMonitorPublicState(c, { remove: [id] });
-    runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'website_delete', `删除网站监控: ${existing.name} ${existing.url}`));
-    return c.json({ success: true });
-  } catch (error) {
-    console.error('[admin] website delete failed:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '删除失败' }, 500);
-  }
-});
-
-adminRoutes.post('/websites/:id/check', async (c) => {
-  try {
-    const parsed = await readAdminJsonObject(c);
-    if (!parsed.ok) return parsed.response;
-    const id = Number(c.req.param('id'));
-    if (!Number.isInteger(id) || id <= 0) {
-      return c.json({ error: '网站监控 ID 无效' }, 400);
-    }
-    const database = getDatabase(c.env);
-    const monitor = await db.getWebsiteMonitor(database, id);
-    if (!monitor) return c.json({ error: '网站监控不存在' }, 404);
-    const check = await checkWebsiteMonitorHttp(monitor);
-    const updated = await db.recordWebsiteCheck(database, check);
-    invalidateWebsiteMonitorPublicState(c, updated ? { upsert: [updated] } : true);
-    runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'website_check', `手动检测网站监控: ${monitor.name}`));
-    return c.json({ success: true, monitor: updated, check });
-  } catch (error) {
-    console.error('[admin] website check failed:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '检测失败' }, 500);
   }
 });
 
@@ -3200,7 +2983,7 @@ adminRoutes.post('/upload/backup', async (c) => {
     invalidateAgentPingTaskCache();
     invalidateAllowedClientIdsCache();
     invalidateCapacityEstimateCache();
-    invalidateWebsiteMonitorPublicState(c);
+    runAdminBackground(c, refreshLiveAgentPolicy(c));
     if (validated.backup.clients !== undefined) {
       const authoritativeClients = await db.listClients(database, true);
       const synchronization = await liveDataStub(c).fetch(new Request('https://do/clients-restore', {

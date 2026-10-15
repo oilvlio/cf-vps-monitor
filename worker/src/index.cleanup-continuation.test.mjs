@@ -14,7 +14,6 @@ async function cleanupHarness(database) {
     db: {
       buildHistoryRollup: async () => ({}),
       deleteOldRecords: deletes('cfm_delete_old_records'),
-      deleteOldWebsiteChecks: deletes('cfm_delete_old_website_checks'),
       deleteOldPingRecords: deletes('cfm_delete_old_ping_records'),
       deleteOldAuditLogs: deletes('cfm_delete_old_audit_logs'),
       cleanupNotificationDeliveryState: (_connection, now, options = {}) => rpc(database, 'cfm_cleanup_notification_delivery_state', {
@@ -93,12 +92,10 @@ test('AUD-07 small delete budgets report remaining work for every history family
   try {
     await database.exec(`
       insert into clients (uuid) values ('node-a');
-      insert into website_monitors (id,name,url) values (1,'Synthetic','https://example.com');
-      insert into website_checks (monitor_id,checked_at,ok) select 1,'2026-01-01',true from generate_series(1,101);
       insert into ping_snapshots (client,time) select 'node-a','2026-01-01' from generate_series(1,101);
       insert into audit_logs (time) select '2026-01-01' from generate_series(1,101);
     `);
-    for (const name of ['cfm_delete_old_website_checks', 'cfm_delete_old_ping_records', 'cfm_delete_old_audit_logs']) {
+    for (const name of ['cfm_delete_old_ping_records', 'cfm_delete_old_audit_logs']) {
       const input = { input_before_time: '2026-09-01', input_max_batches: 1 };
       assert.equal((await rpc(database, name, input)).has_more, true, `${name} reports bounded backlog`);
       assert.equal((await rpc(database, name, input)).has_more, false, `${name} reports drained backlog`);

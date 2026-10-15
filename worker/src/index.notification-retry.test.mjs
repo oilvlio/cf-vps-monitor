@@ -68,23 +68,3 @@ test('AUD-08 partial load delivery retries only the failed node within the rule 
     assert.deepEqual(calls, ['load:A', 'load:B', 'load:B'], 'one successful node must not hide or duplicate a failed target');
   } finally { await database.close(); }
 });
-
-test('AUD-08 website down and recovery failures are retried without clearing notification state', async () => {
-  const database = await seededDatabase();
-  try {
-    await database.exec("insert into website_monitors(id,name,url,interval_sec,grace_period_sec,status,down_since,agent_probe_mode) values (1,'Site','https://example.com',60,30,'down','2026-09-05','off');");
-    const calls = [];
-    const responses = [false, true, false, true];
-    const h = await notificationHarness(database, subject => { calls.push(subject); return responses.shift(); });
-    await h.run('runWebsiteMonitorChecks', 0);
-    assert.equal((await rpc(database, 'cfm_website_monitors'))[0].last_notified_at, null);
-    await h.run('runWebsiteMonitorChecks', 2);
-    h.state.websiteUp = true;
-    await h.run('runWebsiteMonitorChecks', 4);
-    assert.ok((await rpc(database, 'cfm_website_monitors'))[0].last_notified_at, 'failed website recovery must remain pending');
-    await h.run('runWebsiteMonitorChecks', 6);
-    await h.run('runWebsiteMonitorChecks', 8);
-    assert.equal((await rpc(database, 'cfm_website_monitors'))[0].last_notified_at, null);
-    assert.deepEqual(calls, ['website-down:Site', 'website-down:Site', 'website-up:Site', 'website-up:Site']);
-  } finally { await database.close(); }
-});

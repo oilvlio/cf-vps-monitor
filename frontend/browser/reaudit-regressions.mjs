@@ -7,44 +7,6 @@ const playwrightModule = moduleFlag >= 0 ? process.argv[moduleFlag + 1] : proces
 const { origin, check, finish } = await createHarness({ selection, playwrightModule });
 
 try {
-  for (const transport of ['broadcast-channel', 'storage']) {
-    await check(`R-F01-${transport}`, 'private website addresses never enter public tabs or transport', async (page, data, context) => {
-      if (transport === 'storage') await context.addInitScript(() => { window.BroadcastChannel = undefined; });
-      data.authenticated = false;
-      data.websites[0].hide_url = true;
-      await page.goto(origin + '/?view=websites');
-      await page.getByText('Synthetic website', { exact: true }).waitFor();
-      assert.equal(await page.locator('.kuma-monitor-row a').count(), 0, 'Fixture: public HTTP strips private URLs');
-      await page.evaluate(() => {
-        window.reauditWebsiteMessages = [];
-        if (typeof BroadcastChannel !== 'undefined') {
-          window.reauditWebsiteChannel = new BroadcastChannel('cf-monitor:website-monitors-updated');
-          window.reauditWebsiteChannel.onmessage = event => window.reauditWebsiteMessages.push(event.data);
-        }
-        window.addEventListener('storage', event => {
-          if (event.key === 'cf-monitor:website-monitors-updated' && event.newValue) window.reauditWebsiteMessages.push(JSON.parse(event.newValue));
-        });
-      });
-      data.authenticated = true;
-      const admin = await context.newPage();
-      await admin.goto(origin + '/admin/websites');
-      await admin.getByRole('button', { name: '编辑', exact: true }).first().click();
-      const dialog = admin.getByRole('dialog', { name: '编辑监控', exact: true });
-      await dialog.getByRole('textbox', { name: '名称', exact: true }).fill('Renamed private-address monitor');
-      await dialog.getByRole('button', { name: '保存', exact: true }).click();
-      await dialog.waitFor({ state: 'hidden' });
-      await page.getByText('Renamed private-address monitor', { exact: true }).waitFor();
-      const messages = await page.evaluate(() => window.reauditWebsiteMessages);
-      data.observed = { transport, messages, links: await page.locator('.kuma-monitor-row a').evaluateAll(links => links.map(link => link.href)) };
-      assert.equal(data.observed.links.length, 0, 'R-F01: hidden addresses must remain absent after an administrator edit');
-      assert.equal(messages.length, 1, 'R-F01: one cross-tab message per mutation');
-      assert.equal(JSON.stringify(messages).includes('https://synthetic.invalid/private-path'), false, 'R-F01: private URLs must not be serialized into a public event');
-      assert.equal(await admin.evaluate(() => localStorage.getItem('cf-monitor:website-monitors-updated')), null, 'R-F01: fallback envelopes are temporary');
-      await admin.getByRole('button', { name: '编辑', exact: true }).first().click();
-      assert.equal(await admin.getByRole('dialog').getByRole('textbox', { name: '网址', exact: true }).inputValue(), 'https://synthetic.invalid/private-path', 'R-F01: administrators retain the editable address');
-    });
-  }
-
   for (const scope of ['general', 'site']) {
     for (const failure of ['server', 'network', 'invalid']) {
       await check(`R-F02-${scope}-${failure}`, 'failed settings initialization cannot unlock default-value saving', async (page, data) => {
@@ -100,7 +62,7 @@ try {
   });
   }
 
-  for (const domain of ['clients', 'websites']) {
+  for (const domain of ['clients']) {
     await check(`R-F04-${domain}`, 'a stale list refresh cannot overwrite a confirmed edit', async (page, data) => {
       const entered = deferred();
       const release = deferred();
@@ -115,8 +77,8 @@ try {
         return true;
       });
       try {
-        await page.goto(origin + (domain === 'clients' ? '/admin' : '/admin/websites'));
-        await page.getByText(domain === 'clients' ? 'Alpha Server' : 'Synthetic website', { exact: true }).first().waitFor();
+        await page.goto(origin + '/admin');
+        await page.getByText('Alpha Server', { exact: true }).first().waitFor();
         armed = true;
         await page.locator('.admin-refresh-button').click();
         const oldCall = await deadline(entered.promise, 'old list refresh starts');
@@ -134,14 +96,13 @@ try {
     });
   }
 
-  for (const domain of ['clients', 'websites']) {
+  for (const domain of ['clients']) {
     for (const mutation of ['hidden', 'order', 'failed-edit', 'remount', 'rapid-refresh']) {
       await check(`R-F04-${domain}-${mutation}`, 'list ownership preserves confirmed writes and route lifetimes', async (page, data) => {
         const entered = deferred();
         const release = deferred();
         let armed = false;
-        if (domain === 'clients') data.clients.push({ ...data.clients[0], uuid: 'node-b', name: 'Beta Server', sort_order: 1 });
-        else data.websites.push({ ...data.websites[0], id: 2, name: 'Second website', sort_order: 2 });
+        data.clients.push({ ...data.clients[0], uuid: 'node-b', name: 'Beta Server', sort_order: 1 });
         data.handlers.push(async ({ path, url, call, json }) => {
           if (!armed || path !== `/api/admin/${domain}` || !url.searchParams.has('refresh')) return false;
           armed = false;
@@ -151,9 +112,9 @@ try {
           await json(old);
           return true;
         });
-        const routePath = domain === 'clients' ? '/admin' : '/admin/websites';
-        const firstName = domain === 'clients' ? 'Alpha Server' : 'Synthetic website';
-        const names = () => page.locator(domain === 'clients' ? '.admin-node-card-name-row .admin-node-name-text' : '.admin-website-table-row .admin-website-name-text');
+        const routePath = '/admin';
+        const firstName = 'Alpha Server';
+        const names = () => page.locator('.admin-node-card-name-row .admin-node-name-text');
         try {
           await page.goto(origin + routePath);
           await page.getByText(firstName, { exact: true }).first().waitFor();
@@ -164,8 +125,8 @@ try {
             if (domain === 'clients') {
               await page.locator('.admin-node-card').first().getByRole('checkbox').check();
               await page.locator('.admin-selection-inline').getByRole('button', { name: '隐藏', exact: true }).click();
-            } else await page.locator('.admin-website-table-row').first().getByRole('button', { name: '隐藏', exact: true }).click();
-            await settleCall(page, await waitForCall(data, call => call.path.endsWith(domain === 'clients' ? '/batch-hide' : '/visibility')));
+            }
+            await settleCall(page, await waitForCall(data, call => call.path.endsWith('/batch-hide')));
           } else if (mutation === 'order') {
             const drag = page.getByRole('button', { name: `拖拽排序 ${firstName}`, exact: true });
             await drag.focus();
@@ -176,7 +137,7 @@ try {
             await page.keyboard.press('Space');
             await settleCall(page, await waitForCall(data, call => call.path === `/api/admin/${domain}/reorder`));
           } else if (mutation === 'failed-edit') {
-            const editPath = domain === 'clients' ? '/api/admin/clients/node-a/edit' : '/api/admin/websites/edit';
+            const editPath = '/api/admin/clients/node-a/edit';
             data.failures[`POST ${editPath}`] = 'Synthetic rejected edit';
             await page.getByRole('button', { name: '编辑', exact: true }).first().click();
             const dialog = page.getByRole('dialog');
@@ -200,116 +161,14 @@ try {
           await settleCall(page, oldCall);
           data.observed = { names: await names().allTextContents(), persisted: data[domain].map(item => ({ name: item.name, hidden: item.hidden })) };
           if (mutation === 'hidden') {
-            const row = page.locator(domain === 'clients' ? '.admin-node-card' : '.admin-website-table-row').filter({ hasText: firstName });
+            const row = page.locator('.admin-node-card').filter({ hasText: firstName });
             assert.equal(await row.getByText(domain === 'clients' ? '隐藏' : '对游客隐藏', { exact: true }).count(), 1, 'R-F04: confirmed visibility survives an older GET');
-          } else if (mutation === 'order') assert.equal(data.observed.names[0], domain === 'clients' ? 'Beta Server' : 'Second website', 'R-F04: confirmed order survives an older GET');
+          } else if (mutation === 'order') assert.equal(data.observed.names[0], 'Beta Server', 'R-F04: confirmed order survives an older GET');
           else assert.equal(data.observed.names[0], mutation === 'remount' ? 'After remount' : mutation === 'rapid-refresh' ? 'Latest refresh' : firstName);
         } finally { release.resolve(); }
       });
     }
   }
-
-  await check('R-F04-public-websites', 'a public website refresh cannot overtake a later invalidation', async (page, data) => {
-    data.authenticated = false;
-    const entered = deferred();
-    const release = deferred();
-    let armed = false;
-    data.handlers.push(async ({ path, call, json }) => {
-      if (!armed || path !== '/api/websites') return false;
-      armed = false;
-      const old = structuredClone(data.websites);
-      entered.resolve(call);
-      await release.promise;
-      await json(old);
-      return true;
-    });
-    try {
-      await page.goto(origin + '/?view=websites');
-      await page.getByText('Synthetic website', { exact: true }).waitFor();
-      armed = true;
-      await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
-      const old = await deadline(entered.promise, 'old public website read starts');
-      data.websites[0].name = 'Latest public website';
-      await page.evaluate(async () => (await import('/src/utils/websiteMonitorEvents.ts')).notifyWebsiteMonitorsUpdated());
-      await page.getByText('Latest public website', { exact: true }).waitFor();
-      release.resolve();
-      await settleCall(page, old);
-      assert.equal(await page.getByText('Latest public website', { exact: true }).count(), 1, 'R-F04: public website requests also honor invalidation order');
-    } finally { release.resolve(); }
-  });
-
-  for (const scenario of ['late-success', 'late-error', 'reopen', 'close']) {
-  await check(`R-F05-${scenario}`, 'late check history stays owned by its original website and dialog lifetime', async (page, data) => {
-    data.websites.push({ ...data.websites[0], id: 2, name: 'Second website', url: 'https://second.invalid/' });
-    const entered = deferred();
-    const release = deferred();
-    let first = true;
-    data.handlers.push(async ({ path, call, json }) => {
-      if (!first || path !== '/api/admin/websites/1/checks') return false;
-      first = false;
-      entered.resolve(call);
-      await release.promise;
-      await json(scenario === 'late-error' ? { error: 'Older A history failed' } : [{ checked_at: new Date().toISOString(), ok: true, latency_ms: 111 }], scenario === 'late-error' ? 500 : 200);
-      return true;
-    });
-    data.checks[2] = [{ checked_at: new Date().toISOString(), ok: true, latency_ms: 222 }];
-    data.checks[1] = [{ checked_at: new Date().toISOString(), ok: true, latency_ms: 333 }];
-    try {
-      await page.goto(origin + '/admin/websites');
-      await page.locator('tr').filter({ hasText: 'Synthetic website' }).getByRole('button', { name: '编辑', exact: true }).click();
-      const oldCall = await deadline(entered.promise, 'website A history starts');
-      await page.getByRole('dialog').getByRole('button', { name: '取消', exact: true }).click();
-      if (scenario === 'close') {
-        release.resolve();
-        await settleCall(page, oldCall);
-        assert.equal(await page.getByRole('dialog').count(), 0, 'closing the dialog retires its pending history');
-      } else {
-        await page.locator('tr').filter({ hasText: 'Second website' }).getByRole('button', { name: '编辑', exact: true }).click();
-        await page.getByRole('dialog').locator('.website-heartbeat-segment[data-tooltip*="222ms"]').waitFor();
-      }
-      if (scenario === 'reopen' || scenario === 'close') {
-        if (scenario === 'reopen') await page.getByRole('dialog').getByRole('button', { name: '取消', exact: true }).click();
-        await page.locator('tr').filter({ hasText: 'Synthetic website' }).getByRole('button', { name: '编辑', exact: true }).click();
-        await settleRender(page);
-      }
-      const dialog = page.getByRole('dialog');
-      if (scenario === 'reopen') await dialog.locator('.website-heartbeat-segment[data-tooltip*="333ms"]').waitFor();
-      release.resolve();
-      await settleCall(page, oldCall);
-      data.observed = { name: await dialog.getByRole('textbox', { name: '名称', exact: true }).inputValue(), checks: await dialog.locator('.website-heartbeat-segment').evaluateAll(elements => elements.map(element => element.dataset.tooltip)) };
-      assert.equal(await dialog.locator(`.website-heartbeat-segment[data-tooltip*="${scenario === 'reopen' || scenario === 'close' ? 333 : 222}ms"]`).count(), 1, 'R-F05: history belongs to the current website and opening, including reopen of the same ID');
-      await page.keyboard.press('Tab');
-      assert.equal(await dialog.evaluate(element => element.contains(document.activeElement)), true, 'history updates preserve modal focus containment');
-    } finally { release.resolve(); }
-  });
-  }
-
-  await check('R-F05-check-now', 'a late manual check cannot reload another dialog history', async (page, data) => {
-    data.websites.push({ ...data.websites[0], id: 2, name: 'Second website' });
-    data.checks[1] = [{ checked_at: new Date().toISOString(), ok: true, latency_ms: 111 }];
-    data.checks[2] = [{ checked_at: new Date().toISOString(), ok: true, latency_ms: 222 }];
-    const entered = deferred();
-    const release = deferred();
-    data.handlers.push(async ({ path, call, json }) => {
-      if (path !== '/api/admin/websites/1/check') return false;
-      entered.resolve(call);
-      await release.promise;
-      await json({ success: true });
-      return true;
-    });
-    try {
-      await page.goto(origin + '/admin/websites');
-      await page.locator('tr').filter({ hasText: 'Synthetic website' }).getByRole('button', { name: '检测', exact: true }).click();
-      const old = await deadline(entered.promise, 'manual check A starts');
-      await page.locator('tr').filter({ hasText: 'Second website' }).getByRole('button', { name: '编辑', exact: true }).click();
-      const dialog = page.getByRole('dialog');
-      await dialog.locator('.website-heartbeat-segment[data-tooltip*="222ms"]').waitFor();
-      release.resolve();
-      await settleCall(page, old);
-      await settleRender(page);
-      assert.equal(await dialog.locator('.website-heartbeat-segment[data-tooltip*="222ms"]').count(), 1, 'R-F05: A check completion cannot replace B history');
-    } finally { release.resolve(); }
-  });
 
   for (const failure of ['server', 'csrf', 'network']) {
   await check(`R-F06-${failure}`, 'failed server logout remains visible and retryable in the administrator view', async (page, data) => {
@@ -809,9 +668,9 @@ try {
     await settleRender(page);
     assert.equal(await toggle.evaluate(element => element === document.activeElement), true, 'R-F10: Escape restores the menu trigger');
     await toggle.click();
-    await page.locator('.admin-sidebar a[href="/admin/websites"]').focus();
+    await page.locator('.admin-sidebar a[href="/admin/about"]').focus();
     await page.keyboard.press('Enter');
-    await page.getByText('Synthetic website', { exact: true }).first().waitFor();
+    await page.waitForURL('**/admin/about');
     await settleRender(page);
     assert.equal(await page.locator('.admin-sidebar').evaluate(aside => aside.inert), true, 'R-F10: selecting a route closes the mobile interaction tree');
     assert.equal(await toggle.evaluate(element => element === document.activeElement), true, 'R-F10: route selection restores the menu trigger');
@@ -836,42 +695,6 @@ try {
     const retry = page.getByRole('button', { name: '重试退出', exact: true });
     await retry.focus();
     assert.equal(await retry.evaluate(element => document.activeElement === element), true, 'R-F10/R-F06: the failed logout retry must be interactive outside the drawer');
-  }, { width: 390 });
-
-  await check('R-F11', 'mobile website actions have accessible names before hover', async (page, data) => {
-    data.websites.push({ ...data.websites[0], id: 2, name: 'Second website' });
-    await page.goto(origin + '/admin/websites');
-    const card = page.locator('.admin-website-card').filter({ hasText: 'Synthetic website' });
-    await card.waitFor();
-    const unnamed = await card.getByRole('button', { name: '', exact: true }).evaluateAll(elements => elements.map(element => element.outerHTML));
-    data.observed = { unnamed };
-    assert.equal(unnamed.length, 0, 'R-F11: check, edit and delete require accessible action names before hover');
-    for (const name of ['Synthetic website', 'Second website']) {
-      for (const action of ['检测', '编辑', '删除']) {
-        assert.equal(await page.getByRole('button', { name: new RegExp(`^${action}.*${name}$`) }).count(), 1, `R-F11: ${action} identifies its target ${name}`);
-      }
-    }
-    const target = page.locator('.admin-website-card').filter({ hasText: 'Second website' });
-    await target.getByRole('button', { name: /^检测/ }).focus();
-    await page.keyboard.press('Enter');
-    await settleCall(page, await waitForCall(data, call => call.path === '/api/admin/websites/2/check'));
-    await target.getByRole('button', { name: /^编辑/ }).focus();
-    await page.keyboard.press('Enter');
-    const edit = page.getByRole('dialog', { name: '编辑监控', exact: true });
-    assert.equal(await edit.getByRole('textbox', { name: '名称', exact: true }).inputValue(), 'Second website');
-    await edit.getByRole('button', { name: '取消', exact: true }).click();
-    await target.getByRole('button', { name: /^删除/ }).focus();
-    await page.keyboard.press('Enter');
-    const confirm = page.getByRole('dialog', { name: '确认删除', exact: true });
-    await confirm.getByRole('button', { name: '取消', exact: true }).click();
-    assert.equal(data.calls.filter(call => call.path === '/api/admin/websites/delete').length, 0, 'cancel does not delete either website');
-    await target.getByRole('button', { name: /^删除/ }).focus();
-    await page.keyboard.press('Enter');
-    await confirm.getByRole('button', { name: '确认删除', exact: true }).focus();
-    await page.keyboard.press('Enter');
-    await confirm.waitFor({ state: 'hidden' });
-    assert.deepEqual(data.websites.map(monitor => monitor.id), [1], 'keyboard confirmation deletes only the named website');
-    assert.equal(await page.locator('.admin-website-card').count(), 1);
   }, { width: 390 });
 
   for (const phase of ['initial', 'refresh']) {

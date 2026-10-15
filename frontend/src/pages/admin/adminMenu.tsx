@@ -7,7 +7,6 @@ import {
   CalendarClock,
   Ellipsis,
   Globe,
-  Globe2,
   MessageCircleMore,
   Palette,
   ScrollText,
@@ -27,7 +26,6 @@ export interface AdminMenuItem {
 
 export const adminMenuItems: AdminMenuItem[] = [
   { path: '/admin', label: '服务器', icon: <Server size={18} /> },
-  { path: '/admin/websites', label: '网站', icon: <Globe2 size={18} /> },
   {
     path: '/admin/settings',
     label: '系统设置',
@@ -131,7 +129,6 @@ export function getAdminSectionTitle(pathname: string) {
   ) return '通知管理';
   if (pathname.startsWith('/admin/ping')) return '延迟监测';
   if (pathname.startsWith('/admin/themes')) return '主题管理';
-  if (pathname.startsWith('/admin/websites')) return '网站';
   if (pathname.startsWith('/admin/logs')) return '审计日志';
   if (pathname.startsWith('/admin/account')) return '账户设置';
   if (pathname.startsWith('/admin/about')) return '关于';

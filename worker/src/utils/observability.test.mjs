@@ -33,7 +33,6 @@ function createScheduledHealthFixture({ failLoad = false } = {}) {
       },
       listOfflineNotifications: async () => [],
       listExpiryNotifications: async () => [],
-      listDueWebsiteMonitors: async () => [],
       listClients: async () => [],
       tryClaimAuditThrottle: async () => true,
       insertAuditLog: async (_database, user, action, detail, level) => { audits.push({ user, action, detail, level }); },
@@ -149,7 +148,7 @@ for (const { fn, argIndex } of WRITE_SITES) {
 }
 
 // 有的写入点先把名字存进变量再传（live-data.ts 的
-// `const component = 'agent_policy_website_probe_tasks'`），
+// `const component = 'agent_policy_ping_tasks'`），
 // 调用处看不到字面量。这类赋值也算写入点。
 for (const match of SOURCE.matchAll(/\bcomponent(?:: [A-Za-z]+)? = '([a-z0-9_]+)'/g)) {
   writtenComponents.add(match[1]);
@@ -163,7 +162,7 @@ before(async () => {
 });
 
 test('注册表本身无重复', () => {
-  assert.equal(STORED_HEALTH_COMPONENTS.length, 18, '注册表条数变了：确认是有意增删，再改这个数字');
+  assert.equal(STORED_HEALTH_COMPONENTS.length, 15, '注册表条数变了：确认是有意增删，再改这个数字');
   assert.equal(
     new Set(STORED_HEALTH_COMPONENTS).size,
     STORED_HEALTH_COMPONENTS.length,

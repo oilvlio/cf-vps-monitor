@@ -607,31 +607,41 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
   const [homePingTasks, setHomePingTasks] = useState<{ id: number; name: string; type: string; target: string }[]>([]);
   const [homeTaskId, setHomeTaskId] = useState('');
   const [initialHomeTaskId, setInitialHomeTaskId] = useState('');
+  const [homePingError, setHomePingError] = useState('');
 
   useEffect(() => {
     if (!client || !open) return undefined;
     let cancelled = false;
     (async () => {
-      try {
-        const [tasks, home] = await Promise.all([
-          apiFetch('/task/ping?include_hidden=1'),
-          apiFetch('/admin/home-ping'),
-        ]);
-        if (cancelled) return;
-        const applicable = (Array.isArray(tasks) ? tasks : [])
-          .filter((task: { all_clients?: unknown; clients?: unknown }) => Boolean(task.all_clients) || (Array.isArray(task.clients) && task.clients.includes(client.uuid)))
-          .map((task: { id: number | string; name?: string; type?: string; target?: string }) => ({
-            id: Number(task.id), name: String(task.name || ''), type: String(task.type || ''), target: String(task.target || ''),
-          }))
-          .filter((task: { id: number }) => Number.isInteger(task.id) && task.id > 0);
-        const current = home?.assignments?.[client.uuid];
+      // 任务列表和「当前选中的首页探测点」分开读取：后者失败（比如数据库还没执行迁移）
+      // 不能把前者一起清空，否则下拉框里就只剩「不显示」。
+      const [tasksResult, homeResult] = await Promise.allSettled([
+        apiFetch('/task/ping?include_hidden=1'),
+        apiFetch('/admin/home-ping'),
+      ]);
+      if (cancelled) return;
+
+      const rawTasks = tasksResult.status === 'fulfilled' && Array.isArray(tasksResult.value) ? tasksResult.value : [];
+      const applicable = rawTasks
+        .filter((task: { all_clients?: unknown; clients?: unknown }) => Boolean(task.all_clients) || (Array.isArray(task.clients) && task.clients.includes(client.uuid)))
+        .map((task: { id: number | string; name?: string; type?: string; target?: string }) => ({
+          id: Number(task.id), name: String(task.name || ''), type: String(task.type || ''), target: String(task.target || ''),
+        }))
+        .filter((task: { id: number }) => Number.isInteger(task.id) && task.id > 0);
+      setHomePingTasks(applicable);
+
+      if (homeResult.status === 'fulfilled') {
+        const current = homeResult.value?.assignments?.[client.uuid];
         const currentId = Number.isInteger(Number(current)) && Number(current) > 0 ? String(Number(current)) : '';
-        setHomePingTasks(applicable);
         setHomeTaskId(currentId);
         setInitialHomeTaskId(currentId);
-      } catch {
-        // 读取失败不影响编辑其他字段；保存时 initial 与当前相同，就不会去改首页探测点。
-        if (!cancelled) { setHomePingTasks([]); setHomeTaskId(''); setInitialHomeTaskId(''); }
+        setHomePingError(tasksResult.status === 'rejected' ? '探测任务列表读取失败，请刷新页面重试。' : '');
+      } else {
+        // 保持 initial 与当前一致，保存时就不会去改首页探测点。
+        setHomeTaskId('');
+        setInitialHomeTaskId('');
+        const reason = homeResult.reason;
+        setHomePingError(reason instanceof Error && reason.message ? reason.message : '读取首页探测点失败');
       }
     })();
     return () => { cancelled = true; };
@@ -727,6 +737,9 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
                   ))}
                 </Select.Content>
               </Select.Root>
+              {homePingError && (
+                <Text size="1" color="red" style={{ display: 'block', marginTop: 4 }}>{homePingError}</Text>
+              )}
               <Text size="1" color="gray" style={{ display: 'block', marginTop: 4 }}>
                 首页节点卡片上的延迟 / 丢包色块只读这一个探测任务。列表里是已应用到该节点的探测任务，没有可选项时请先到「探测任务」里把这个节点加进去。
               </Text>

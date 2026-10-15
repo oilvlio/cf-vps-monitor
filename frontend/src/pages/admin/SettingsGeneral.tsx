@@ -671,7 +671,7 @@ export default function SettingsGeneral() {
       });
       if (result.success) {
         const deleted = result.deleted || {};
-        const totalDeleted = ['records', 'gpu_records', 'gpu_snapshots', 'ping_records', 'ping_snapshots', 'website_checks', 'audit_logs']
+        const totalDeleted = ['records', 'gpu_records', 'gpu_snapshots', 'ping_records', 'ping_snapshots', 'audit_logs']
           .reduce((sum, key) => sum + Number(deleted[key] || 0), 0);
         if (result.has_more) toast.info(`已清理一批，删除 ${formatInteger(totalDeleted)} 行历史数据；仍有过期记录，可继续清理`);
         else toast.success(`维护清理完成，删除 ${formatInteger(totalDeleted)} 行历史数据`);

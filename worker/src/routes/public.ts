@@ -200,15 +200,11 @@ function publicCacheRequest(c: PublicContext): Request {
   return new Request(url.toString(), { method: 'GET' });
 }
 
-function publicMetadataAllowedQueryParams(pathname: string): string[] {
-  if (pathname === '/api/websites') return ['hours'];
-  if (/^\/api\/websites\/\d+$/.test(pathname)) return ['limit'];
+function publicMetadataAllowedQueryParams(_pathname: string): string[] {
   return [];
 }
 
-function publicMetadataCanonicalQueryValue(pathname: string, name: string, value: string | null): string | null {
-  if (pathname === '/api/websites' && name === 'hours') return String(readIntParam(value || undefined, 24, 72));
-  if (/^\/api\/websites\/\d+$/.test(pathname) && name === 'limit') return String(readIntParam(value || undefined, 120, 500));
+function publicMetadataCanonicalQueryValue(_pathname: string, _name: string, _value: string | null): string | null {
   return null;
 }
 
@@ -247,7 +243,6 @@ export function purgePublicMetadataEdgeCache(c: Context<{ Bindings: Bindings; Va
     '/api/public',
     '/api/task/ping',
     '/api/ping/home',
-    '/api/websites',
   ];
   const task = Promise.all(paths.map(path => caches.default.delete(publicMetadataPathCacheRequest(c, path)))).catch(() => []);
   if (c.executionCtx?.waitUntil) c.executionCtx.waitUntil(task);
@@ -1674,69 +1669,20 @@ publicRoutes.get('/ping/home', async (c) => {
   const snapshot = await getPublicClientsSnapshot(c, database, fresh, includeHidden);
   const nowMs = Date.now();
   const range = homePingQueryRange(nowMs);
-  const rawSources = await db.getHomePingRows(database, range.start, range.end);
+  let rawSources: Awaited<ReturnType<typeof db.getHomePingRows>>;
+  try {
+    rawSources = await db.getHomePingRows(database, range.start, range.end);
+  } catch {
+    // 迁移还没执行或数据库暂时不可用：首页色块只是附加信息，返回空结果即可，
+    // 且不要缓存，等数据库恢复后下一次请求就能拿到数据。
+    return privateJsonResponse(buildHomePingSummary({}, nowMs));
+  }
   const sources: Record<string, HomePingSource> = {};
   for (const [uuid, source] of Object.entries(rawSources || {})) {
     if (snapshot.publicClientIds.has(uuid)) sources[uuid] = source;
   }
   const summary = buildHomePingSummary(sources, nowMs);
   return includeHidden ? privateJsonResponse(summary) : setPublicMetadataResponse(c, summary, !fresh);
-});
-
-// 获取网站监控列表（公开）
-publicRoutes.get('/websites', async (c) => {
-  const metrics: TimingMetric[] = [];
-  const fresh = isFreshPublicMetadataRequest(c);
-  const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
-  const cached = !fresh && !includeHidden ? await getCachedPublicMetadataResponse(c, 'websites') : null;
-  if (cached) return cached;
-  const limited = await guardPublicMetadata(c, 'websites');
-  if (limited) return limited;
-  const database = getDatabase(c.env);
-  const periodHours = readIntParam(c.req.query('hours'), 24, 72);
-  const monitors = await timed(metrics, 'db_list_websites', () => db.listPublicWebsiteMonitors(database, 120, fresh, periodHours, includeHidden));
-  const response = includeHidden ? privateJsonResponse(monitors) : setPublicMetadataResponse(c, monitors, !fresh);
-  response.headers.set('Server-Timing', metrics.map(metric => `${metric.name};dur=${metric.dur.toFixed(1)}`).join(', '));
-  return response;
-});
-
-publicRoutes.get('/websites/:id/checks', async (c) => {
-  const id = Number(c.req.param('id'));
-  if (!Number.isInteger(id) || id <= 0) return c.json({ error: 'Not Found' }, 404);
-  const limited = await guardPublicHistory(c, 'website-checks');
-  if (limited) return limited;
-  const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
-  const cacheKey = publicHistoryCacheKey(c, 'website-checks');
-  const cached = includeHidden ? null : await getPublicHistoryCache(c, cacheKey);
-  if (cached) return cached;
-  const limit = readIntParam(c.req.query('limit'), 120, 500);
-  const database = getDatabase(c.env);
-  const monitor = await db.getPublicWebsiteMonitorById(database, id, 1, includeHidden);
-  if (!monitor) return c.json({ error: 'Not Found' }, 404);
-  const checks = (await db.listWebsiteChecks(database, id, limit)).map(check => ({
-    checked_at: check.checked_at,
-    ok: check.ok,
-    effective_status: check.effective_status,
-    effective_reason: check.effective_reason,
-    status_code: check.status_code,
-    raw_status_code: check.raw_status_code,
-    latency_ms: check.latency_ms,
-  }));
-  return includeHidden ? privateJsonResponse(checks) : setPublicHistoryCache(c, cacheKey, checks);
-});
-
-publicRoutes.get('/websites/:id', async (c) => {
-  const id = Number(c.req.param('id'));
-  if (!Number.isInteger(id) || id <= 0) return c.json({ error: 'Not Found' }, 404);
-  const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
-  const cached = includeHidden ? null : await getCachedPublicMetadataResponse(c, 'website-detail');
-  if (cached) return cached;
-  const limited = await guardPublicMetadata(c, 'website-detail');
-  if (limited) return limited;
-  const database = getDatabase(c.env);
-  const monitor = await db.getPublicWebsiteMonitorById(database, id, readIntParam(c.req.query('limit'), 120, 500), includeHidden);
-  if (!monitor) return c.json({ error: 'Not Found' }, 404);
-  return includeHidden ? privateJsonResponse(monitor) : setPublicMetadataResponse(c, monitor);
 });
 
 // 节点信息（兼容旧版格式）

@@ -26,13 +26,13 @@ function derivedCapacity(capacity, settings = capacitySettings) {
   return productionSelected('src/pages/admin/SettingsGeneral.tsx', 'derived', { capacity, settings, originalSettings: capacitySettings })();
 }
 
-test('AUD-07 partial maintenance reports remaining work and counts website checks', async () => {
+test('AUD-07 partial maintenance reports remaining work and counts ping records', async () => {
   for (const hasMore of [true, false]) {
     let requests = 0;
     const messages = [];
     const cleanup = productionDeclaration('src/pages/admin/SettingsGeneral.tsx', 'handleMaintenanceCleanup', {
       setCleaning() {}, refreshCapacity: async () => true,
-      apiFetch: async () => { requests += 1; if (requests > 1) throw new Error('Unexpected client cleanup loop'); return { success: true, has_more: hasMore, deleted: { records: 1, website_checks: 2 } }; },
+      apiFetch: async () => { requests += 1; if (requests > 1) throw new Error('Unexpected client cleanup loop'); return { success: true, has_more: hasMore, deleted: { records: 1, ping_records: 2 } }; },
       formatInteger: productionDeclaration('src/pages/admin/SettingsGeneral.tsx', 'formatInteger'),
       toast: { info: message => messages.push(['info', message]), success: message => messages.push(['success', message]), error: message => messages.push(['error', message]) },
     });

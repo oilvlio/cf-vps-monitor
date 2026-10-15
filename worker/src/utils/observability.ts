@@ -36,9 +36,7 @@ export {
 export const STORED_HEALTH_COMPONENTS = [
   'do_record_persistence',
   'ping_persistence',
-  'website_probe_persistence',
   'agent_policy',
-  'agent_policy_website_probe_tasks',
   'do_agent_policy',
   'do_basic_info_sync',
   'do_viewer_expiry',
@@ -51,7 +49,6 @@ export const STORED_HEALTH_COMPONENTS = [
   'cron_load',
   'cron_offline',
   'cron_expiry',
-  'cron_website',
 ] as const;
 
 export type StoredHealthComponent = typeof STORED_HEALTH_COMPONENTS[number];

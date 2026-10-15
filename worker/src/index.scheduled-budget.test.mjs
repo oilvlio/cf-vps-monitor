@@ -4,7 +4,6 @@ import test from 'node:test';
 import * as sba from './db/supabase-api/client.ts';
 import * as dispatch from './utils/notification-dispatch.ts';
 import * as offline from './utils/offline-notification.ts';
-import * as websites from './utils/website-monitor.ts';
 import * as templates from './utils/notification-templates.ts';
 import { buildAdminSettings } from './settings/schema.ts';
 import { createTestDatabase, rpc } from '../../scripts/test-support/postgres.mjs';
@@ -13,7 +12,7 @@ import { loadTypeScriptFunctions } from '../../scripts/test-support/typescript.m
 const budgetUrl = new URL('./utils/scheduled-budget.ts', import.meta.url);
 const budgets = existsSync(budgetUrl) ? await import(budgetUrl) : {};
 
-async function harness({ slow = false, redirects = false, offlineCount = 0, webhookFails = false, loadRules = 0 } = {}) {
+async function harness({ offlineCount = 0, webhookFails = false, loadRules = 0 } = {}) {
   const database = await createTestDatabase();
   const originalFetch = globalThis.fetch;
   const base = Date.now();
@@ -51,16 +50,6 @@ async function harness({ slow = false, redirects = false, offlineCount = 0, webh
         : await rpc(database, name, body);
       return value === undefined ? new Response(null, { status: 204 }) : Response.json(value);
     }
-    if (url.hostname === 'website.example.com') {
-      if (slow) {
-        const remaining = budgets.currentScheduledBudget?.()?.remainingMs() ?? Infinity;
-        const elapsed = Math.min(30_000, remaining);
-        clock += elapsed;
-        if (elapsed < 30_000) throw new DOMException('scheduled deadline', 'AbortError');
-      }
-      return new Response(null, { status: redirects ? 302 : slow ? 504 : 200,
-        ...(redirects ? { headers: { Location: 'https://website.example.com/next' } } : {}) });
-    }
     if (url.hostname === 'notify.example.com') return new Response(null, { status: webhookFails ? 503 : 200 });
     throw new Error(`Unexpected external request in synthetic test: ${url.hostname}`);
   };
@@ -76,11 +65,9 @@ async function harness({ slow = false, redirects = false, offlineCount = 0, webh
         select 'Rule '||n,'cpu',50+n,0.8,15 from generate_series(1,${loadRules}) n;
         insert into records(client,time,cpu) select uuid,now(),99 from clients cross join generate_series(1,2);`);
     }
-  } else {
-    await database.exec("insert into website_monitors(name,url,interval_sec,timeout_sec,grace_period_sec,agent_probe_mode) select 'Website '||n,'https://website.example.com/'||n,86400,30,86400,'off' from generate_series(1,50) n;");
   }
   const functions = await loadTypeScriptFunctions(new URL('./index.ts', import.meta.url), null, {
-    ...dispatch, ...offline, ...websites, ...templates, ...budgets,
+    ...dispatch, ...offline, ...templates, ...budgets,
     ...(budgets.ScheduledBudget ? { ScheduledBudget: class extends budgets.ScheduledBudget { constructor() { super({ now: () => clock }); } } } : {}),
     Date: ClockDate, db: queries, getDatabase: () => connection, buildAdminSettings,
     bestEffortRecordHealthEvent: health, errorDetail: error => String(error),
@@ -114,35 +101,6 @@ async function harness({ slow = false, redirects = false, offlineCount = 0, webh
     close: async () => { globalThis.fetch = originalFetch; await database.close(); },
   };
 }
-
-test('AUD-14 each scheduled run stays within request budget and eventually checks all 50 websites', async () => {
-  const h = await harness();
-  try {
-    let checked = 0;
-    for (let round = 0; round < 12 && checked < 50; round += 1) {
-      const run = await h.run();
-      assert.ok(run.requests <= 50, `one invocation issued ${run.requests} external requests`);
-      checked = (await h.database.query('select count(*)::integer as count from website_monitors where last_checked_at is not null')).rows[0].count;
-    }
-    assert.equal(checked, 50, 'bounded work must continue without starving later websites');
-  } finally { await h.close(); }
-});
-
-test('AUD-14 slow/redirecting websites respect the total deadline without false failures from budget cancellation', async () => {
-  const h = await harness({ slow: true, redirects: true });
-  try {
-    let checked = 0;
-    for (let round = 0; round < 70 && checked < 50; round += 1) {
-      const run = await h.run();
-      assert.ok(run.elapsed <= 60_000, `invocation exceeded deadline: ${run.elapsed}ms`);
-      assert.ok(run.requests <= 50);
-      checked = (await h.database.query('select count(*)::integer as count from website_monitors where last_checked_at is not null')).rows[0].count;
-    }
-    assert.equal(checked, 50);
-    assert.equal((await h.database.query("select count(*)::integer as count from website_checks where effective_status='down'")).rows[0].count, 0,
-      'an invocation deadline is deferred work, not a failed website check');
-  } finally { await h.close(); }
-});
 
 test('AUD-14 many offline notifications and webhook retries share the same budget and fair cursor', async () => {
   const h = await harness({ offlineCount: 60, webhookFails: true });

@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Flex, Text, Box } from '@radix-ui/themes';
-import { useLocation } from 'react-router-dom';
 import { AlertTriangle, Globe2, RadioTower, Signal, UploadCloud } from 'lucide-react';
 import { useLiveData } from '../contexts/LiveDataContext';
 import { useAuth } from '../contexts/AuthContext';
@@ -15,8 +14,6 @@ import { fetchPublicBootstrap } from '../utils/publicBootstrap';
 import { mergePublicClientPatch, normalizePublicClients } from '../utils/publicClients';
 import { fetchWithBootstrapRetry } from '../utils/api';
 import { getNodeDisplayRecord, getNodeLastReportTime, getNodeStatus } from '../utils/nodeMetrics';
-import WebsiteMonitorList, { WebsiteMonitorSummary } from '../components/WebsiteMonitorList';
-import { subscribeWebsiteMonitorsUpdated, type WebsiteMonitorsUpdateDetail } from '../utils/websiteMonitorEvents';
 import { useHomePing } from '../hooks/useHomePing';
 import { notifyPublicDataReady, subscribePublicDataUpdated } from '../utils/publicDataEvents';
 import type { PublicDataUpdateDetail } from '../utils/publicDataEvents';
@@ -36,8 +33,6 @@ const nodeCardGridStyle = {
   '--node-card-grid-template-columns': nodeCardGridTemplateColumns,
   '--node-card-grid-template-columns-mobile': mobileNodeCardGridTemplateColumns,
 } as React.CSSProperties;
-const WEBSITE_MONITOR_REFRESH_MS = 120_000;
-const WEBSITE_MONITOR_PERIODS = [1, 24, 72] as const;
 
 const statusIconByKey: Record<StatusCardKey, React.ReactNode> = {
   currentOnline: <RadioTower size={18} />,
@@ -56,68 +51,6 @@ function mergeLiveClientMetadata(clients: ClientInfo[], liveClients: LiveDataMap
 
 function applyPublicClientUpdate(current: ClientInfo[], detail: PublicDataUpdateDetail | undefined, includeHidden: boolean): ClientInfo[] {
   return mergePublicClientPatch(current, detail, { includeHidden });
-}
-
-function readWebsiteHidden(value: unknown): boolean {
-  if (typeof value === 'boolean') return value;
-  if (typeof value === 'number') return value !== 0;
-  if (typeof value === 'string') return value === 'true' || value === '1';
-  return false;
-}
-
-function normalizeWebsiteSummary(input: unknown, options: { includeHidden?: boolean } = {}): WebsiteMonitorSummary | null {
-  if (!input || typeof input !== 'object') return null;
-  const value = input as Partial<WebsiteMonitorSummary> & { hidden?: unknown; hide_url?: unknown };
-  const id = Number(value.id);
-  const hidden = readWebsiteHidden(value.hidden);
-  if (!Number.isInteger(id) || id <= 0 || (!options.includeHidden && hidden)) return null;
-  return {
-    id,
-    name: String(value.name || ''),
-    // Also defend against older tabs that still publish administrator rows.
-    url: (!options.includeHidden && readWebsiteHidden(value.hide_url)) || value.url == null ? null : String(value.url),
-    method: value.method === 'TCP' || value.method === 'HEAD' || value.method === 'GET' ? value.method : undefined,
-    interval_sec: typeof value.interval_sec === 'number' ? value.interval_sec : 120,
-    status: value.status === 'up' || value.status === 'down' || value.status === 'paused' ? value.status : 'pending',
-    last_checked_at: typeof value.last_checked_at === 'string' ? value.last_checked_at : null,
-    last_status_code: typeof value.last_status_code === 'number' ? value.last_status_code : null,
-    last_raw_status_code: typeof value.last_raw_status_code === 'number' ? value.last_raw_status_code : null,
-    last_latency_ms: typeof value.last_latency_ms === 'number' ? value.last_latency_ms : null,
-    last_effective_reason: typeof value.last_effective_reason === 'string' ? value.last_effective_reason : null,
-    hidden,
-    checks: Array.isArray(value.checks) ? value.checks : [],
-  };
-}
-
-function normalizeWebsiteSummaries(input: unknown, options: { includeHidden?: boolean } = {}): WebsiteMonitorSummary[] {
-  return Array.isArray(input)
-    ? input.map(item => normalizeWebsiteSummary(item, options)).filter((monitor): monitor is WebsiteMonitorSummary => Boolean(monitor))
-    : [];
-}
-
-function applyWebsiteMonitorUpdate(
-  current: WebsiteMonitorSummary[],
-  detail?: WebsiteMonitorsUpdateDetail | true,
-  options: { includeHidden?: boolean } = {},
-): WebsiteMonitorSummary[] | null {
-  if (!detail || detail === true) return null;
-  const remove = new Set((detail.remove || []).map(Number).filter((id) => Number.isInteger(id) && id > 0));
-  const byId = new Map(current.filter((monitor) => !remove.has(monitor.id)).map((monitor) => [monitor.id, monitor]));
-  for (const raw of detail.upsert || []) {
-    const normalized = normalizeWebsiteSummary(raw, options);
-    if (!normalized) {
-      const id = Number((raw as { id?: unknown } | null)?.id);
-      if (Number.isInteger(id) && id > 0) byId.delete(id);
-      continue;
-    }
-    byId.set(normalized.id, { ...byId.get(normalized.id), ...normalized });
-  }
-  const next = [...byId.values()];
-  if (detail.reorder?.length) {
-    const order = new Map(detail.reorder.map((id, index) => [Number(id), index]));
-    next.sort((a, b) => (order.get(a.id) ?? next.length) - (order.get(b.id) ?? next.length));
-  }
-  return next;
 }
 
 /* ========== Top Card ========== */
@@ -196,24 +129,12 @@ export function ApiUnavailableNotice({ error }: { error: string }) {
 }
 
 export default function Index() {
-  const location = useLocation();
   const { authLoading, isAuthenticated } = useAuth();
   const { liveData, error, snapshotReady, clientMetadata: clients, setClientMetadata: setClients } = useLiveData();
-  const monitorMode = new URLSearchParams(location.search).get('view') === 'websites' ? 'websites' : 'servers';
   const [clientsLoading, setClientsLoading] = useState(clients === undefined);
   const [clientsError, setClientsError] = useState<string | null>(null);
-  const [websites, setWebsites] = useState<WebsiteMonitorSummary[]>([]);
-  const [websitesLoading, setWebsitesLoading] = useState(monitorMode === 'websites' && websites.length === 0);
-  const [websitesError, setWebsitesError] = useState<string | null>(null);
-  const [websitePeriodHours, setWebsitePeriodHours] = useState(24);
   // The public view always keeps offline nodes last, including older saved preferences.
   const offlinePosition = 'last';
-
-  const handleWebsitePeriodChange = (hours: number) => {
-    if (hours === websitePeriodHours) return;
-    setWebsitesLoading(true);
-    setWebsitePeriodHours(hours);
-  };
 
   // Load client list
   useEffect(() => {
@@ -222,12 +143,6 @@ export default function Index() {
     let pendingClientUpdates: PublicDataUpdateDetail[] | null = null;
     if (authLoading) {
       setClientsLoading(true);
-      return () => {
-        cancelled = true;
-      };
-    }
-    if (monitorMode !== 'servers') {
-      setClientsLoading(false);
       return () => {
         cancelled = true;
       };
@@ -325,83 +240,7 @@ export default function Index() {
       document.removeEventListener('visibilitychange', loadWhenVisible);
       window.clearInterval(timer);
     };
-  }, [authLoading, monitorMode, isAuthenticated, setClients]);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (authLoading) {
-      setWebsitesLoading(monitorMode === 'websites');
-      return () => {
-        cancelled = true;
-      };
-    }
-    if (monitorMode !== 'websites') {
-      setWebsitesLoading(false);
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    let websiteRequest = 0;
-    let pendingWebsiteUpdates: Array<WebsiteMonitorsUpdateDetail> | null = null;
-    const loadWebsites = (fresh = false) => {
-      const request = ++websiteRequest;
-      const updates: Array<WebsiteMonitorsUpdateDetail> = [];
-      pendingWebsiteUpdates = updates;
-      const isCurrent = () => !cancelled && request === websiteRequest;
-      setWebsitesLoading(true);
-      const url = `/api/websites?hours=${websitePeriodHours}${isAuthenticated ? '&include_hidden=1' : ''}${fresh ? `&_fresh=${Date.now()}` : ''}`;
-      fetchWithBootstrapRetry(url, fresh ? { cache: 'reload' } : undefined)
-        .then(res => {
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          return res.json();
-        })
-        .then(data => {
-          if (!Array.isArray(data)) throw new Error('网站监控列表格式无效');
-          const list = normalizeWebsiteSummaries(data, { includeHidden: isAuthenticated });
-          if (!isCurrent()) return;
-          setWebsites(updates.reduce((current, detail) => applyWebsiteMonitorUpdate(current, detail, { includeHidden: isAuthenticated }) || current, list));
-          setWebsitesError(null);
-        })
-        .catch((loadError: unknown) => {
-          if (isCurrent()) setWebsitesError(loadError instanceof Error ? loadError.message : '网站监控加载失败');
-        })
-        .finally(() => {
-          if (isCurrent()) {
-            pendingWebsiteUpdates = null;
-            setWebsitesLoading(false);
-          }
-        });
-    };
-
-    const loadWhenVisible = () => {
-      // 同上：隐藏时不拉，切回可见由 visibilitychange 补一次。
-      if (document.hidden) return;
-      loadWebsites(true);
-    };
-
-    loadWebsites(true);
-    const unsubscribe = subscribeWebsiteMonitorsUpdated((detail) => {
-      if (!detail || detail === true) {
-        loadWebsites(true);
-        return;
-      }
-      pendingWebsiteUpdates?.push(detail);
-      setWebsites((current) => {
-        const applied = applyWebsiteMonitorUpdate(current, detail, { includeHidden: isAuthenticated });
-        if (!applied) return current;
-        return applied;
-      });
-    });
-    document.addEventListener('visibilitychange', loadWhenVisible);
-    const timer = window.setInterval(loadWhenVisible, WEBSITE_MONITOR_REFRESH_MS);
-    return () => {
-      cancelled = true;
-      unsubscribe();
-      document.removeEventListener('visibilitychange', loadWhenVisible);
-      window.clearInterval(timer);
-    };
-  }, [authLoading, isAuthenticated, monitorMode, websitePeriodHours]);
+  }, [authLoading, isAuthenticated, setClients]);
 
   // Normalize live data for the LiveDataMap type
   const liveMap: LiveDataMap = useMemo(() => {
@@ -415,7 +254,7 @@ export default function Index() {
     };
   }, [liveData, snapshotReady]);
 
-  const homePing = useHomePing(monitorMode === 'servers' && !authLoading, isAuthenticated);
+  const homePing = useHomePing(!authLoading, isAuthenticated);
 
   const displayClients = mergeLiveClientMetadata(clients || [], liveMap.clients);
 
@@ -447,45 +286,37 @@ export default function Index() {
 
   return (
     <div className="monitor-dashboard-page">
-      {monitorMode === 'servers' && (
-        <section className="monitor-dashboard-hero monitor-dashboard-compact">
-          <div className="monitor-stat-grid">
-            {statusCards.filter(card => fallbackVisibility[card.key]).map(card => (
-              <TopCard
-                key={card.key}
-                title={card.title}
-                value={snapshotReady && clients !== undefined ? card.value : '—'}
-                detail={card.detail}
-                icon={statusIconByKey[card.key]}
-                oneLine={card.oneLine}
-                inlineValues={snapshotReady && clients !== undefined ? card.inlineValues : undefined}
-                className={card.key === 'currentOnline' ? 'is-centered' : ''}
-              />
-            ))}
-          </div>
-        </section>
-      )}
+      <section className="monitor-dashboard-hero monitor-dashboard-compact">
+        <div className="monitor-stat-grid">
+          {statusCards.filter(card => fallbackVisibility[card.key]).map(card => (
+            <TopCard
+              key={card.key}
+              title={card.title}
+              value={snapshotReady && clients !== undefined ? card.value : '—'}
+              detail={card.detail}
+              icon={statusIconByKey[card.key]}
+              oneLine={card.oneLine}
+              inlineValues={snapshotReady && clients !== undefined ? card.inlineValues : undefined}
+              className={card.key === 'currentOnline' ? 'is-centered' : ''}
+            />
+          ))}
+        </div>
+      </section>
+    
 
       {apiError && <ApiUnavailableNotice error={apiError} />}
 
-      {monitorMode === 'servers' ? (
-        <React.Suspense fallback={null}>
-          <NodeDisplay
-            nodes={displayClients}
-            liveData={liveMap}
-            loading={clients === undefined && clientsLoading}
-            dataAvailable={clients !== undefined}
-            gridRenderer={renderGrid}
-            offlinePosition={offlinePosition}
-            includeHidden={isAuthenticated}
-          />
-        </React.Suspense>
-      ) : (
-        <section className="website-monitor-shell">
-          {websitesError && <ApiUnavailableNotice error={websitesError} />}
-          <WebsiteMonitorList monitors={websites} loading={websitesLoading} periodHours={websitePeriodHours} onPeriodChange={handleWebsitePeriodChange} periods={WEBSITE_MONITOR_PERIODS} />
-        </section>
-      )}
+      <React.Suspense fallback={null}>
+        <NodeDisplay
+          nodes={displayClients}
+          liveData={liveMap}
+          loading={clients === undefined && clientsLoading}
+          dataAvailable={clients !== undefined}
+          gridRenderer={renderGrid}
+          offlinePosition={offlinePosition}
+          includeHidden={isAuthenticated}
+        />
+      </React.Suspense>
     </div>
   );
 }

@@ -15,7 +15,6 @@ async function fixture(t) {
     db: {
       buildHistoryRollup: async () => ({}),
       deleteOldRecords: history('cfm_delete_old_records'),
-      deleteOldWebsiteChecks: history('cfm_delete_old_website_checks'),
       deleteOldPingRecords: history('cfm_delete_old_ping_records'),
       deleteOldAuditLogs: history('cfm_delete_old_audit_logs'),
       cleanupNotificationDeliveryState: (_db, now, options = {}) => transport('cfm_cleanup_notification_delivery_state', {

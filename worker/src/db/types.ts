@@ -236,91 +236,6 @@ export interface PingTaskHistoryRequest {
   intervalSec?: number;
 }
 
-export type WebsiteMonitorStatus = 'pending' | 'up' | 'down' | 'paused';
-export type WebsiteMonitorMethod = 'GET' | 'HEAD' | 'TCP';
-export type WebsiteAgentProbeMode = 'off' | 'selected' | 'country_auto';
-export type WebsiteCheckSourceType = 'worker' | 'agent';
-
-export interface WebsiteMonitor {
-  id: number;
-  config_revision: string;
-  name: string;
-  url: string;
-  method: WebsiteMonitorMethod;
-  expected_status_min: number;
-  expected_status_max: number;
-  interval_sec: number;
-  timeout_sec: number;
-  grace_period_sec: number;
-  enabled: boolean;
-  hidden: boolean;
-  /** 对游客隐藏地址：公开出口的 url 返回 null，管理端不受影响。 */
-  hide_url: boolean;
-  agent_probe_mode: WebsiteAgentProbeMode;
-  agent_probe_clients: string[];
-  agent_probe_limit: number;
-  agent_probe_status_enabled: boolean;
-  sort_order: number;
-  status: WebsiteMonitorStatus;
-  last_checked_at: string | null;
-  last_success_at: string | null;
-  last_failure_at: string | null;
-  last_status_code: number | null;
-  last_raw_status_code: number | null;
-  last_latency_ms: number | null;
-  last_effective_reason: string | null;
-  last_error: string | null;
-  down_since: string | null;
-  last_notified_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export type WebsiteMonitorInput = Omit<
-  WebsiteMonitor,
-  | 'id'
-  | 'config_revision'
-  | 'sort_order'
-  | 'status'
-  | 'last_checked_at'
-  | 'last_success_at'
-  | 'last_failure_at'
-  | 'last_status_code'
-  | 'last_raw_status_code'
-  | 'last_latency_ms'
-  | 'last_effective_reason'
-  | 'last_error'
-  | 'down_since'
-  | 'last_notified_at'
-  | 'created_at'
-  | 'updated_at'
->;
-
-export interface WebsiteCheck {
-  id: number;
-  monitor_id: number;
-  config_revision: string | null;
-  checked_at: string;
-  ok: boolean;
-  effective_status: Extract<WebsiteMonitorStatus, 'up' | 'down'>;
-  effective_reason: string | null;
-  status_code: number | null;
-  raw_status_code: number | null;
-  latency_ms: number | null;
-  error: string | null;
-  source_type: WebsiteCheckSourceType;
-  source_client: string | null;
-}
-
-export type WebsiteCheckInput =
-  Omit<WebsiteCheck, 'id' | 'source_type' | 'source_client' | 'config_revision'> &
-  { config_revision: string } &
-  Partial<Pick<WebsiteCheck, 'source_type' | 'source_client'>>;
-
-export type WebsiteNotificationExpectation = Pick<
-  WebsiteMonitor, 'config_revision' | 'status' | 'down_since' | 'last_notified_at'
->;
-
 export interface BackupConfigurationSnapshot {
   settings: Record<string, string>;
   clients: Client[];
@@ -328,25 +243,6 @@ export interface BackupConfigurationSnapshot {
   offline_notifications: OfflineNotification[];
   expiry_notifications: ExpiryNotification[];
   load_notifications: LoadNotification[];
-  website_monitors: WebsiteMonitor[];
-}
-
-export interface PublicWebsiteMonitor {
-  id: number;
-  name: string;
-  /** 勾选「对游客隐藏地址」时为 null——游客侧只有名称与状态。 */
-  url: string | null;
-  /** 公开下发监控类型，供前端区分 TCP 与 HTTP，不泄露地址。 */
-  method: WebsiteMonitorMethod;
-  hide_url: boolean;
-  interval_sec: number;
-  status: WebsiteMonitorStatus;
-  last_checked_at: string | null;
-  last_status_code: number | null;
-  last_raw_status_code: number | null;
-  last_latency_ms: number | null;
-  last_effective_reason: string | null;
-  checks: Array<Pick<WebsiteCheck, 'checked_at' | 'ok' | 'effective_status' | 'effective_reason' | 'status_code' | 'raw_status_code' | 'latency_ms' | 'source_type' | 'source_client'>>;
 }
 
 export interface NotificationDeliveryClaim {

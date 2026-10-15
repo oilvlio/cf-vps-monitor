@@ -338,8 +338,8 @@ export default function Instance() {
   };
 
   return (
-    <div className="instance-page">
-      <div className="instance-shell">
+    <div className="instance-page lp-inst-page">
+      <div className="instance-shell lp-inst-shell">
         <InstanceNodeSidebar
           groups={groupedClients}
           activeUuid={uuid || ''}
@@ -349,7 +349,7 @@ export default function Instance() {
           onSelect={(nextUuid) => navigate(`/instance/${nextUuid}`)}
         />
 
-        <section className="instance-detail-panel">
+        <section className="instance-detail-panel lp-inst-panel">
       {/* Top bar */}
       <Flex justify="between" align="center" mb="4">
         <Button variant="ghost" onClick={() => navigate('/')}>
@@ -357,8 +357,11 @@ export default function Instance() {
         </Button>
       </Flex>
 
+      <div className="lp-inst-grid">
+        <div className="lp-inst-left">
+
       {/* Header + compact details */}
-      <Card className="instance-top-summary" mb="3">
+      <Card className="instance-top-summary lp-inst-summary" mb="3">
         <Flex align="center" gap="3" wrap="wrap" className="instance-top-summary-header">
           <Server size={26} color="var(--accent-9)" />
           <Heading size="5">{client.name}</Heading>
@@ -371,9 +374,11 @@ export default function Instance() {
         </Flex>
         <DetailsGrid client={client} live={latest || undefined} compact remark={client.public_remark} />
       </Card>
+        </div>
+        <div className="lp-inst-right">
 
       {/* Chart section */}
-      <Card mb="4">
+      <Card mb="4" className="lp-inst-chart">
         {recordsError && <Flex align="center" gap="2" mb="2"><Text color="red" role="alert">{recordsError}</Text><Button size="1" variant="soft" onClick={() => void loadRecords(timeRange)}>重试</Button></Flex>}
         {chartTab === 'gpu' && gpuError && <Flex align="center" gap="2" mb="2"><Text color="red" role="alert">{gpuError}</Text><Button size="1" variant="soft" onClick={() => setGpuRefresh(value => value + 1)}>重试 GPU 历史</Button></Flex>}
         <Flex justify="between" align="center" mb="3" gap="3" wrap="wrap">
@@ -556,7 +561,7 @@ export default function Instance() {
 
       {/* Ping chart */}
       <div ref={pingSectionRef}>
-      <Card mb="4">
+      <Card mb="4" className="lp-inst-ping">
         <Flex justify="between" align="center" mb="3" gap="3" wrap="wrap">
           <Flex align="center" gap="2">
             <Text weight="bold">Ping 延迟</Text>
@@ -682,6 +687,8 @@ export default function Instance() {
         )}
       </Card>
       </div>
+        </div>
+      </div>
 
         </section>
       </div>
@@ -707,8 +714,8 @@ function InstanceNodeSidebar({
   const total = groups.reduce((sum, group) => sum + group.nodes.length, 0);
 
   return (
-    <aside className="instance-node-sidebar" aria-label="节点列表">
-      <Card className="instance-node-sidebar-card">
+    <aside className="instance-node-sidebar lp-inst-sidebar" aria-label="节点列表">
+      <Card className="instance-node-sidebar-card lp-inst-sidebar-card">
         <Flex direction="column" style={{ height: '100%', minHeight: 0 }}>
           <Flex justify="between" align="center" className="instance-sidebar-header">
             <Box>

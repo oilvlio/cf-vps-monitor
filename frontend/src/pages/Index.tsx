@@ -74,30 +74,30 @@ export function TopCard({
   const hasInlineValues = Boolean(inlineValues?.length);
 
   return (
-    <Box className={`monitor-stat-card${hasInlineValues ? ' has-inline-values' : ''}${className ? ` ${className}` : ''}`}>
-      <Flex className="monitor-stat-card-inner" align="center" gap="2">
-        <span className="monitor-stat-icon" aria-hidden="true">{icon}</span>
-        <Box className="monitor-stat-copy">
-          <Flex className="monitor-stat-heading-row" align="center" gap="2">
-            <Text className="monitor-stat-title" size="2">{title}</Text>
+    <Box className={`monitor-stat-card lp-stat-card${hasInlineValues ? ' has-inline-values' : ''}${className ? ` ${className}` : ''}`}>
+      <Flex className="monitor-stat-card-inner lp-stat-inner" align="center" gap="2">
+        <span className="monitor-stat-icon lp-stat-icon" aria-hidden="true">{icon}</span>
+        <Box className="monitor-stat-copy lp-stat-copy">
+          <Flex className="monitor-stat-heading-row lp-stat-heading" align="center" gap="2">
+            <Text className="monitor-stat-title lp-stat-title" size="2">{title}</Text>
             {inlineValues ? (
-              <span className="monitor-stat-inline-values">
+              <span className="monitor-stat-inline-values lp-stat-inline-values">
                 {inlineValues.map((item) => (
                   <span
                     key={item}
-                    className={`monitor-stat-inline-value${item.startsWith('↑') ? ' is-up' : item.startsWith('↓') ? ' is-down' : ''}`}
+                    className={`monitor-stat-inline-value lp-stat-inline-value${item.startsWith('↑') ? ' is-up' : item.startsWith('↓') ? ' is-down' : ''}`}
                   >
                     {item}
                   </span>
                 ))}
               </span>
             ) : (
-              <Text className="monitor-stat-value" size="5" weight="bold">
+              <Text className="monitor-stat-value lp-stat-value" size="5" weight="bold">
                 {value}
               </Text>
             )}
           </Flex>
-          {!oneLine && <Text className="monitor-stat-detail" size="1">{detail}</Text>}
+          {!oneLine && <Text className="monitor-stat-detail lp-stat-detail" size="1">{detail}</Text>}
         </Box>
       </Flex>
     </Box>
@@ -267,7 +267,7 @@ export default function Index() {
   const statusCards = buildDashboardStatusCards(stats);
 
   const renderGrid = (nodes: ClientInfo[], ld: LiveDataMap) => (
-    <Box className="node-card-grid" style={nodeCardGridStyle}>
+    <Box className="node-card-grid lp-node-grid" style={nodeCardGridStyle}>
       {nodes.map(client => (
         <NodeCard
           key={client.uuid}
@@ -285,9 +285,9 @@ export default function Index() {
   );
 
   return (
-    <div className="monitor-dashboard-page">
-      <section className="monitor-dashboard-hero monitor-dashboard-compact">
-        <div className="monitor-stat-grid">
+    <div className="monitor-dashboard-page lp-dashboard-page">
+      <section className="monitor-dashboard-hero monitor-dashboard-compact lp-dashboard-hero">
+        <div className="monitor-stat-grid lp-stat-grid">
           {statusCards.filter(card => fallbackVisibility[card.key]).map(card => (
             <TopCard
               key={card.key}

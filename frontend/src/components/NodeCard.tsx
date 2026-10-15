@@ -1,12 +1,12 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { Badge, Box, Card, Flex, IconButton, Separator, Text, Tooltip } from '@radix-ui/themes';
-import { Activity, ArrowDown, ArrowUp, BarChart3, TrendingUp } from 'lucide-react';
+import { Badge, Box, Card, Flex, IconButton, Text, Tooltip } from '@radix-ui/themes';
+import { ArrowDown, ArrowUp, Cpu, HardDrive, MemoryStick, Timer, TrendingUp } from 'lucide-react';
 import Flag from './Flag';
 import PriceTags from './PriceTags';
 import MiniPingChartFloat from './MiniPingChartFloat';
-import PingStrip from './PingStrip';
 import type { HomePingNode } from '../utils/homePing';
+import { formatHomeLatency, formatHomeLoss, latencyLevel, lossLevel } from '../utils/homePing';
 import { diskUsagePresentation, formatLastReport, formatMetricBytes, formatMetricSpeed, formatMetricUptime, metricNumber, resourceUsage, type NodeStatus } from '../utils/nodeMetrics';
 import { formatTrafficLimitLabel, parseTrafficLimitType } from '../utils/traffic';
 import { ClientInfo, LiveRecord } from '../types';
@@ -42,12 +42,12 @@ function NodeRegionTagsLine({ region, tags }: { region?: string; tags?: string }
     </span>
   );
   const line = (
-    <div className="node-card-region-line node-card-region-tags-line">
+    <div className="node-card-region-line node-card-region-tags-line lp-sub-region">
       <span className="node-card-region-text">{regionLabel}</span>
       {tagTexts.length > 0 && (
-        <span className="node-card-header-tags" aria-label={`标签 ${tagTexts.join(' ')}`}>
+        <span className="node-card-header-tags lp-sub-tags" aria-label={`标签 ${tagTexts.join(' ')}`}>
           {tagTexts.map((tag, index) => (
-            <span className="node-card-header-tag" key={`${tag}-${index}`}>{tag}</span>
+            <span className="node-card-header-tag lp-sub-tag" key={`${tag}-${index}`}>{tag}</span>
           ))}
         </span>
       )}
@@ -66,35 +66,6 @@ function clampPercent(value: number) {
   return Math.max(0, Math.min(100, value));
 }
 
-function CompactMetric({
-  label,
-  value,
-  detail,
-  percent,
-  title,
-}: {
-  label: string;
-  value: string;
-  detail: string;
-  percent?: number | null;
-  title?: string;
-}) {
-  return (
-    <div className="node-metric-tile" data-load={typeof percent === 'number' ? (percent >= 85 ? 'hot' : percent >= 65 ? 'warm' : 'normal') : undefined}>
-      <Flex justify="between" align="baseline" gap="2">
-        <Text className="node-metric-label" size="1">{label}</Text>
-        <Text className="node-metric-value" size="2" weight="bold">{value}</Text>
-      </Flex>
-      <Text className="node-metric-detail" size="1" title={title || detail}>{detail}</Text>
-      {typeof percent === 'number' && (
-        <span className="node-metric-bar" aria-hidden="true">
-          <span style={{ transform: `scaleX(${clampPercent(percent) / 100})` }} />
-        </span>
-      )}
-    </div>
-  );
-}
-
 function getUsageLevel(percent: number) {
   if (percent >= 85) return 'hot';
   if (percent >= 65) return 'warm';
@@ -107,101 +78,85 @@ function formatPercent(value: number | null) {
   return `${clamped.toFixed(clamped < 10 ? 1 : 0)}%`;
 }
 
-function RingMetric({
-  label,
-  percent,
-  estimated = false,
-  title,
-}: {
-  label: string;
-  percent: number | null;
-  estimated?: boolean;
-  title?: string;
-}) {
-  const clamped = clampPercent(percent ?? 0);
-  const ringStyle = {
-    '--metric-percent': `${clamped}%`,
-  } as React.CSSProperties;
+const LP_DOT_COUNT = 18;
 
+function LpDotBar({ percent, level }: { percent: number | null; level: string }) {
+  const lit = percent === null ? 0 : Math.round((clampPercent(percent) / 100) * LP_DOT_COUNT);
   return (
-    <div
-      className="node-resource-ring"
-      data-monitor-role="resource-ring"
-      data-load={percent === null ? undefined : getUsageLevel(clamped)}
-      title={title}
-    >
-      <div className="node-resource-ring-chart" style={ringStyle}>
-        <Text className="node-resource-ring-value" weight="bold">
-          {estimated && percent !== null ? '≈ ' : ''}{formatPercent(percent === null ? null : clamped)}
-        </Text>
+    <span className="lp-dots" data-level={level} aria-hidden="true">
+      {Array.from({ length: LP_DOT_COUNT }, (_, i) => (
+        <i key={i} className="lp-dot" data-lit={i < lit ? 'true' : 'false'} />
+      ))}
+    </span>
+  );
+}
+
+function LpMetric({
+  icon,
+  label,
+  value,
+  detail,
+  title,
+  percent,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  detail: string;
+  title?: string;
+  percent: number | null;
+}) {
+  const level = percent === null ? 'none' : getUsageLevel(clampPercent(percent));
+  return (
+    <div className="lp-metric" data-load={level}>
+      <div className="lp-metric-head">
+        <span className="lp-metric-label">{icon}{label}</span>
+        <span className="lp-metric-value" data-load={level}>{value}</span>
       </div>
-      <Text className="node-resource-ring-label" weight="bold">{label}</Text>
+      <LpDotBar percent={percent} level={level} />
+      <div className="lp-metric-detail" title={title || detail}>{detail}</div>
     </div>
   );
 }
 
-function NetworkSummary({
-  uploadSpeed,
-  downloadSpeed,
-  totalUp,
-  totalDown,
-  uptimeLabel,
-  historical,
-}: {
-  uploadSpeed: string;
-  downloadSpeed: string;
-  totalUp: number | null;
-  totalDown: number | null;
-  uptimeLabel: string;
-  historical: boolean;
-}) {
+function formatBucketTime(t: number): string {
+  if (!t) return '';
+  return new Date(t).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
+/** 单条 ping 点阵的着色：丢包 warn/bad 优先，否则按延迟。 */
+function singlePingLevel(latencyMs: number | null, lossPercent: number | null): string {
+  const loss = lossLevel(lossPercent);
+  if (loss === 'warn' || loss === 'bad') return loss;
+  return latencyLevel(latencyMs, lossPercent);
+}
+
+function LpPingLine({ data, bucketSec = 300 }: { data: HomePingNode; bucketSec?: number }) {
+  const headLatency = data.latency_ms ?? data.latency_avg_ms;
+  const headLevel = singlePingLevel(data.latency_ms, data.loss_percent);
+  const timedOut = data.latency_ms === null && data.loss_percent !== null && data.loss_percent > 0;
+  const bucketLabel = bucketSec >= 3600 && bucketSec % 3600 === 0 ? `${bucketSec / 3600} 小时` : `${Math.round(bucketSec / 60)} 分钟`;
+  const hint = `探测点：${data.task_name || `#${data.task_id}`} · 每格 ${bucketLabel}`;
   return (
-    <div className="node-network-panel" data-monitor-role="network-panel">
-      <div className="node-network-summary-row" data-monitor-role="network-speed-summary">
-        <Text className="node-network-summary-label" size="1" weight="bold">
-          <Activity size={14} />
-          {historical ? '上报时网速' : '网速'}
-        </Text>
-        <div className="node-network-summary-values">
-          <span className="node-network-value is-up" aria-label="上传速率">
-            <ArrowUp size={13} />
-            <strong>{uploadSpeed}</strong>
-          </span>
-          <span className="node-network-value is-down" aria-label="下载速率">
-            <ArrowDown size={13} />
-            <strong>{downloadSpeed}</strong>
-          </span>
-        </div>
+    <div className="lp-ping" title={hint} data-monitor-role="ping-strip">
+      <div className="lp-ping-head">
+        <span className="lp-ping-label"><Timer size={13} />Ping</span>
+        <span className="lp-ping-value" data-level={headLevel}>
+          {timedOut ? '超时' : `${formatHomeLatency(headLatency)}`}
+          {!timedOut && headLatency !== null && <small>ms</small>}
+          <span className="lp-ping-loss" data-level={lossLevel(data.loss_percent)}> · 丢包 {formatHomeLoss(data.loss_percent)}%</span>
+        </span>
       </div>
-
-      <div className="node-network-summary-row" data-monitor-role="network-traffic-summary">
-        <Text className="node-network-summary-label" size="1" weight="bold">
-          <BarChart3 size={14} />
-          流量
-        </Text>
-        <div className="node-network-summary-values">
-          <span className="node-network-value is-up" aria-label="上传总量">
-            <ArrowUp size={13} />
-            <strong>{formatMetricBytes(totalUp)}</strong>
-          </span>
-          <span className="node-network-value is-down" aria-label="下载总量">
-            <ArrowDown size={13} />
-            <strong>{formatMetricBytes(totalDown)}</strong>
-          </span>
-        </div>
-      </div>
-
-      <div className="node-network-summary-row node-network-uptime-row" data-monitor-role="network-uptime-summary">
-        <Text className="node-network-summary-label" size="1" weight="bold">
-          <Activity size={14} />
-          {historical ? '上报时已运行' : '在线时长'}
-        </Text>
-        <div className="node-network-summary-values node-network-uptime-values">
-          <span className="node-network-value node-network-uptime-value">
-            <strong className="node-uptime-nowrap" title={uptimeLabel}>{uptimeLabel}</strong>
-          </span>
-        </div>
-      </div>
+      <span className="lp-ping-dots" aria-hidden="true">
+        {data.points.map((point) => (
+          <i
+            key={point.t}
+            className="lp-ping-dot"
+            data-level={singlePingLevel(point.latency_ms, point.loss_percent)}
+            title={`${formatBucketTime(point.t)} ${point.latency_ms === null ? (point.loss_percent === null ? '无数据' : '超时') : `${point.latency_ms} ms`} · 丢包 ${formatHomeLoss(point.loss_percent)}%`}
+          />
+        ))}
+      </span>
     </div>
   );
 }
@@ -256,6 +211,7 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
     }
   })();
   const trafficPct = client.traffic_limit > 0 && trafficUsed !== null ? Math.min(100, (trafficUsed / client.traffic_limit) * 100) : undefined;
+  const quotaLit = trafficPct === undefined ? 0 : Math.round((trafficPct / 100) * LP_DOT_COUNT);
   const hasBillingInfo = (client.price !== undefined && client.price !== 0) || Boolean(getExpiryInfo(client.expired_at).label);
   const handleCardLinkClick = (event: React.MouseEvent<HTMLAnchorElement>) => {
     const target = event.target as HTMLElement | null;
@@ -266,16 +222,17 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
 
   return (
     <Card
-      className="node-card"
+      className="node-card lp-card"
+      data-status={nodeStatus}
       style={{ width: '100%', margin: '0 auto', opacity: online ? 1 : 0.75 }}
       id={client.uuid}
     >
-      <Link className="node-card-link" to={`/instance/${client.uuid}`} onClick={handleCardLinkClick} style={{ textDecoration: 'none', color: 'inherit' }}>
-        <Flex className="node-card-body" direction="column" gap="2">
-          <Flex className="node-card-header" justify="between" align="start" my={isMobile ? '-1' : '0'} data-has-message={d.message ? 'true' : undefined}>
+      <Link className="node-card-link lp-link" to={`/instance/${client.uuid}`} onClick={handleCardLinkClick} style={{ textDecoration: 'none', color: 'inherit' }}>
+        <Flex className="node-card-body lp-body" direction="column" gap="2">
+          <Flex className="node-card-header lp-head" justify="between" align="start" my={isMobile ? '-1' : '0'} data-has-message={d.message ? 'true' : undefined}>
             <Flex justify="start" align="center" style={{ flex: 1, minWidth: 0 }}>
               <Flex direction="column" style={{ minWidth: 0, flex: 1 }}>
-                <Flex className="node-card-title-row" align="center" gap="2">
+                <Flex className="node-card-title-row lp-title-row" align="center" gap="2">
                   <span
                     className="node-card-corner-flag"
                     data-monitor-role="node-region-flag"
@@ -284,7 +241,7 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
                   >
                     <Flag region={client.region} size={isMobile ? 18 : 20} />
                   </span>
-                  <Text weight="bold" size={isMobile ? '2' : '4'} truncate style={{ maxWidth: '100%' }}>
+                  <Text weight="bold" size={isMobile ? '2' : '4'} truncate className="lp-name" style={{ maxWidth: '100%' }}>
                     {client.name}
                   </Text>
                 </Flex>
@@ -292,7 +249,7 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
               </Flex>
             </Flex>
 
-            <Flex className="node-card-status-row" gap="2" align="center" style={{ flex: 'none' }}>
+            <Flex className="node-card-status-row lp-status-row" gap="2" align="center" style={{ flex: 'none' }}>
               {d.message && (
                 <Box
                   style={{
@@ -322,9 +279,9 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
               </Badge>
             </Flex>
           </Flex>
-          {nodeStatus === 'offline' && <Text size="1" color="gray">最后上报 {formatLastReport(lastReportTime)}{!live && ' · 暂无上报数据'}</Text>}
-          <Flex className="node-card-title-meta" align="center" gap="2">
-            <span className="node-os-chip">
+          {nodeStatus === 'offline' && <Text size="1" color="gray" className="lp-offline-note">最后上报 {formatLastReport(lastReportTime)}{!live && ' · 暂无上报数据'}</Text>}
+          <Flex className="node-card-title-meta lp-sub" align="center" gap="2">
+            <span className="node-os-chip lp-os-chip">
               <img src={osConfig.image} alt="" aria-hidden="true" />
               {osConfig.name}
             </span>
@@ -341,71 +298,41 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
             <NodeIpBadges client={client} className="node-card-title-ip-badges" />
           </Flex>
 
-          <Separator size="4" className="-mt-1" />
+          <Flex direction="column" gap="2" className="lp-stack">
+            <div className="lp-grid">
+              <LpMetric icon={<Cpu size={13} />} label="CPU" value={formatPercent(cpuPct)} detail={cpuDetail} title={cpuTitle} percent={cpuPct} />
+              <LpMetric icon={<MemoryStick size={13} />} label="内存" value={formatPercent(memPct)} detail={memDetail} percent={memPct} />
+              <LpMetric icon={<HardDrive size={13} />} label={disk.estimated ? '磁盘·估' : '磁盘'} value={`${disk.estimated && diskPct !== null ? '≈ ' : ''}${formatPercent(diskPct)}`} detail={diskDetail} title={disk.estimated ? `${disk.description} ${disk.sampleLabel}` : undefined} percent={diskPct} />
+            </div>
 
-          <Flex direction="column" gap="2">
-            <div className="node-card-system-line">
-              <div className="node-card-system-main">
-                <Flex align="center" gap="1" style={{ minWidth: 0 }}>
-                  <img src={osConfig.image} alt={osConfig.name} style={{ width: 16, height: 16 }} />
-                  <Text size="1" truncate>{osConfig.name}</Text>
-                </Flex>
-                <span className="node-card-billing-row node-card-system-billing-row" aria-hidden={!hasBillingInfo}>
-                  <PriceTags
-                    price={client.price}
-                    billing_cycle={client.billing_cycle}
-                    currency={client.currency}
-                    expired_at={client.expired_at}
-                    showTags={false}
-                    showExpiry
-                  />
+            <div className="lp-net">
+              <div className="lp-net-col">
+                <div className="lp-net-head"><span className="lp-net-dir is-up"><ArrowUp size={13} />上行</span><strong className="lp-net-rate">{uploadSpeed}</strong></div>
+                <div className="lp-net-foot"><span>出站</span><span>{formatMetricBytes(totalUp)}</span></div>
+              </div>
+              <div className="lp-net-col">
+                <div className="lp-net-head"><span className="lp-net-dir is-down"><ArrowDown size={13} />下行</span><strong className="lp-net-rate">{downloadSpeed}</strong></div>
+                <div className="lp-net-foot"><span>入站</span><span>{formatMetricBytes(totalDown)}</span></div>
+              </div>
+            </div>
+
+            <div className="lp-quota" title={trafficLimitLabel || '月度流量'}>
+              <div className="lp-quota-head">
+                <span className="lp-quota-label">在线时长 {nodeStatus === 'offline' ? '(上报时) ' : ''}{uptimeLabel}</span>
+                <span className="lp-quota-usage">
+                  {client.traffic_limit > 0
+                    ? `${formatMetricBytes(trafficUsed)} / ${formatMetricBytes(client.traffic_limit)}`
+                    : trafficLimitLabel || '流量未限'}
                 </span>
               </div>
-              <NodeIpBadges client={client} />
-            </div>
-
-            <div className="node-card-tile-layout" data-monitor-layout="tile">
-              <div className="node-metric-grid">
-                <CompactMetric label="CPU" value={formatPercent(cpuPct)} detail={cpuDetail} title={cpuTitle} percent={cpuPct} />
-                <CompactMetric label="内存" value={formatPercent(memPct)} detail={memDetail} percent={memPct} />
-                <CompactMetric label={disk.estimated ? '磁盘（估算）' : '磁盘'} value={`${disk.estimated && diskPct !== null ? '≈ ' : ''}${formatPercent(diskPct)}`} detail={diskDetail} title={disk.estimated ? `${disk.description} ${disk.sampleLabel}` : undefined} percent={diskPct} />
-                <CompactMetric
-                  label="月度"
-                  value={trafficLimitLabel ? trafficPct === undefined ? '—' : `${trafficPct.toFixed(0)}%` : '-'}
-                  detail={client.traffic_limit > 0
-                    ? `${formatMetricBytes(trafficUsed)} / ${formatMetricBytes(client.traffic_limit)}`
-                    : trafficLimitLabel || '未设置'}
-                  percent={trafficLimitLabel ? trafficPct : undefined}
-                />
+              <div className="lp-quota-track" aria-hidden="true">
+                {Array.from({ length: LP_DOT_COUNT }, (_, i) => (
+                  <span key={i} className="lp-quota-seg" data-lit={trafficLimitLabel ? (i < quotaLit ? 'true' : 'false') : undefined} data-pos={i} />
+                ))}
               </div>
-              <NetworkSummary
-                uploadSpeed={uploadSpeed}
-                downloadSpeed={downloadSpeed}
-                totalUp={totalUp}
-                totalDown={totalDown}
-                uptimeLabel={uptimeLabel}
-                historical={nodeStatus === 'offline'}
-              />
             </div>
 
-            <div className="node-card-monitor-layout" data-monitor-layout="monitor">
-              <div className="node-resource-ring-grid">
-                <RingMetric label="CPU" percent={cpuPct} />
-                <RingMetric label="RAM" percent={memPct} />
-                <RingMetric label={disk.estimated ? 'Disk（估算）' : 'Disk'} percent={diskPct} estimated={disk.estimated} title={disk.estimated ? `${disk.description} ${disk.detail} ${disk.sampleLabel}` : undefined} />
-              </div>
-
-              <NetworkSummary
-                uploadSpeed={uploadSpeed}
-                downloadSpeed={downloadSpeed}
-                totalUp={totalUp}
-                totalDown={totalDown}
-                uptimeLabel={uptimeLabel}
-                historical={nodeStatus === 'offline'}
-              />
-            </div>
-
-            {homePing && <PingStrip data={homePing} bucketSec={homePingBucketSec} />}
+            {homePing && <LpPingLine data={homePing} bucketSec={homePingBucketSec} />}
           </Flex>
         </Flex>
       </Link>

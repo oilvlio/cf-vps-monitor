@@ -26,7 +26,7 @@ type StatusCardsVisibility = Record<StatusCardKey, boolean>;
 
 const fallbackVisibility: StatusCardsVisibility = { ...defaultStatusCardVisibility };
 
-export const nodeCardGridTemplateColumns = 'repeat(auto-fill, 320px)';
+export const nodeCardGridTemplateColumns = 'repeat(4, minmax(0, 1fr))';
 export const mobileNodeCardGridTemplateColumns = '1fr';
 
 const nodeCardGridStyle = {

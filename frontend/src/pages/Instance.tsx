@@ -2,7 +2,7 @@
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   Flex, Card, Text, Badge, Heading,
-  Button, Box, Tabs, SegmentedControl
+  Button, Box, SegmentedControl
 } from '@radix-ui/themes';
 import {
   ArrowLeft,
@@ -10,7 +10,6 @@ import {
   Layers
 } from 'lucide-react';
 import Loading from '../components/Loading';
-import DetailsGrid from '../components/DetailsGrid';
 import Flag from '../components/Flag';
 import PingYAxisTick from '../components/PingYAxisTick';
 import { useLiveData } from '../contexts/LiveDataContext';
@@ -25,7 +24,8 @@ import {
   type PublicMonitorRecord,
 } from '../utils/publicHistory';
 import type { ClientInfo, LiveDataMap } from '../types';
-import { formatLastReport, formatMetricUptime, getNodeDisplayRecord, getNodeLastReportTime, getNodeStatus } from '../utils/nodeMetrics';
+import { diskUsagePresentation, formatLastReport, formatMetricBytes, formatMetricUptime, getNodeDisplayRecord, getNodeLastReportTime, getNodeStatus, resourceTotal } from '../utils/nodeMetrics';
+import { formatCpuSpec } from '../utils/cpuFormat';
 import { filterMonitorNodes } from '../utils/monitorView';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -54,8 +54,12 @@ const formatSpeed = (bytes: number): string => {
   return `${(bytes / Math.pow(1024, i)).toFixed(i >= 2 ? 1 : 0)} ${units[i]}`;
 };
 
+function formatIpSupport(supported?: boolean, sourceValue?: string) {
+  return supported || Boolean(sourceValue) ? '支持' : '不支持';
+}
+
 type TimeRange = '1h' | '4h' | '24h' | '3d' | '7d';
-type ChartTab = 'cpu' | 'ram' | 'disk' | 'network' | 'connections' | 'process' | 'temp' | 'gpu';
+type ViewTab = 'load' | 'ping';
 
 const timeRangeMs: Record<TimeRange, number> = {
   '1h': 3600000,
@@ -82,7 +86,8 @@ const timeRangePointLimit: Record<TimeRange, number> = {
 };
 
 const monitorChartMargin = { top: 12, right: 16, bottom: 4, left: 4 };
-const monitorChartHeight = 296;
+const miniChartMargin = { top: 8, right: 8, bottom: 0, left: 0 };
+const miniChartHeight = 150;
 const pingChartHeight = 210;
 
 function historyQuery(params: Record<string, string | number | undefined>): string {
@@ -108,7 +113,7 @@ export default function Instance() {
   const clientRequestRef = useRef(0);
   const recordsRequestRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
-  const [chartTab, setChartTab] = useState<ChartTab>('cpu');
+  const [viewTab, setViewTab] = useState<ViewTab>('load');
   const [timeRange, setTimeRange] = useState<TimeRange>('1h');
   const [recordsRangeEnd, setRecordsRangeEnd] = useState(() => Date.now());
   const [pingSeries, setPingSeries] = useState<PingTaskSeries[]>([]);
@@ -213,7 +218,7 @@ export default function Instance() {
   }, [uuid]);
 
   useEffect(() => {
-    if (shouldLoadPing) return;
+    if (shouldLoadPing || viewTab !== 'ping') return;
     const target = pingSectionRef.current;
     if (!target || typeof IntersectionObserver === 'undefined') {
       setShouldLoadPing(true);
@@ -227,7 +232,7 @@ export default function Instance() {
     }, { rootMargin: '240px 0px' });
     observer.observe(target);
     return () => observer.disconnect();
-  }, [shouldLoadPing, uuid]);
+  }, [shouldLoadPing, uuid, viewTab]);
 
   // Load ping tasks and records only when the Ping card is near the viewport.
   useEffect(() => {
@@ -255,10 +260,6 @@ export default function Instance() {
   }, [shouldLoadPing, timeRange, uuid, authLoading, isAuthenticated]);
 
   // Load GPU records (only for GPU-capable clients)
-  useEffect(() => {
-    if (client && !client.gpu_name) setChartTab(current => current === 'gpu' ? 'cpu' : current);
-  }, [client?.uuid, client?.gpu_name]);
-
   useEffect(() => {
     setGpuRecords([]);
     setGpuError(null);
@@ -309,6 +310,9 @@ export default function Instance() {
   const chartData = buildMonitorChartData(records);
   const chartRenderData = getMonitorChartRenderData(chartData, timeRangeMs[timeRange], recordsRangeEnd);
   const monitorXAxisDomain = [recordsRangeEnd - timeRangeMs[timeRange], recordsRangeEnd] as [number, number];
+  const lastPoint = chartData.length > 0 ? chartData[chartData.length - 1] : null;
+  const hasDiskData = chartData.some((point) => point.disk !== null);
+  const hasTempData = chartData.some((point) => point.temp !== null);
 
   const gpuChartData = gpuRecords.map((r) => ({
     time: new Date(r.time).getTime(),
@@ -316,6 +320,7 @@ export default function Instance() {
     memory: r.mem_total > 0 ? Number(((r.mem_used / r.mem_total) * 100).toFixed(1)) : 0,
     temp: r.temperature || 0,
   }));
+  const lastGpuPoint = gpuChartData.length > 0 ? gpuChartData[gpuChartData.length - 1] : null;
 
   const pingSeriesWithRecords = getPingSeriesWithRecords(pingSeries);
   const selectedPingTaskKeySet = new Set(selectedPingTaskKeys);
@@ -337,6 +342,26 @@ export default function Instance() {
     });
   };
 
+  const timeRangeLabel = timeRange === '1h' ? '最近1小时' : timeRange === '4h' ? '最近4小时' : timeRange === '24h' ? '最近24小时' : timeRange === '3d' ? '最近3天' : '最近7天';
+  // 与 DetailsGrid 同口径的展示数据：字段一个不少，只是按系统 / 资源 / 网络分组横排。
+  const infoDisk = diskUsagePresentation(latest || undefined, client.disk_total);
+  const infoIpValue = `IPv4 ${formatIpSupport(client.has_ipv4, client.ipv4)} / IPv6 ${formatIpSupport(client.has_ipv6, client.ipv6)}`;
+  const normalizedRemark = client.public_remark?.trim();
+
+  const miniXAxis = (
+    <XAxis
+      dataKey="time"
+      type="number"
+      domain={monitorXAxisDomain}
+      tickFormatter={chartTimeFormatter}
+      fontSize={11}
+      minTickGap={64}
+      tickLine={false}
+      axisLine={false}
+    />
+  );
+  const miniGrid = <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.3} />;
+
   return (
     <div className="instance-page lp-inst-page">
       <div className="instance-shell lp-inst-shell">
@@ -357,10 +382,7 @@ export default function Instance() {
         </Button>
       </Flex>
 
-      <div className="lp-inst-grid">
-        <div className="lp-inst-left">
-
-      {/* Header + compact details */}
+      {/* Header + 横向多信息卡（系统 / 资源 / 网络） */}
       <Card className="instance-top-summary lp-inst-summary" mb="3">
         <Flex align="center" gap="3" wrap="wrap" className="instance-top-summary-header">
           <Server size={26} color="var(--accent-9)" />
@@ -372,17 +394,50 @@ export default function Instance() {
           </Badge>
           {nodeStatus === 'offline' && <Text size="1" color="gray">最后上报 {formatLastReport(latestRecordTime)} · 上报时已运行 {formatMetricUptime(latest?.uptime)}</Text>}
         </Flex>
-        <DetailsGrid client={client} live={latest || undefined} compact remark={client.public_remark} />
-      </Card>
+        <div className="lp-info-groups">
+          <div className="lp-info-group">
+            <div className="lp-info-group-title">系统</div>
+            <dl className="lp-info-list">
+              <LpInfoRow label="CPU" value={formatCpuSpec(client.cpu_name, client.cpu_cores)} />
+              <LpInfoRow label="架构" value={client.arch || '-'} />
+              <LpInfoRow label="虚拟化" value={client.virtualization || '-'} />
+              <LpInfoRow label="操作系统" value={client.os || '-'} />
+              <LpInfoRow label="内核" value={client.kernel_version || '-'} />
+              <LpInfoRow label="GPU" value={client.gpu_name || '-'} />
+            </dl>
+          </div>
+          <div className="lp-info-group">
+            <div className="lp-info-group-title">资源</div>
+            <dl className="lp-info-list">
+              <LpInfoRow label="内存容量" value={formatMetricBytes(resourceTotal(latest?.ram_total, client.mem_total))} />
+              <LpInfoRow label="交换空间" value={formatMetricBytes(latest?.swap_total ?? client.swap_total)} />
+              <LpInfoRow label="磁盘容量" value={formatMetricBytes(resourceTotal(latest?.disk_total, client.disk_total))} />
+              {infoDisk.estimated && <LpInfoRow label="磁盘占用（估算）" value={infoDisk.detail} />}
+              <LpInfoRow label="Agent" value={client.version || '-'} />
+            </dl>
+            {infoDisk.estimated && <Text as="p" size="1" color="gray" mt="2">{infoDisk.description} {infoDisk.sampleLabel}</Text>}
+          </div>
+          <div className="lp-info-group">
+            <div className="lp-info-group-title">网络</div>
+            <dl className="lp-info-list">
+              <LpInfoRow label="IP 支持" value={infoIpValue} />
+              <LpInfoRow label="地区" value={client.region || '-'} />
+              {normalizedRemark && <LpInfoRow label="备注" value={normalizedRemark} />}
+            </dl>
+          </div>
         </div>
-        <div className="lp-inst-right">
+      </Card>
 
-      {/* Chart section */}
-      <Card mb="4" className="lp-inst-chart">
-        {recordsError && <Flex align="center" gap="2" mb="2"><Text color="red" role="alert">{recordsError}</Text><Button size="1" variant="soft" onClick={() => void loadRecords(timeRange)}>重试</Button></Flex>}
-        {chartTab === 'gpu' && gpuError && <Flex align="center" gap="2" mb="2"><Text color="red" role="alert">{gpuError}</Text><Button size="1" variant="soft" onClick={() => setGpuRefresh(value => value + 1)}>重试 GPU 历史</Button></Flex>}
-        <Flex justify="between" align="center" mb="3" gap="3" wrap="wrap">
-          <Text weight="bold">监控图表 · {timeRange === '1h' ? '最近1小时' : timeRange === '4h' ? '最近4小时' : timeRange === '24h' ? '最近24小时' : timeRange === '3d' ? '最近3天' : '最近7天'}</Text>
+      {/* 负载 | Ping 切换 + 时间档位 */}
+      <Card className="lp-inst-controls" mb="3">
+        <Flex justify="between" align="center" gap="3" wrap="wrap">
+          <Flex align="center" gap="3" wrap="wrap">
+            <SegmentedControl.Root size="1" value={viewTab} onValueChange={(value) => setViewTab(value as ViewTab)}>
+              <SegmentedControl.Item value="load">负载</SegmentedControl.Item>
+              <SegmentedControl.Item value="ping">Ping</SegmentedControl.Item>
+            </SegmentedControl.Root>
+            <Text weight="bold">{viewTab === 'load' ? '负载' : 'Ping 延迟'} · {timeRangeLabel}</Text>
+          </Flex>
           <Flex align="center" gap="3" wrap="wrap">
             <SegmentedControl.Root size="1" value={timeRange} onValueChange={handleTimeRangeChange}>
               <SegmentedControl.Item value="1h">1小时</SegmentedControl.Item>
@@ -394,172 +449,201 @@ export default function Instance() {
             <Text size="1" color="gray">{records.length} 个数据点</Text>
           </Flex>
         </Flex>
-        <Tabs.Root value={chartTab} onValueChange={(value) => setChartTab(value as ChartTab)}>
-          <Flex justify="center" className="instance-chart-tabs">
-            <Tabs.List>
-              <Tabs.Trigger value="cpu">CPU</Tabs.Trigger>
-              <Tabs.Trigger value="ram">内存</Tabs.Trigger>
-              <Tabs.Trigger value="disk">磁盘</Tabs.Trigger>
-              <Tabs.Trigger value="network">网络</Tabs.Trigger>
-              <Tabs.Trigger value="connections">连接数</Tabs.Trigger>
-              <Tabs.Trigger value="process">进程数</Tabs.Trigger>
-              <Tabs.Trigger value="temp">温度</Tabs.Trigger>
-              {client.gpu_name && (
-                <Tabs.Trigger value="gpu">GPU</Tabs.Trigger>
-              )}
-            </Tabs.List>
-          </Flex>
+      </Card>
 
-          <Box pt="3">
-            {chartTab === 'disk' && <Text as="p" size="1" color="gray" mb="2">按上报时间记录，可能包含容器文件占用估算；同一次磁盘采样可出现在多次上报中。</Text>}
-            {(chartTab === 'temp' || chartTab === 'disk') && !recordsLoading && !recordsError && !chartData.some((point) => point[chartTab] !== null) ? (
-              <Flex align="center" justify="center" style={{ height: monitorChartHeight }}>
-                <Text role="status" color="gray">{chartTab === 'temp' ? '温度数据不可用' : '磁盘使用量数据不可用'}</Text>
+      {viewTab === 'load' ? (
+      <div>
+        {recordsError && <Card className="lp-inst-chart" mb="3"><Flex align="center" gap="2"><Text color="red" role="alert">{recordsError}</Text><Button size="1" variant="soft" onClick={() => void loadRecords(timeRange)}>重试</Button></Flex></Card>}
+        {gpuError && <Card className="lp-inst-chart" mb="3"><Flex align="center" gap="2"><Text color="red" role="alert">{gpuError}</Text><Button size="1" variant="soft" onClick={() => setGpuRefresh(value => value + 1)}>重试 GPU 历史</Button></Flex></Card>}
+        <div className="lp-mini-grid">
+          <LpMiniCard title="CPU" value={lastPoint ? `${Number(lastPoint.cpu).toFixed(1)}%` : '—'}>
+            <ResponsiveContainer width="100%" height={miniChartHeight}>
+              <LineChart data={chartRenderData} margin={miniChartMargin}>
+                {miniGrid}
+                {miniXAxis}
+                <YAxis {...monitorYAxisProps} domain={[0, 100]} tickFormatter={(value) => `${Number(value).toFixed(0)}%`} />
+                <Tooltip
+                  {...chartTooltipProps}
+                  labelFormatter={chartTimeFormatter}
+                  formatter={(value: number) => [`${Number(value).toFixed(1)}%`, 'CPU']}
+                />
+                <Line type="monotone" dataKey="cpu_max" stroke="var(--accent-9)" strokeOpacity={0.28} dot={false} strokeWidth={1} isAnimationActive={false} />
+                <Line type="monotone" dataKey="cpu_min" stroke="var(--accent-9)" strokeOpacity={0.28} dot={false} strokeWidth={1} isAnimationActive={false} />
+                <Line type="monotone" dataKey="cpu" stroke="var(--accent-9)" dot={false} strokeWidth={2} isAnimationActive={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </LpMiniCard>
+
+          <LpMiniCard title="内存" value={lastPoint ? `${Number(lastPoint.ram).toFixed(1)}%` : '—'}>
+            <ResponsiveContainer width="100%" height={miniChartHeight}>
+              <LineChart data={chartRenderData} margin={miniChartMargin}>
+                {miniGrid}
+                {miniXAxis}
+                <YAxis {...monitorYAxisProps} domain={[0, 100]} tickFormatter={(value) => `${Number(value).toFixed(0)}%`} />
+                <Tooltip
+                  {...chartTooltipProps}
+                  labelFormatter={chartTimeFormatter}
+                  formatter={(value: number) => [`${Number(value).toFixed(1)}%`, '内存']}
+                />
+                <Line type="monotone" dataKey="ram_max" stroke="var(--accent-9)" strokeOpacity={0.28} dot={false} strokeWidth={1} isAnimationActive={false} />
+                <Line type="monotone" dataKey="ram_min" stroke="var(--accent-9)" strokeOpacity={0.28} dot={false} strokeWidth={1} isAnimationActive={false} />
+                <Line type="monotone" dataKey="ram" stroke="var(--accent-9)" dot={false} strokeWidth={2} isAnimationActive={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </LpMiniCard>
+
+          <LpMiniCard
+            title="磁盘"
+            value={lastPoint?.disk !== null && lastPoint?.disk !== undefined ? `${Number(lastPoint.disk).toFixed(1)}%` : '—'}
+            note="按上报时间记录，可能包含容器文件占用估算；同一次磁盘采样可出现在多次上报中。"
+          >
+            {!recordsLoading && !recordsError && !hasDiskData ? (
+              <Flex align="center" justify="center" style={{ height: miniChartHeight }}>
+                <Text role="status" color="gray">磁盘使用量数据不可用</Text>
               </Flex>
-            ) : chartTab === 'gpu' && gpuLoading ? (
-              <Text role="status" color="gray">正在加载 GPU 历史…</Text>
-            ) : chartTab === 'gpu' && !gpuError && gpuRecords.length === 0 ? (
-              <Text role="status" color="gray">暂无 GPU 历史记录</Text>
-            ) : chartTab === 'gpu' && gpuError ? null : chartTab === 'gpu' ? (
-              <ResponsiveContainer width="100%" height={monitorChartHeight}>
-                <LineChart data={gpuChartData} margin={monitorChartMargin}>
-                  <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.3} />
-                  <XAxis
-                    dataKey="time"
-                    type="number"
-                    domain={monitorXAxisDomain}
-                    tickFormatter={chartTimeFormatter}
-                    fontSize={12}
-                    minTickGap={28}
-                    tickLine={false}
-                    axisLine={false}
-                  />
-                  <YAxis {...monitorYAxisProps} domain={[0, 100]} tickFormatter={(value) => `${value}%`} />
-                  <Tooltip
-                    {...chartTooltipProps}
-                    labelFormatter={chartTimeFormatter}
-                    formatter={(value: number, name) => [
-                      `${Number(value).toFixed(1)}${name === '温度 °C' ? ' °C' : '%'}`,
-                      name,
-                    ]}
-                  />
-                  <Line type="monotone" dataKey="utilization" stroke="var(--accent-9)" dot={false} strokeWidth={2} name="利用率 %" isAnimationActive={false} />
-                  <Line type="monotone" dataKey="memory" stroke="var(--green-9)" dot={false} strokeWidth={2} name="显存 %" isAnimationActive={false} />
-                  <Line type="monotone" dataKey="temp" stroke="var(--red-9)" dot={false} strokeWidth={2} name="温度 °C" isAnimationActive={false} />
-                </LineChart>
-              </ResponsiveContainer>
-            ) : chartTab === 'network' ? (
-              <ResponsiveContainer width="100%" height={monitorChartHeight}>
-                <AreaChart data={chartRenderData} margin={monitorChartMargin}>
-                  <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.3} />
-                  <XAxis
-                    dataKey="time"
-                    type="number"
-                    domain={monitorXAxisDomain}
-                    tickFormatter={chartTimeFormatter}
-                    fontSize={12}
-                    minTickGap={28}
-                    tickLine={false}
-                    axisLine={false}
-                  />
-                  <YAxis {...wideYAxisProps} tickFormatter={(value) => formatSpeed(Number(value))} unit="" />
-                  <Tooltip
-                    {...chartTooltipProps}
-                    labelFormatter={chartTimeFormatter}
-                    formatter={(value: number, name) => [formatSpeed(Number(value)), name]}
-                  />
-                  <Area type="monotone" dataKey="net_in" stroke="var(--green-9)" fill="var(--green-3)" fillOpacity={0.32} dot={false} name="下载" isAnimationActive={false} />
-                  <Area type="monotone" dataKey="net_out" stroke="var(--blue-9)" fill="var(--blue-3)" fillOpacity={0.32} dot={false} name="上传" isAnimationActive={false} />
-                </AreaChart>
-              </ResponsiveContainer>
-            ) : chartTab === 'connections' ? (
-              <ResponsiveContainer width="100%" height={monitorChartHeight}>
-                <LineChart data={chartRenderData} margin={monitorChartMargin}>
-                  <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.3} />
-                  <XAxis
-                    dataKey="time"
-                    type="number"
-                    domain={monitorXAxisDomain}
-                    tickFormatter={chartTimeFormatter}
-                    fontSize={12}
-                    minTickGap={28}
-                    tickLine={false}
-                    axisLine={false}
-                  />
-                  <YAxis {...wideYAxisProps} domain={['auto', 'auto']} allowDecimals={false} unit=" 个" />
-                  <Tooltip
-                    {...chartTooltipProps}
-                    labelFormatter={chartTimeFormatter}
-                    formatter={(value: number, name) => [Number(value).toFixed(0), name]}
-                  />
-                  <Line type="monotone" dataKey="connections" stroke="var(--accent-9)" dot={false} strokeWidth={2} name="TCP" isAnimationActive={false} />
-                  <Line type="monotone" dataKey="connections_udp" stroke="var(--cyan-9)" dot={false} strokeWidth={2} name="UDP" isAnimationActive={false} />
-                </LineChart>
-              </ResponsiveContainer>
-            ) : chartTab === 'process' ? (
-              <ResponsiveContainer width="100%" height={monitorChartHeight}>
-                <LineChart data={chartRenderData} margin={monitorChartMargin}>
-                  <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.3} />
-                  <XAxis
-                    dataKey="time"
-                    type="number"
-                    domain={monitorXAxisDomain}
-                    tickFormatter={chartTimeFormatter}
-                    fontSize={12}
-                    minTickGap={28}
-                    tickLine={false}
-                    axisLine={false}
-                  />
-                  <YAxis {...wideYAxisProps} domain={['auto', 'auto']} allowDecimals={false} unit=" 个" />
-                  <Tooltip
-                    {...chartTooltipProps}
-                    labelFormatter={chartTimeFormatter}
-                    formatter={(value: number) => [Number(value).toFixed(0), '进程数']}
-                  />
-                  <Line type="monotone" dataKey="process_count" stroke="var(--accent-9)" dot={false} strokeWidth={2} isAnimationActive={false} />
-                </LineChart>
-              </ResponsiveContainer>
             ) : (
-              <ResponsiveContainer width="100%" height={monitorChartHeight}>
-                <LineChart data={chartRenderData} margin={monitorChartMargin}>
-                  <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.3} />
-                  <XAxis
-                    dataKey="time"
-                    type="number"
-                    domain={monitorXAxisDomain}
-                    tickFormatter={chartTimeFormatter}
-                    fontSize={12}
-                    minTickGap={28}
-                    tickLine={false}
-                    axisLine={false}
-                  />
-                  <YAxis
-                    {...monitorYAxisProps}
-                    domain={chartTab === 'temp' ? ['auto', 'auto'] : [0, 100]}
-                    tickFormatter={(value) => {
-                      if (chartTab === 'temp') return `${Number(value).toFixed(0)}°C`;
-                      return `${Number(value).toFixed(0)}%`;
-                    }}
-                  />
+              <ResponsiveContainer width="100%" height={miniChartHeight}>
+                <LineChart data={chartRenderData} margin={miniChartMargin}>
+                  {miniGrid}
+                  {miniXAxis}
+                  <YAxis {...monitorYAxisProps} domain={[0, 100]} tickFormatter={(value) => `${Number(value).toFixed(0)}%`} />
                   <Tooltip
                     {...chartTooltipProps}
                     labelFormatter={chartTimeFormatter}
-                    formatter={(value: number) => {
-                      if (chartTab === 'temp') return [`${Number(value).toFixed(1)} °C`, '温度'];
-                      return [`${Number(value).toFixed(1)}%`, chartTab === 'cpu' ? 'CPU' : chartTab === 'ram' ? '内存' : '磁盘'];
-                    }}
+                    formatter={(value: number) => [`${Number(value).toFixed(1)}%`, '磁盘']}
                   />
-                  <Line type="monotone" dataKey={`${chartTab}_max`} stroke="var(--accent-9)" strokeOpacity={0.28} dot={false} strokeWidth={1} isAnimationActive={false} />
-                  <Line type="monotone" dataKey={`${chartTab}_min`} stroke="var(--accent-9)" strokeOpacity={0.28} dot={false} strokeWidth={1} isAnimationActive={false} />
-                  <Line type="monotone" dataKey={chartTab} stroke="var(--accent-9)" dot={chartTab === 'temp' || chartTab === 'disk' ? { r: 2 } : false} connectNulls={false} strokeWidth={2} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="disk_max" stroke="var(--accent-9)" strokeOpacity={0.28} dot={false} strokeWidth={1} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="disk_min" stroke="var(--accent-9)" strokeOpacity={0.28} dot={false} strokeWidth={1} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="disk" stroke="var(--accent-9)" dot={{ r: 2 }} connectNulls={false} strokeWidth={2} isAnimationActive={false} />
                 </LineChart>
               </ResponsiveContainer>
             )}
-          </Box>
-        </Tabs.Root>
-      </Card>
+          </LpMiniCard>
 
-      {/* Ping chart */}
+          <LpMiniCard
+            title="网络"
+            value={lastPoint ? `↓ ${formatSpeed(lastPoint.net_in)} · ↑ ${formatSpeed(lastPoint.net_out)}` : '—'}
+          >
+            <ResponsiveContainer width="100%" height={miniChartHeight}>
+              <AreaChart data={chartRenderData} margin={miniChartMargin}>
+                {miniGrid}
+                {miniXAxis}
+                <YAxis {...wideYAxisProps} tickFormatter={(value) => formatSpeed(Number(value))} unit="" />
+                <Tooltip
+                  {...chartTooltipProps}
+                  labelFormatter={chartTimeFormatter}
+                  formatter={(value: number, name) => [formatSpeed(Number(value)), name]}
+                />
+                <Area type="monotone" dataKey="net_in" stroke="var(--green-9)" fill="var(--green-3)" fillOpacity={0.32} dot={false} name="下载" isAnimationActive={false} />
+                <Area type="monotone" dataKey="net_out" stroke="var(--blue-9)" fill="var(--blue-3)" fillOpacity={0.32} dot={false} name="上传" isAnimationActive={false} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </LpMiniCard>
+
+          <LpMiniCard
+            title="连接数"
+            value={lastPoint ? `TCP ${Number(lastPoint.connections).toFixed(0)} · UDP ${Number(lastPoint.connections_udp).toFixed(0)}` : '—'}
+          >
+            <ResponsiveContainer width="100%" height={miniChartHeight}>
+              <LineChart data={chartRenderData} margin={miniChartMargin}>
+                {miniGrid}
+                {miniXAxis}
+                <YAxis {...wideYAxisProps} domain={['auto', 'auto']} allowDecimals={false} unit=" 个" />
+                <Tooltip
+                  {...chartTooltipProps}
+                  labelFormatter={chartTimeFormatter}
+                  formatter={(value: number, name) => [Number(value).toFixed(0), name]}
+                />
+                <Line type="monotone" dataKey="connections" stroke="var(--accent-9)" dot={false} strokeWidth={2} name="TCP" isAnimationActive={false} />
+                <Line type="monotone" dataKey="connections_udp" stroke="var(--cyan-9)" dot={false} strokeWidth={2} name="UDP" isAnimationActive={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </LpMiniCard>
+
+          <LpMiniCard
+            title="进程数"
+            value={lastPoint ? `${Number(lastPoint.process_count).toFixed(0)} 个` : '—'}
+          >
+            <ResponsiveContainer width="100%" height={miniChartHeight}>
+              <LineChart data={chartRenderData} margin={miniChartMargin}>
+                {miniGrid}
+                {miniXAxis}
+                <YAxis {...wideYAxisProps} domain={['auto', 'auto']} allowDecimals={false} unit=" 个" />
+                <Tooltip
+                  {...chartTooltipProps}
+                  labelFormatter={chartTimeFormatter}
+                  formatter={(value: number) => [Number(value).toFixed(0), '进程数']}
+                />
+                <Line type="monotone" dataKey="process_count" stroke="var(--accent-9)" dot={false} strokeWidth={2} isAnimationActive={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </LpMiniCard>
+
+          {hasTempData && (
+            <LpMiniCard
+              title="温度"
+              value={lastPoint?.temp !== null && lastPoint?.temp !== undefined ? `${Number(lastPoint.temp).toFixed(1)} °C` : '—'}
+            >
+              <ResponsiveContainer width="100%" height={miniChartHeight}>
+                <LineChart data={chartRenderData} margin={miniChartMargin}>
+                  {miniGrid}
+                  {miniXAxis}
+                  <YAxis
+                    {...monitorYAxisProps}
+                    domain={['auto', 'auto']}
+                    tickFormatter={(value) => `${Number(value).toFixed(0)}°C`}
+                  />
+                  <Tooltip
+                    {...chartTooltipProps}
+                    labelFormatter={chartTimeFormatter}
+                    formatter={(value: number) => [`${Number(value).toFixed(1)} °C`, '温度']}
+                  />
+                  <Line type="monotone" dataKey="temp_max" stroke="var(--accent-9)" strokeOpacity={0.28} dot={false} strokeWidth={1} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="temp_min" stroke="var(--accent-9)" strokeOpacity={0.28} dot={false} strokeWidth={1} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="temp" stroke="var(--accent-9)" dot={{ r: 2 }} connectNulls={false} strokeWidth={2} isAnimationActive={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </LpMiniCard>
+          )}
+
+          {client.gpu_name && (
+            <LpMiniCard
+              title="GPU"
+              value={lastGpuPoint ? `${Number(lastGpuPoint.utilization).toFixed(1)}%` : '—'}
+            >
+              {gpuLoading ? (
+                <Flex align="center" justify="center" style={{ height: miniChartHeight }}>
+                  <Text role="status" color="gray">正在加载 GPU 历史…</Text>
+                </Flex>
+              ) : !gpuError && gpuRecords.length === 0 ? (
+                <Flex align="center" justify="center" style={{ height: miniChartHeight }}>
+                  <Text role="status" color="gray">暂无 GPU 历史记录</Text>
+                </Flex>
+              ) : gpuError ? null : (
+                <ResponsiveContainer width="100%" height={miniChartHeight}>
+                  <LineChart data={gpuChartData} margin={miniChartMargin}>
+                    {miniGrid}
+                    {miniXAxis}
+                    <YAxis {...monitorYAxisProps} domain={[0, 100]} tickFormatter={(value) => `${value}%`} />
+                    <Tooltip
+                      {...chartTooltipProps}
+                      labelFormatter={chartTimeFormatter}
+                      formatter={(value: number, name) => [
+                        `${Number(value).toFixed(1)}${name === '温度 °C' ? ' °C' : '%'}`,
+                        name,
+                      ]}
+                    />
+                    <Line type="monotone" dataKey="utilization" stroke="var(--accent-9)" dot={false} strokeWidth={2} name="利用率 %" isAnimationActive={false} />
+                    <Line type="monotone" dataKey="memory" stroke="var(--green-9)" dot={false} strokeWidth={2} name="显存 %" isAnimationActive={false} />
+                    <Line type="monotone" dataKey="temp" stroke="var(--red-9)" dot={false} strokeWidth={2} name="温度 °C" isAnimationActive={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              )}
+            </LpMiniCard>
+          )}
+        </div>
+      </div>
+      ) : (
       <div ref={pingSectionRef}>
       <Card mb="4" className="lp-inst-ping">
         <Flex justify="between" align="center" mb="3" gap="3" wrap="wrap">
@@ -687,12 +771,34 @@ export default function Instance() {
         )}
       </Card>
       </div>
-        </div>
-      </div>
+      )}
 
         </section>
       </div>
     </div>
+  );
+}
+
+function LpInfoRow({ label, value }: { label: string; value: React.ReactNode }) {
+  const title = typeof value === 'string' || typeof value === 'number' ? String(value) : undefined;
+  return (
+    <div className="lp-info-item">
+      <dt className="lp-info-label">{label}</dt>
+      <dd className="lp-info-value" title={title}>{value || '-'}</dd>
+    </div>
+  );
+}
+
+function LpMiniCard({ title, value, note, children }: { title: string; value: string; note?: string; children: React.ReactNode }) {
+  return (
+    <section className="lp-mini-card" aria-label={title}>
+      <header className="lp-mini-head">
+        <span className="lp-mini-title">{title}</span>
+        <span className="lp-mini-value" title={value}>{value}</span>
+      </header>
+      {note && <p className="lp-mini-note">{note}</p>}
+      <div className="lp-mini-body">{children}</div>
+    </section>
   );
 }
 

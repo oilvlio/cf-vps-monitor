@@ -5934,12 +5934,17 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   color: #57ab5a;
 }
 
-/* 首页节点网格：高密度自适应 */
+/* 首页节点网格：桌面端最多 4 列（与顶部 4 张统计卡对齐），窄屏按断点降列 */
 .lp-node-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
   align-items: stretch;
+}
+.lp-node-grid > .node-card {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
 }
 
 /* 节点卡：深色底 + 紧凑纵向堆叠 */
@@ -6324,8 +6329,126 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   color: #e2e8f0;
 }
 
+/* 详情页顶部：横向多信息卡（系统 / 资源 / 网络），紧凑 dl 列表 */
+.lp-info-groups {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+.lp-info-group {
+  min-width: 0;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: rgba(148, 163, 184, 0.05);
+}
+.lp-info-group-title {
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  margin-bottom: 8px;
+}
+.lp-info-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+}
+.lp-info-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+.lp-info-label {
+  flex: none;
+  color: #8b93a5;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.lp-info-value {
+  margin: 0;
+  min-width: 0;
+  color: #e2e8f0;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 负载 | Ping 切换 + 时间档位 */
+.lp-inst-controls {
+  background: #151b28;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 14px;
+  color: #e2e8f0;
+}
+
+/* 负载模式：小表矩阵，3 列并排 */
+.lp-mini-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  align-items: stretch;
+}
+.lp-mini-card {
+  min-width: 0;
+  background: #151b28;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 14px;
+  color: #e2e8f0;
+  padding: 12px 12px 8px;
+}
+.lp-mini-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.lp-mini-title {
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 700;
+}
+.lp-mini-value {
+  color: #f1f5f9;
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lp-mini-note {
+  color: #64748b;
+  font-size: 10.5px;
+  margin: 0 0 4px;
+}
+.lp-mini-body {
+  min-width: 0;
+}
+
+@media (max-width: 1400px) {
+  .lp-node-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 1080px) {
   .lp-stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .lp-node-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .lp-mini-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .lp-inst-grid {
@@ -6338,6 +6461,12 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
 
 @media (max-width: 720px) {
   .lp-node-grid {
+    grid-template-columns: 1fr;
+  }
+  .lp-mini-grid {
+    grid-template-columns: 1fr;
+  }
+  .lp-info-groups {
     grid-template-columns: 1fr;
   }
   .lp-grid {

@@ -17,6 +17,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/shirou/gopsutil/v3/disk"
+	"github.com/shirou/gopsutil/v3/load"
 	gnet "github.com/shirou/gopsutil/v3/net"
 )
 
@@ -976,6 +977,36 @@ func TestReportSerializesUnavailableLoadAsNull(t *testing.T) {
 	}
 	if !strings.Contains(string(available), `"load":1.25`) {
 		t.Fatalf("payload = %s, want \"load\":1.25", available)
+	}
+}
+
+// 负载三元组与 Load1 同门控：可信时三个值一起上报，不可信时全 nil（序列化成 null）。
+func TestApplyLoadAverageTriple(t *testing.T) {
+	stat := load.AvgStat{Load1: 1.25, Load5: 0.75, Load15: 0.5}
+
+	trusted := Report{}
+	applyLoadAverage(&trusted, stat, true)
+	if trusted.Load == nil || trusted.Load5 == nil || trusted.Load15 == nil {
+		t.Fatalf("trusted report = %+v, want all three loads set", trusted)
+	}
+	if *trusted.Load != 1.25 || *trusted.Load5 != 0.75 || *trusted.Load15 != 0.5 {
+		t.Fatalf("trusted loads = %v/%v/%v, want 1.25/0.75/0.5",
+			*trusted.Load, *trusted.Load5, *trusted.Load15)
+	}
+
+	distrusted := Report{}
+	applyLoadAverage(&distrusted, stat, false)
+	if distrusted.Load != nil || distrusted.Load5 != nil || distrusted.Load15 != nil {
+		t.Fatalf("distrusted report = %+v, want all three loads nil", distrusted)
+	}
+	payload, err := json.Marshal(distrusted)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{`"load":null`, `"load5":null`, `"load15":null`} {
+		if !strings.Contains(string(payload), key) {
+			t.Fatalf("payload = %s, want %s", payload, key)
+		}
 	}
 }
 

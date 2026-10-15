@@ -180,7 +180,11 @@ type Report struct {
 	// 容器，/proc/loadavg 直接透传宿主机数值）。序列化成 null，服务端据此跳过负载告警。
 	// 不能报 0——0 会被读成「空闲」，比报错值更误导。
 	Load *float64 `json:"load"`
-	Temp *float64 `json:"temp"`
+	// Load5/Load15 与 Load 同门控：可信才赋值，否则保持 nil（序列化成 null）。
+	// Load（Load1）保留做兼容，老链路行为不变。
+	Load5  *float64 `json:"load5"`
+	Load15 *float64 `json:"load15"`
+	Temp   *float64 `json:"temp"`
 	// A nil disk or uptime value is unavailable, including host data that
 	// cannot be attributed to the current container. Keep JSON null explicit.
 	Disk                *int64               `json:"disk"`
@@ -2598,6 +2602,19 @@ func loadAverageReportable() bool {
 	return trusted
 }
 
+// applyLoadAverage 把 load.Avg() 的三元组写入 report，与 Load1 同门控：
+// reportable 为 false（load.Avg() 出错或 loadAverageReportable() 判不可信）
+// 时三个字段都保持 nil，序列化成 null。抽成函数方便单测，不读 /proc。
+func applyLoadAverage(r *Report, avg load.AvgStat, reportable bool) {
+	if r == nil || !reportable {
+		return
+	}
+	load1, load5, load15 := avg.Load1, avg.Load5, avg.Load15
+	r.Load = &load1
+	r.Load5 = &load5
+	r.Load15 = &load15
+}
+
 func processCount() int {
 	if runtime.GOOS == "linux" {
 		if count := processCountFromProc("/proc"); count > 0 {
@@ -3062,8 +3079,7 @@ func collectReportWithInterval(intervalSec int) Report {
 		}
 	}
 	if loadInfo, err := load.Avg(); err == nil && loadAverageReportable() {
-		value := loadInfo.Load1
-		r.Load = &value
+		applyLoadAverage(&r, *loadInfo, true)
 	}
 	r.Temp = nodeMetrics.temperature(context.Background())
 	diskSnapshot := nodeMetrics.diskSnapshot(mountInclude, mountExclude)

@@ -6025,6 +6025,9 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
+.lp-grid[data-cols='2'] {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
 .lp-metric {
   display: flex;
   flex-direction: column;

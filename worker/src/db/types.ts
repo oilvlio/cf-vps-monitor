@@ -70,6 +70,9 @@ export interface MonitorRecord {
   swap_total: number;
   // null = 本机负载不可取信（容器内 /proc/loadavg 透传宿主机），不是 0。
   load: number | null;
+  // load5/load15 与 load 同语义：显式 null = 不可用，缺字段 = 0（老探针兼容）。
+  load5: number | null;
+  load15: number | null;
   temp: number | null;
   disk: number;
   disk_total: number;

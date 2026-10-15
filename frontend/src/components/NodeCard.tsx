@@ -1,13 +1,13 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { Badge, Box, Card, Flex, IconButton, Text, Tooltip } from '@radix-ui/themes';
-import { ArrowDown, ArrowUp, Cpu, HardDrive, MemoryStick, PackageX, Timer, TrendingUp } from 'lucide-react';
+import { Activity, ArrowDown, ArrowUp, Cpu, HardDrive, MemoryStick, PackageX, Timer, TrendingUp } from 'lucide-react';
 import Flag from './Flag';
 import PriceTags from './PriceTags';
 import MiniPingChartFloat from './MiniPingChartFloat';
 import type { HomePingNode } from '../utils/homePing';
 import { formatHomeLatency, formatHomeLoss, latencyLevel, lossLevel } from '../utils/homePing';
-import { diskUsagePresentation, formatLastReport, formatMetricBytes, formatMetricSpeed, formatMetricUptime, metricNumber, resourceUsage, type NodeStatus } from '../utils/nodeMetrics';
+import { diskUsagePresentation, formatLastReport, formatLoadValue, formatMetricBytes, formatMetricSpeed, formatMetricUptime, metricNumber, resourceUsage, type NodeStatus } from '../utils/nodeMetrics';
 import { formatTrafficLimitLabel, parseTrafficLimitType } from '../utils/traffic';
 import { ClientInfo, LiveRecord } from '../types';
 import { getOSDisplay } from '../utils/osIcon';
@@ -198,6 +198,13 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
   const cpuPct = metricNumber(d.cpu);
   const memory = resourceUsage(d.ram, d.ram_total, client.mem_total);
   const disk = diskUsagePresentation(d, client.disk_total);
+  const load1 = metricNumber(d.load);
+  const load5 = metricNumber(d.load5);
+  const load15 = metricNumber(d.load15);
+  // 负载不是百分比：点阵按单核折算（load1 / 核心数）着色，数值显示 load1，
+  // 三值放 title tooltip。不可用（null）时点阵全暗、数值为破折号。
+  const loadPct = load1 !== null && client.cpu_cores > 0 ? Math.min(100, (load1 / client.cpu_cores) * 100) : null;
+  const loadTitle = `1分钟 ${formatLoadValue(load1)} · 5分钟 ${formatLoadValue(load5)} · 15分钟 ${formatLoadValue(load15)}`;
   const memPct = memory.percent;
   const diskPct = disk.percent;
   const totalUp = metricNumber(d.net_total_up);
@@ -313,20 +320,25 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
           </Flex>
 
           <Flex direction="column" gap="2" className="lp-stack">
-            <div className="lp-grid">
+            <div className="lp-grid" data-cols="2">
               <LpMetric icon={<Cpu size={13} />} label="CPU" value={formatPercent(cpuPct)} detail={cpuDetail} title={cpuTitle} percent={cpuPct} />
               <LpMetric icon={<MemoryStick size={13} />} label="内存" value={formatPercent(memPct)} detail={memDetail} percent={memPct} />
+            </div>
+            <div className="lp-grid" data-cols="2">
               <LpMetric icon={<HardDrive size={13} />} label={disk.estimated ? '磁盘·估' : '磁盘'} value={`${disk.estimated && diskPct !== null ? '≈ ' : ''}${formatPercent(diskPct)}`} detail={diskDetail} title={disk.estimated ? `${disk.description} ${disk.sampleLabel}` : undefined} percent={diskPct} />
+              <LpMetric icon={<Activity size={13} />} label="负载" value={formatLoadValue(load1)} detail="1 / 5 / 15 分钟" title={loadTitle} percent={loadPct} />
             </div>
 
             <div className="lp-net">
               <div className="lp-net-col">
-                <div className="lp-net-head"><span className="lp-net-dir is-up"><ArrowUp size={13} />上行</span><strong className="lp-net-rate">{uploadSpeed}</strong></div>
-                <div className="lp-net-foot"><span>出站</span><span>{formatMetricBytes(totalUp)}</span></div>
+                <div className="lp-net-head"><span className="lp-net-dir">实时速率</span></div>
+                <div className="lp-net-foot"><span className="lp-net-dir is-up"><ArrowUp size={13} />上行</span><span>{uploadSpeed}</span></div>
+                <div className="lp-net-foot"><span className="lp-net-dir is-down"><ArrowDown size={13} />下行</span><span>{downloadSpeed}</span></div>
               </div>
               <div className="lp-net-col">
-                <div className="lp-net-head"><span className="lp-net-dir is-down"><ArrowDown size={13} />下行</span><strong className="lp-net-rate">{downloadSpeed}</strong></div>
-                <div className="lp-net-foot"><span>入站</span><span>{formatMetricBytes(totalDown)}</span></div>
+                <div className="lp-net-head"><span className="lp-net-dir">累计流量</span></div>
+                <div className="lp-net-foot"><span className="lp-net-dir is-up"><ArrowUp size={13} />上行</span><span>{formatMetricBytes(totalUp)}</span></div>
+                <div className="lp-net-foot"><span className="lp-net-dir is-down"><ArrowDown size={13} />下行</span><span>{formatMetricBytes(totalDown)}</span></div>
               </div>
             </div>
 

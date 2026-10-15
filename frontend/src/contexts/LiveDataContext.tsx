@@ -40,6 +40,9 @@ export interface LiveRecord {
   net_total_down: number;
   // null = 本机负载不可取信（容器内 /proc/loadavg 透传宿主机），不是 0。
   load: number | null;
+  // load5/load15 与 load 同语义，缺字段按 0（老数据兼容）。
+  load5: number | null;
+  load15: number | null;
   // null = 主机温度未采集或不可用；0 和负值仍是有效摄氏温度。
   temp: number | null;
   uptime: number | null;

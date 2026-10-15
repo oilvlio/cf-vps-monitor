@@ -5860,7 +5860,7 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
 /* 数值文字只上字色，不要继承色块的背景色。 */
 .node-ping-value[data-level] { background: none; }
 
-/* ========== LuminaPlus 高密度深色风格（.lp- 前缀，仅新增，不动现有 class） ========== */
+/* ========== LuminaPlus 高密度风格（.lp- 前缀，仅新增，不动现有 class；浅/深色自适应） ========== */
 .lp-dashboard-page {
   display: flex;
   flex-direction: column;
@@ -5875,10 +5875,10 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   gap: 12px;
 }
 .lp-stat-card {
-  background: #151b28;
-  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: var(--monitor-panel-strong);
+  border: 1px solid var(--monitor-border);
   border-radius: 12px;
-  color: #e2e8f0;
+  color: var(--gray-12);
 }
 .lp-stat-inner {
   padding: 12px 14px;
@@ -5891,8 +5891,8 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   height: 32px;
   border-radius: 9px;
   flex: none;
-  background: rgba(59, 130, 246, 0.14);
-  color: #7db4fb;
+  background: var(--monitor-accent-soft);
+  color: var(--monitor-accent);
 }
 .lp-stat-copy {
   min-width: 0;
@@ -5902,19 +5902,19 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   min-width: 0;
 }
 .lp-stat-title {
-  color: #94a3b8;
+  color: var(--monitor-muted-text);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.04em;
   white-space: nowrap;
 }
 .lp-stat-value {
-  color: #f1f5f9;
+  color: var(--gray-12);
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.01em;
 }
 .lp-stat-detail {
-  color: #64748b;
+  color: var(--monitor-muted-text);
   font-size: 11px;
 }
 .lp-stat-inline-values {
@@ -5923,15 +5923,15 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   font-variant-numeric: tabular-nums;
 }
 .lp-stat-inline-value {
-  color: #e2e8f0;
+  color: var(--gray-12);
   font-size: 15px;
   font-weight: 700;
 }
 .lp-stat-inline-value.is-up {
-  color: #539bf5;
+  color: var(--monitor-secondary);
 }
 .lp-stat-inline-value.is-down {
-  color: #57ab5a;
+  color: var(--monitor-success);
 }
 
 /* 首页节点网格：桌面端最多 4 列（与顶部 4 张统计卡对齐），窄屏按断点降列 */
@@ -5947,19 +5947,19 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   min-width: 0;
 }
 
-/* 节点卡：深色底 + 紧凑纵向堆叠 */
+/* 节点卡：紧凑纵向堆叠（底色/文字走主题变量，浅色下为浅底深字） */
 .lp-card {
-  background: #151b28;
-  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: var(--monitor-panel-strong);
+  border: 1px solid var(--monitor-border);
   border-radius: 14px;
-  color: #e2e8f0;
+  color: var(--gray-12);
 }
 .lp-card:hover {
-  border-color: rgba(148, 163, 184, 0.34);
+  border-color: color-mix(in srgb, var(--monitor-accent) 36%, var(--monitor-border));
 }
 .lp-card[data-status='offline'] {
-  background: #1a1626;
-  border-color: rgba(244, 112, 103, 0.35);
+  background: color-mix(in srgb, var(--monitor-danger) 10%, var(--monitor-panel-strong));
+  border-color: color-mix(in srgb, var(--monitor-danger) 38%, var(--monitor-border));
 }
 .lp-link {
   display: block;
@@ -5974,7 +5974,7 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   min-width: 0;
 }
 .lp-name {
-  color: #f1f5f9;
+  color: var(--gray-12);
   letter-spacing: -0.01em;
   min-width: 0;
 }
@@ -5982,14 +5982,14 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   flex: none;
 }
 .lp-offline-note {
-  color: #8b93a5;
+  color: var(--monitor-muted-text);
 }
 .lp-sub {
   flex-wrap: wrap;
   row-gap: 4px;
 }
 .lp-sub-region {
-  color: #8b93a5;
+  color: var(--monitor-muted-text);
   font-size: 11px;
 }
 .lp-sub-tags {
@@ -5997,8 +5997,8 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   gap: 4px;
 }
 .lp-sub-tag {
-  background: rgba(148, 163, 184, 0.14);
-  color: #b7bdc8;
+  background: var(--monitor-panel-muted);
+  color: var(--gray-11);
   border-radius: 6px;
   padding: 1px 6px;
   font-size: 10.5px;
@@ -6008,7 +6008,7 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  color: #b7bdc8;
+  color: var(--gray-11);
   font-size: 11px;
   font-weight: 600;
 }
@@ -6017,7 +6017,7 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   height: 14px;
 }
 .lp-stack {
-  border-top: 1px solid rgba(148, 163, 184, 0.12);
+  border-top: 1px solid var(--monitor-border);
   padding-top: 10px;
 }
 .lp-grid {
@@ -6044,7 +6044,7 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  color: #8b93a5;
+  color: var(--monitor-muted-text);
   font-size: 11px;
   font-weight: 600;
 }
@@ -6052,16 +6052,16 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   font-size: 14px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
-  color: #f1f5f9;
+  color: var(--gray-12);
 }
 .lp-metric-value[data-load='warm'] {
-  color: #e2a928;
+  color: var(--monitor-warning);
 }
 .lp-metric-value[data-load='hot'] {
-  color: #f47067;
+  color: var(--monitor-danger);
 }
 .lp-metric-detail {
-  color: #64748b;
+  color: var(--monitor-muted-text);
   font-size: 10.5px;
   white-space: nowrap;
   overflow: hidden;
@@ -6076,19 +6076,19 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   flex: 1;
   min-width: 0;
   border-radius: 2px;
-  background: rgba(148, 163, 184, 0.18);
+  background: var(--monitor-ring-track);
 }
 .lp-dots[data-level='normal'] .lp-dot[data-lit='true'] {
-  background: #3b82f6;
+  background: var(--monitor-secondary);
 }
 .lp-dots[data-level='warm'] .lp-dot[data-lit='true'] {
-  background: #e2a928;
+  background: var(--monitor-warning);
 }
 .lp-dots[data-level='hot'] .lp-dot[data-lit='true'] {
-  background: #f47067;
+  background: var(--monitor-danger);
 }
 .lp-dots[data-level='none'] .lp-dot {
-  background: rgba(148, 163, 184, 0.18);
+  background: var(--monitor-ring-track);
 }
 
 /* 上下行速率 + 总量 */
@@ -6096,7 +6096,7 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
-  border-top: 1px solid rgba(148, 163, 184, 0.12);
+  border-top: 1px solid var(--monitor-border);
   padding-top: 10px;
 }
 .lp-net-col {
@@ -6117,26 +6117,26 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   gap: 5px;
   font-size: 11px;
   font-weight: 600;
-  color: #8b93a5;
+  color: var(--monitor-muted-text);
 }
 .lp-net-dir.is-up {
-  color: #539bf5;
+  color: var(--monitor-secondary);
 }
 .lp-net-dir.is-down {
-  color: #57ab5a;
+  color: var(--monitor-success);
 }
 .lp-net-rate {
   font-size: 15px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
-  color: #f1f5f9;
+  color: var(--gray-12);
 }
 .lp-net-foot {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  color: #64748b;
+  color: var(--monitor-muted-text);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
@@ -6146,7 +6146,7 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  border-top: 1px solid rgba(148, 163, 184, 0.12);
+  border-top: 1px solid var(--monitor-border);
   padding-top: 10px;
 }
 .lp-quota-head {
@@ -6156,13 +6156,13 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   gap: 8px;
 }
 .lp-quota-label {
-  color: #8b93a5;
+  color: var(--monitor-muted-text);
   font-size: 11px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 .lp-quota-usage {
-  color: #64748b;
+  color: var(--monitor-muted-text);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -6176,16 +6176,16 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   flex: 1;
   min-width: 0;
   border-radius: 2px;
-  background: rgba(148, 163, 184, 0.18);
+  background: var(--monitor-ring-track);
 }
-.lp-quota-seg[data-lit='true']:nth-child(-n+11) {
-  background: #2f9e65;
+.lp-quota-seg[data-lit='true']:nth-child(-n+12) {
+  background: var(--monitor-success);
 }
-.lp-quota-seg[data-lit='true']:nth-child(n+12):nth-child(-n+15) {
-  background: #e2a928;
+.lp-quota-seg[data-lit='true']:nth-child(n+13):nth-child(-n+17) {
+  background: var(--monitor-warning);
 }
-.lp-quota-seg[data-lit='true']:nth-child(n+16) {
-  background: #dc2626;
+.lp-quota-seg[data-lit='true']:nth-child(n+18) {
+  background: var(--monitor-danger);
 }
 
 /* 底部单条 ping 点阵行 */
@@ -6193,7 +6193,7 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  border-top: 1px solid rgba(148, 163, 184, 0.12);
+  border-top: 1px solid var(--monitor-border);
   padding-top: 10px;
 }
 .lp-ping-row {
@@ -6211,7 +6211,7 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  color: #8b93a5;
+  color: var(--monitor-muted-text);
   font-size: 11px;
   font-weight: 600;
 }
@@ -6219,41 +6219,41 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   font-size: 14px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
-  color: #f1f5f9;
+  color: var(--gray-12);
 }
 .lp-ping-value small {
   margin-left: 2px;
   font-size: 10.5px;
   font-weight: 500;
-  color: #8b93a5;
+  color: var(--monitor-muted-text);
 }
 .lp-ping-value[data-level='good'] {
-  color: #2fc66e;
+  color: var(--monitor-success);
 }
 .lp-ping-value[data-level='ok'] {
-  color: #9fe339;
+  color: var(--monitor-secondary);
 }
 .lp-ping-value[data-level='warn'] {
-  color: #e2a928;
+  color: var(--monitor-warning);
 }
 .lp-ping-value[data-level='bad'] {
-  color: #f47067;
+  color: var(--monitor-danger);
 }
 .lp-ping-loss {
   font-size: 11px;
   font-weight: 600;
 }
 .lp-ping-loss[data-level='good'] {
-  color: #2fc66e;
+  color: var(--monitor-success);
 }
 .lp-ping-loss[data-level='ok'] {
-  color: #9fe339;
+  color: var(--monitor-secondary);
 }
 .lp-ping-loss[data-level='warn'] {
-  color: #e2a928;
+  color: var(--monitor-warning);
 }
 .lp-ping-loss[data-level='bad'] {
-  color: #f47067;
+  color: var(--monitor-danger);
 }
 .lp-ping-dots {
   display: grid;
@@ -6266,22 +6266,22 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   display: block;
   min-width: 0;
   border-radius: 2px;
-  background: rgba(148, 163, 184, 0.18);
+  background: var(--monitor-ring-track);
 }
 .lp-ping-dot[data-level='good'] {
-  background: #2fc66e;
+  background: var(--monitor-success);
 }
 .lp-ping-dot[data-level='ok'] {
-  background: #9fe339;
+  background: var(--monitor-secondary);
 }
 .lp-ping-dot[data-level='warn'] {
-  background: #e2a928;
+  background: var(--monitor-warning);
 }
 .lp-ping-dot[data-level='bad'] {
-  background: #f47067;
+  background: var(--monitor-danger);
 }
 .lp-ping-dot[data-level='none'] {
-  background: rgba(148, 163, 184, 0.18);
+  background: var(--monitor-ring-track);
 }
 
 /* 详情页：左侧信息 + 右侧图表分组 */
@@ -6313,23 +6313,23 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   gap: 14px;
 }
 .lp-inst-summary {
-  background: #151b28;
-  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: var(--monitor-panel-strong);
+  border: 1px solid var(--monitor-border);
   border-radius: 14px;
-  color: #e2e8f0;
+  color: var(--gray-12);
 }
 .lp-inst-chart,
 .lp-inst-ping {
-  background: #151b28;
-  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: var(--monitor-panel-strong);
+  border: 1px solid var(--monitor-border);
   border-radius: 14px;
-  color: #e2e8f0;
+  color: var(--gray-12);
 }
 .lp-inst-sidebar-card {
-  background: #151b28;
-  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: var(--monitor-panel-strong);
+  border: 1px solid var(--monitor-border);
   border-radius: 14px;
-  color: #e2e8f0;
+  color: var(--gray-12);
 }
 
 /* 详情页顶部：横向多信息卡（系统 / 资源 / 网络），紧凑 dl 列表 */
@@ -6341,13 +6341,13 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
 }
 .lp-info-group {
   min-width: 0;
-  border: 1px solid rgba(148, 163, 184, 0.14);
+  border: 1px solid var(--monitor-border);
   border-radius: 10px;
   padding: 10px 12px;
-  background: rgba(148, 163, 184, 0.05);
+  background: var(--monitor-panel-muted);
 }
 .lp-info-group-title {
-  color: #94a3b8;
+  color: var(--monitor-muted-text);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.06em;
@@ -6369,14 +6369,14 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
 }
 .lp-info-label {
   flex: none;
-  color: #8b93a5;
+  color: var(--monitor-muted-text);
   font-size: 11.5px;
   font-weight: 600;
 }
 .lp-info-value {
   margin: 0;
   min-width: 0;
-  color: #e2e8f0;
+  color: var(--gray-12);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   text-align: right;
@@ -6387,10 +6387,10 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
 
 /* 负载 | Ping 切换 + 时间档位 */
 .lp-inst-controls {
-  background: #151b28;
-  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: var(--monitor-panel-strong);
+  border: 1px solid var(--monitor-border);
   border-radius: 14px;
-  color: #e2e8f0;
+  color: var(--gray-12);
 }
 
 /* 负载模式：小表矩阵，3 列并排 */
@@ -6402,10 +6402,10 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
 }
 .lp-mini-card {
   min-width: 0;
-  background: #151b28;
-  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: var(--monitor-panel-strong);
+  border: 1px solid var(--monitor-border);
   border-radius: 14px;
-  color: #e2e8f0;
+  color: var(--gray-12);
   padding: 12px 12px 8px;
 }
 .lp-mini-head {
@@ -6416,12 +6416,12 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   margin-bottom: 4px;
 }
 .lp-mini-title {
-  color: #94a3b8;
+  color: var(--monitor-muted-text);
   font-size: 12px;
   font-weight: 700;
 }
 .lp-mini-value {
-  color: #f1f5f9;
+  color: var(--gray-12);
   font-size: 13px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
@@ -6430,12 +6430,29 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   text-overflow: ellipsis;
 }
 .lp-mini-note {
-  color: #64748b;
+  color: var(--monitor-muted-text);
   font-size: 10.5px;
   margin: 0 0 4px;
 }
 .lp-mini-body {
   min-width: 0;
+}
+
+/* 白天模式：既有浅色变量多为半透明，直接落在浅底上描边偏弱，
+   这里给卡片描边补一层带主题色的边，保证浅底上轮廓可辨。 */
+html[data-theme-appearance='light'] .lp-card,
+html[data-theme-appearance='light'] .lp-stat-card,
+html[data-theme-appearance='light'] .lp-inst-summary,
+html[data-theme-appearance='light'] .lp-inst-chart,
+html[data-theme-appearance='light'] .lp-inst-ping,
+html[data-theme-appearance='light'] .lp-inst-sidebar-card,
+html[data-theme-appearance='light'] .lp-inst-controls,
+html[data-theme-appearance='light'] .lp-mini-card,
+html[data-theme-appearance='light'] .lp-info-group {
+  border-color: color-mix(in srgb, var(--monitor-accent) 22%, var(--monitor-border));
+}
+html[data-theme-appearance='light'] .lp-card[data-status='offline'] {
+  border-color: color-mix(in srgb, var(--monitor-danger) 45%, var(--monitor-border));
 }
 
 @media (max-width: 1400px) {

@@ -12,7 +12,7 @@ import { formatTrafficLimitLabel, parseTrafficLimitType } from '../utils/traffic
 import { ClientInfo, LiveRecord } from '../types';
 import { getOSDisplay } from '../utils/osIcon';
 import { useIsMobile } from '../hooks/useIsMobile';
-import { formatCpuCardLabel, formatCpuSpec } from '../utils/cpuFormat';
+import { formatCpuSpec } from '../utils/cpuFormat';
 import { parseMonitorTags } from '../utils/tags';
 import { getExpiryInfo } from '../utils/billing';
 
@@ -78,7 +78,7 @@ function formatPercent(value: number | null) {
   return `${clamped.toFixed(clamped < 10 ? 1 : 0)}%`;
 }
 
-const LP_DOT_COUNT = 18;
+const LP_DOT_COUNT = 20;
 
 function LpDotBar({ percent, level }: { percent: number | null; level: string }) {
   const lit = percent === null ? 0 : Math.round((clampPercent(percent) / 100) * LP_DOT_COUNT);
@@ -95,26 +95,23 @@ function LpMetric({
   icon,
   label,
   value,
-  detail,
   title,
   percent,
 }: {
   icon: React.ReactNode;
   label: string;
   value: string;
-  detail: string;
   title?: string;
   percent: number | null;
 }) {
   const level = percent === null ? 'none' : getUsageLevel(clampPercent(percent));
   return (
-    <div className="lp-metric" data-load={level}>
+    <div className="lp-metric" data-load={level} title={title}>
       <div className="lp-metric-head">
         <span className="lp-metric-label">{icon}{label}</span>
         <span className="lp-metric-value" data-load={level}>{value}</span>
       </div>
       <LpDotBar percent={percent} level={level} />
-      <div className="lp-metric-detail" title={title || detail}>{detail}</div>
     </div>
   );
 }
@@ -199,12 +196,10 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
   const memory = resourceUsage(d.ram, d.ram_total, client.mem_total);
   const disk = diskUsagePresentation(d, client.disk_total);
   const load1 = metricNumber(d.load);
-  const load5 = metricNumber(d.load5);
-  const load15 = metricNumber(d.load15);
-  // 负载不是百分比：点阵按单核折算（load1 / 核心数）着色，数值显示 load1，
-  // 三值放 title tooltip。不可用（null）时点阵全暗、数值为破折号。
+  // 负载不是百分比：点阵按单核折算（load1 / 核心数）着色，数值只显示实时值 load1。
+  // 不可用（null）时点阵全暗、数值为破折号。
   const loadPct = load1 !== null && client.cpu_cores > 0 ? Math.min(100, (load1 / client.cpu_cores) * 100) : null;
-  const loadTitle = `1分钟 ${formatLoadValue(load1)} · 5分钟 ${formatLoadValue(load5)} · 15分钟 ${formatLoadValue(load15)}`;
+  const loadTitle = `实时负载 ${formatLoadValue(load1)}`;
   const memPct = memory.percent;
   const diskPct = disk.percent;
   const totalUp = metricNumber(d.net_total_up);
@@ -214,9 +209,6 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
   const osConfig = getOSDisplay(client.os || '');
   const trafficLimitLabel = formatTrafficLimitLabel(client.traffic_limit, client.traffic_limit_type);
   const uptimeLabel = formatMetricUptime(d.uptime);
-  const memDetail = `${formatMetricBytes(memory.used)} / ${formatMetricBytes(memory.total)}`;
-  const diskDetail = disk.detail;
-  const cpuDetail = formatCpuCardLabel(client.cpu_name, client.cpu_cores);
   const cpuTitle = formatCpuSpec(client.cpu_name, client.cpu_cores);
 
   const trafficUsed = (() => {
@@ -232,7 +224,7 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
     }
   })();
   const trafficPct = client.traffic_limit > 0 && trafficUsed !== null ? Math.min(100, (trafficUsed / client.traffic_limit) * 100) : undefined;
-  const quotaLit = trafficPct === undefined ? 0 : Math.round((trafficPct / 100) * LP_DOT_COUNT);
+  const quotaLit = trafficPct === undefined ? 0 : (trafficUsed !== null && trafficUsed > 0 ? Math.max(1, Math.round((trafficPct / 100) * LP_DOT_COUNT)) : 0);
   const hasBillingInfo = (client.price !== undefined && client.price !== 0) || Boolean(getExpiryInfo(client.expired_at).label);
   const handleCardLinkClick = (event: React.MouseEvent<HTMLAnchorElement>) => {
     const target = event.target as HTMLElement | null;
@@ -321,12 +313,12 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
 
           <Flex direction="column" gap="2" className="lp-stack">
             <div className="lp-grid" data-cols="2">
-              <LpMetric icon={<Cpu size={13} />} label="CPU" value={formatPercent(cpuPct)} detail={cpuDetail} title={cpuTitle} percent={cpuPct} />
-              <LpMetric icon={<MemoryStick size={13} />} label="内存" value={formatPercent(memPct)} detail={memDetail} percent={memPct} />
+              <LpMetric icon={<Cpu size={13} />} label="CPU" value={formatPercent(cpuPct)} title={cpuTitle} percent={cpuPct} />
+              <LpMetric icon={<MemoryStick size={13} />} label="内存" value={formatPercent(memPct)} percent={memPct} />
             </div>
             <div className="lp-grid" data-cols="2">
-              <LpMetric icon={<HardDrive size={13} />} label={disk.estimated ? '磁盘·估' : '磁盘'} value={`${disk.estimated && diskPct !== null ? '≈ ' : ''}${formatPercent(diskPct)}`} detail={diskDetail} title={disk.estimated ? `${disk.description} ${disk.sampleLabel}` : undefined} percent={diskPct} />
-              <LpMetric icon={<Activity size={13} />} label="负载" value={formatLoadValue(load1)} detail="1 / 5 / 15 分钟" title={loadTitle} percent={loadPct} />
+              <LpMetric icon={<HardDrive size={13} />} label={disk.estimated ? '磁盘·估' : '磁盘'} value={`${disk.estimated && diskPct !== null ? '≈ ' : ''}${formatPercent(diskPct)}`} title={disk.estimated ? `${disk.description} ${disk.sampleLabel}` : undefined} percent={diskPct} />
+              <LpMetric icon={<Activity size={13} />} label="负载" value={formatLoadValue(load1)} title={loadTitle} percent={loadPct} />
             </div>
 
             <div className="lp-net">

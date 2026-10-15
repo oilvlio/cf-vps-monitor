@@ -313,7 +313,6 @@ export default function Instance() {
   const lastPoint = chartData.length > 0 ? chartData[chartData.length - 1] : null;
   const hasDiskData = chartData.some((point) => point.disk !== null);
   const hasTempData = chartData.some((point) => point.temp !== null);
-  const hasLoadData = chartData.some((point) => point.load !== null || point.load5 !== null || point.load15 !== null);
 
   const gpuChartData = gpuRecords.map((r) => ({
     time: new Date(r.time).getTime(),
@@ -414,6 +413,7 @@ export default function Instance() {
               <LpInfoRow label="交换空间" value={formatMetricBytes(latest?.swap_total ?? client.swap_total)} />
               <LpInfoRow label="磁盘容量" value={formatMetricBytes(resourceTotal(latest?.disk_total, client.disk_total))} />
               {infoDisk.estimated && <LpInfoRow label="磁盘占用（估算）" value={infoDisk.detail} />}
+              <LpInfoRow label="CPU 负载" value={lastPoint && (lastPoint.load !== null || lastPoint.load5 !== null || lastPoint.load15 !== null) ? formatLoadTriple(lastPoint.load, lastPoint.load5, lastPoint.load15) : '—'} />
               <LpInfoRow label="Agent" value={client.version || '-'} />
             </dl>
             {infoDisk.estimated && <Text as="p" size="1" color="gray" mt="2">{infoDisk.description} {infoDisk.sampleLabel}</Text>}
@@ -578,34 +578,6 @@ export default function Instance() {
                 <Line type="monotone" dataKey="process_count" stroke="var(--accent-9)" dot={false} strokeWidth={2} isAnimationActive={false} />
               </LineChart>
             </ResponsiveContainer>
-          </LpMiniCard>
-
-          <LpMiniCard
-            title="CPU 负载"
-            value={lastPoint ? formatLoadTriple(lastPoint.load, lastPoint.load5, lastPoint.load15) : '—'}
-            note="1 / 5 / 15 分钟平均负载"
-          >
-            {!recordsLoading && !recordsError && !hasLoadData ? (
-              <Flex align="center" justify="center" style={{ height: miniChartHeight }}>
-                <Text role="status" color="gray">暂无 CPU 负载数据</Text>
-              </Flex>
-            ) : (
-              <ResponsiveContainer width="100%" height={miniChartHeight}>
-                <LineChart data={chartRenderData} margin={miniChartMargin}>
-                  {miniGrid}
-                  {miniXAxis}
-                  <YAxis {...wideYAxisProps} domain={['auto', 'auto']} tickFormatter={(value) => Number(value).toFixed(1)} />
-                  <Tooltip
-                    {...chartTooltipProps}
-                    labelFormatter={chartTimeFormatter}
-                    formatter={(value: number, name) => [Number(value).toFixed(2), name]}
-                  />
-                  <Line type="monotone" dataKey="load" stroke="var(--accent-9)" dot={false} strokeWidth={2} name="1 分钟" connectNulls={false} isAnimationActive={false} />
-                  <Line type="monotone" dataKey="load5" stroke="var(--green-9)" dot={false} strokeWidth={2} name="5 分钟" connectNulls={false} isAnimationActive={false} />
-                  <Line type="monotone" dataKey="load15" stroke="var(--blue-9)" dot={false} strokeWidth={2} name="15 分钟" connectNulls={false} isAnimationActive={false} />
-                </LineChart>
-              </ResponsiveContainer>
-            )}
           </LpMiniCard>
 
           {hasTempData && (

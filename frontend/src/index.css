@@ -6188,6 +6188,11 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   border-top: 1px solid rgba(148, 163, 184, 0.12);
   padding-top: 10px;
 }
+.lp-ping-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
 .lp-ping-head {
   display: flex;
   align-items: baseline;

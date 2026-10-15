@@ -1,7 +1,7 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { Badge, Box, Card, Flex, IconButton, Text, Tooltip } from '@radix-ui/themes';
-import { ArrowDown, ArrowUp, Cpu, HardDrive, MemoryStick, Timer, TrendingUp } from 'lucide-react';
+import { ArrowDown, ArrowUp, Cpu, HardDrive, MemoryStick, PackageX, Timer, TrendingUp } from 'lucide-react';
 import Flag from './Flag';
 import PriceTags from './PriceTags';
 import MiniPingChartFloat from './MiniPingChartFloat';
@@ -124,39 +124,53 @@ function formatBucketTime(t: number): string {
   return new Date(t).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
-/** 单条 ping 点阵的着色：丢包 warn/bad 优先，否则按延迟。 */
-function singlePingLevel(latencyMs: number | null, lossPercent: number | null): string {
-  const loss = lossLevel(lossPercent);
-  if (loss === 'warn' || loss === 'bad') return loss;
-  return latencyLevel(latencyMs, lossPercent);
-}
-
-function LpPingLine({ data, bucketSec = 300 }: { data: HomePingNode; bucketSec?: number }) {
+/** 首页探测点两行点阵：延迟一行、丢包一行（与原 PingStrip 同口径）。 */
+function LpPingRows({ data, bucketSec = 300 }: { data: HomePingNode; bucketSec?: number }) {
   const headLatency = data.latency_ms ?? data.latency_avg_ms;
-  const headLevel = singlePingLevel(data.latency_ms, data.loss_percent);
+  const headLatencyLevel = latencyLevel(data.latency_ms, data.loss_percent);
+  const headLossLevel = lossLevel(data.loss_percent);
   const timedOut = data.latency_ms === null && data.loss_percent !== null && data.loss_percent > 0;
   const bucketLabel = bucketSec >= 3600 && bucketSec % 3600 === 0 ? `${bucketSec / 3600} 小时` : `${Math.round(bucketSec / 60)} 分钟`;
   const hint = `探测点：${data.task_name || `#${data.task_id}`} · 每格 ${bucketLabel}`;
   return (
     <div className="lp-ping" title={hint} data-monitor-role="ping-strip">
-      <div className="lp-ping-head">
-        <span className="lp-ping-label"><Timer size={13} />Ping</span>
-        <span className="lp-ping-value" data-level={headLevel}>
-          {timedOut ? '超时' : `${formatHomeLatency(headLatency)}`}
-          {!timedOut && headLatency !== null && <small>ms</small>}
-          <span className="lp-ping-loss" data-level={lossLevel(data.loss_percent)}> · 丢包 {formatHomeLoss(data.loss_percent)}%</span>
+      <div className="lp-ping-row" data-kind="latency">
+        <div className="lp-ping-head">
+          <span className="lp-ping-label"><Timer size={13} />延迟</span>
+          <span className="lp-ping-value" data-level={headLatencyLevel}>
+            {timedOut ? '超时' : formatHomeLatency(headLatency)}
+            {!timedOut && headLatency !== null && <small>ms</small>}
+          </span>
+        </div>
+        <span className="lp-ping-dots" aria-hidden="true">
+          {data.points.map((point) => (
+            <i
+              key={point.t}
+              className="lp-ping-dot"
+              data-level={point.latency_ms === null && point.loss_percent === null ? 'none' : latencyLevel(point.latency_ms, point.loss_percent)}
+              title={`${formatBucketTime(point.t)} ${point.latency_ms === null ? (point.loss_percent === null ? '无数据' : '超时') : `${point.latency_ms} ms`}`}
+            />
+          ))}
         </span>
       </div>
-      <span className="lp-ping-dots" aria-hidden="true">
-        {data.points.map((point) => (
-          <i
-            key={point.t}
-            className="lp-ping-dot"
-            data-level={singlePingLevel(point.latency_ms, point.loss_percent)}
-            title={`${formatBucketTime(point.t)} ${point.latency_ms === null ? (point.loss_percent === null ? '无数据' : '超时') : `${point.latency_ms} ms`} · 丢包 ${formatHomeLoss(point.loss_percent)}%`}
-          />
-        ))}
-      </span>
+      <div className="lp-ping-row" data-kind="loss">
+        <div className="lp-ping-head">
+          <span className="lp-ping-label"><PackageX size={13} />丢包</span>
+          <span className="lp-ping-value" data-level={headLossLevel}>
+            {formatHomeLoss(data.loss_percent)}<small>%</small>
+          </span>
+        </div>
+        <span className="lp-ping-dots" aria-hidden="true">
+          {data.points.map((point) => (
+            <i
+              key={point.t}
+              className="lp-ping-dot"
+              data-level={point.loss_percent === null ? 'none' : lossLevel(point.loss_percent)}
+              title={`${formatBucketTime(point.t)} ${point.loss_percent === null ? '无数据' : `丢包 ${formatHomeLoss(point.loss_percent)}%`}`}
+            />
+          ))}
+        </span>
+      </div>
     </div>
   );
 }
@@ -332,7 +346,7 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
               </div>
             </div>
 
-            {homePing && <LpPingLine data={homePing} bucketSec={homePingBucketSec} />}
+            {homePing && <LpPingRows data={homePing} bucketSec={homePingBucketSec} />}
           </Flex>
         </Flex>
       </Link>

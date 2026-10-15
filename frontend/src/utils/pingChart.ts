@@ -443,25 +443,44 @@ export async function fetchPingTaskSeries(
     return response.json();
   };
 
-  const completeBatchRange = async (series: PingTaskSeries[]): Promise<PingTaskSeries[]> => Promise.all(series.map(async (item) => {
-    if (!rangeStart || item.records.length === 0) return item;
-    const oldest = Math.min(...item.records.map(record => Date.parse(record.time)));
-    if (!Number.isFinite(oldest) || oldest <= Date.parse(rangeStart)) return item;
-    const older = await collectCursorHistory(
-      (nextCursor) => fetchTaskPage(item.task, nextCursor),
-      { cursor: new Date(oldest).toISOString(), start: rangeStart, end: effectiveEnd, normalize: normalizePingRecords, signal },
-    );
-    const records = new Map([...older, ...item.records].map(record => [Date.parse(record.time), record]));
-    return { ...item, records: [...records.values()].sort((a, b) => Date.parse(a.time) - Date.parse(b.time)) };
-  }));
+  // 按窗口分流：>4h 走服务端分桶，单次 batch 必然拿齐（24h=720 / 3d=864 / 7d=672 桶 < 1000），无需回填；
+  // <=4h 读原始，60s 间隔下单页包圆（1h=60 / 4h=240 行），极小间隔任务靠下方逐任务分页兜底。
+  const LONG_RANGE_MS = 4 * 60 * 60 * 1000;
+  const rangeStartMs = rangeStart ? Date.parse(rangeStart) : NaN;
+  const effectiveEndMs = Date.parse(effectiveEnd);
+  const measuredRangeMs = Number.isFinite(rangeStartMs) && Number.isFinite(effectiveEndMs)
+    ? effectiveEndMs - rangeStartMs
+    : 0;
+  const inferredRangeMs = rangeHours && rangeHours > 0 ? rangeHours * 3600000 : 0;
+  const effectiveRangeMs = measuredRangeMs > 0 ? measuredRangeMs : inferredRangeMs;
+  const isLongRange = effectiveRangeMs > LONG_RANGE_MS;
 
-  if (tasks.length > 0) {
+  if (isLongRange && rangeStart) {
+    if (tasks.length === 0) return [];
+    const longTaskSpecs = tasks.map((task) => `${task.id}:1000:${task.intervalSec}`).join(',');
+    try {
+      const recordsResponse = await fetch(
+        `/api/records/ping/batch?uuid=${encodeURIComponent(uuid)}&task_specs=${encodeURIComponent(longTaskSpecs)}&base_interval=${Math.min(...tasks.map((task) => task.intervalSec))}&limit=1000&start=${encodeURIComponent(rangeStart)}&end=${encodeURIComponent(effectiveEnd)}${hiddenQuery}`,
+        { signal },
+      );
+      if (recordsResponse.ok) {
+        const recordsByTask = await recordsResponse.json();
+        const batchSeries: PingTaskSeries[] = tasks.map((task) => ({
+          task,
+          records: normalizePingRecords(asRecord(recordsByTask)?.[String(task.id)]),
+        }));
+        return limitPingSeriesToRecentRange(batchSeries, rangeHours);
+      }
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      // batch 失败时落到下方逐任务分页兜底。
+    }
+  } else if (tasks.length > 0) {
     const batchLimit = Math.max(...tasks.map(requestLimitForTask));
     const baseIntervalSec = Math.min(...tasks.map((task) => task.intervalSec));
     const taskSpecs = tasks
       .map((task) => `${task.id}:${requestLimitForTask(task)}:${task.intervalSec}`)
       .join(',');
-    let batchSeries: PingTaskSeries[] | null = null;
     try {
       const recordsResponse = await fetch(
         `/api/records/ping/batch?uuid=${encodeURIComponent(uuid)}&task_specs=${encodeURIComponent(taskSpecs)}&base_interval=${baseIntervalSec}&limit=${batchLimit}&cursor=${encodeURIComponent(effectiveEnd)}${rangeQuery}${hiddenQuery}`,
@@ -469,16 +488,22 @@ export async function fetchPingTaskSeries(
       );
       if (recordsResponse.ok) {
         const recordsByTask = await recordsResponse.json();
-        batchSeries = tasks.map((task) => ({
+        const batchSeries: PingTaskSeries[] = tasks.map((task) => ({
           task,
           records: normalizePingRecords(asRecord(recordsByTask)?.[String(task.id)]),
         }));
+        const batchCoversRange = !rangeStart || batchSeries.every((item) => {
+          if (item.records.length === 0) return true;
+          const oldest = Math.min(...item.records.map((record) => Date.parse(record.time)));
+          return !Number.isFinite(oldest) || oldest <= rangeStartMs;
+        });
+        // 极小间隔任务单页装不下时不直接返回，落到下方逐任务分页补齐。
+        if (batchCoversRange) return limitPingSeriesToRecentRange(batchSeries, rangeHours);
       }
     } catch (error) {
       if (signal?.aborted) throw error;
       // Fall back to the legacy per-task endpoint below.
     }
-    if (batchSeries) return limitPingSeriesToRecentRange(await completeBatchRange(batchSeries), rangeHours);
   }
 
   const series = await Promise.all(

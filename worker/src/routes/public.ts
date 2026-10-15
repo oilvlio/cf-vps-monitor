@@ -474,11 +474,13 @@ function validatePublicTimeRange(start: string, end: string): string | null {
   return null;
 }
 
-/** <=24h raw; ~3d → 15m; ~7d → 30m */
+/** <=4h 读原始；24h → 120s 桶（720 桶）；3d → 300s 桶（864 桶）；7d → 900s 桶（672 桶） */
 function historyBucketSec(rangeMs: number): number | null {
-  const day = 24 * 60 * 60 * 1000;
-  if (rangeMs > 3.5 * day) return 1800;
-  if (rangeMs > 1.2 * day) return 900;
+  const hour = 60 * 60 * 1000;
+  const day = 24 * hour;
+  if (rangeMs > 3.5 * day) return 900;
+  if (rangeMs > 1.2 * day) return 300;
+  if (rangeMs > 4 * hour) return 120;
   return null;
 }
 

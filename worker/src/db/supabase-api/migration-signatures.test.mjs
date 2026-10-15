@@ -14,6 +14,7 @@ assert.deepEqual(migrationFiles, [
   '7_history_rollup_tables.sql',
   '8_history_auto_downsample.sql',
   '9_home_ping_task.sql',
+  '9_home_ping_task_grants.sql',
 ]);
 assert.deepEqual(BUNDLED_SUPABASE_MIGRATIONS.map(({ version }) => version), [
   '1_core_schema',
@@ -25,6 +26,7 @@ assert.deepEqual(BUNDLED_SUPABASE_MIGRATIONS.map(({ version }) => version), [
   '7_history_rollup_tables',
   '8_history_auto_downsample',
   '9_home_ping_task',
+  '9_home_ping_task_grants',
 ]);
 
 const featureSchemaSql = await readFile(new URL('3_feature_schema.sql', migrationsUrl), 'utf8');

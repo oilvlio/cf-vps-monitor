@@ -197,7 +197,11 @@ function findAnchor(anchors: number[], timestamp: number, toleranceMs: number) {
   return null;
 }
 
-export function buildPingChartRows(series: PingTaskSeries[]) {
+// pick 缺省时取延迟值（丢包记为 null）；丢包率视图传入自己的取值函数，复用同一套时间锚点对齐。
+export function buildPingChartRows(
+  series: PingTaskSeries[],
+  pick: (record: PingRecord) => number | null = (record) => (record.value < 0 ? null : Number(record.value)),
+) {
   const validIntervals = series
     .map((item) => item.task.intervalSec)
     .filter((value) => Number.isFinite(value) && value > 0);
@@ -217,7 +221,7 @@ export function buildPingChartRows(series: PingTaskSeries[]) {
         grouped[useTimestamp] = { time: useTimestamp };
         if (anchor === null) anchors.push(useTimestamp);
       }
-      grouped[useTimestamp][item.task.key] = record.value < 0 ? null : Number(record.value);
+      grouped[useTimestamp][item.task.key] = pick(record);
     }
   }
 

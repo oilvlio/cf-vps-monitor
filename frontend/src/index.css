@@ -6214,171 +6214,479 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   background: var(--monitor-ring-track);
 }
 
-/* 详情页：左侧信息 + 右侧图表分组 */
+/* ========== 节点详情页（LuminaPlus 版式） ==========
+   结构照搬 LuminaPlus：无侧栏的单列页面 → 概览卡（系统 / 资源 / 网络三组）→ 负载|Ping 切换 →
+   图表面板。页面容器最宽 1720px 并随视口铺满（原先被限制在 50% + 460px，大屏两边空一大片）。
+   配色：卡片 / 描边 / 文字沿用当前显示主题的 --monitor-* 变量，与首页保持一致；
+   图表色（CPU 蓝、内存紫、磁盘橙、网络绿……）取自 LuminaPlus。要换成 Lumina 原色，
+   只改下面 .lp-inst-page 里这一组 --lp-* 变量即可。 */
 .lp-inst-page {
-  display: block;
-}
-.lp-inst-shell {
-  align-items: flex-start;
-}
-.lp-inst-panel {
-  min-width: 0;
-  flex: 1;
-}
-.lp-inst-grid {
-  display: grid;
-  grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
-  gap: 14px;
-  align-items: start;
-}
-.lp-inst-left {
-  min-width: 0;
-  position: sticky;
-  top: 76px;
-}
-.lp-inst-right {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-.lp-inst-summary {
-  background: var(--monitor-panel-strong);
-  border: 1px solid var(--monitor-border);
-  border-radius: 14px;
-  color: var(--gray-12);
-}
-.lp-inst-chart,
-.lp-inst-ping {
-  background: var(--monitor-panel-strong);
-  border: 1px solid var(--monitor-border);
-  border-radius: 14px;
-  color: var(--gray-12);
-}
-.lp-inst-sidebar-card {
-  background: var(--monitor-panel-strong);
-  border: 1px solid var(--monitor-border);
-  border-radius: 14px;
-  color: var(--gray-12);
+  --lp-surface: var(--monitor-panel-strong);
+  --lp-elev: var(--monitor-panel-muted);
+  --lp-border: var(--monitor-border);
+  --lp-border-strong: var(--monitor-border-strong);
+  --lp-hairline: color-mix(in srgb, var(--monitor-border) 70%, transparent);
+  --lp-text-1: var(--gray-12);
+  --lp-text-2: var(--gray-11);
+  --lp-text-3: var(--monitor-muted-text);
+  --lp-hover: color-mix(in srgb, var(--gray-12) 7%, transparent);
+  --lp-ui-accent: var(--monitor-accent);
+
+  --lp-cpu: #3b82f6;
+  --lp-mem: #8b5cf6;
+  --lp-disk: #e97b35;
+  --lp-net: #10b981;
+  --lp-net-up: #3b82f6;
+  --lp-conn: #8b5cf6;
+  --lp-conn-udp: #06b6d4;
+  --lp-proc: #d99a1e;
+  --lp-temp: #ef4444;
+  --lp-gpu: #ec4899;
+  --lp-lat-excellent: #1f9d55;
+  --lp-lat-good: #6fa81a;
+  --lp-lat-moderate: #a8a31c;
+  --lp-lat-elevated: #c98a14;
+  --lp-lat-critical: #dc2626;
+
+  width: 100%;
+  padding: 8px clamp(12px, 2vw, 32px) 40px;
 }
 
-/* 详情页顶部：横向多信息卡（系统 / 资源 / 网络），紧凑 dl 列表 */
+html[data-theme-appearance='dark'] .lp-inst-page {
+  --lp-cpu: #539bf5;
+  --lp-mem: #b083f0;
+  --lp-disk: #e0823d;
+  --lp-net: #57ab5a;
+  --lp-net-up: #539bf5;
+  --lp-conn: #b083f0;
+  --lp-conn-udp: #39c5cf;
+  --lp-proc: #fbbf24;
+  --lp-temp: #f47067;
+  --lp-gpu: #e275ad;
+  --lp-lat-excellent: #2fc66e;
+  --lp-lat-good: #9fe339;
+  --lp-lat-moderate: #cbd83a;
+  --lp-lat-elevated: #e2a928;
+  --lp-lat-critical: #f47067;
+}
+@media (prefers-color-scheme: dark) {
+  html:not([data-theme-appearance='light']) .lp-inst-page {
+    --lp-cpu: #539bf5;
+    --lp-mem: #b083f0;
+    --lp-disk: #e0823d;
+    --lp-net: #57ab5a;
+    --lp-net-up: #539bf5;
+    --lp-conn: #b083f0;
+    --lp-conn-udp: #39c5cf;
+    --lp-proc: #fbbf24;
+    --lp-temp: #f47067;
+    --lp-gpu: #e275ad;
+    --lp-lat-excellent: #2fc66e;
+    --lp-lat-good: #9fe339;
+    --lp-lat-moderate: #cbd83a;
+    --lp-lat-elevated: #e2a928;
+    --lp-lat-critical: #f47067;
+  }
+}
+/* 浅色下半透明描边偏弱，补一层带主题色的边（与首页卡片同一处理） */
+html[data-theme-appearance='light'] .lp-inst-page {
+  --lp-border: color-mix(in srgb, var(--monitor-accent) 22%, var(--monitor-border));
+}
+
+.lp-inst-inner {
+  width: 100%;
+  max-width: 1720px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.lp-back {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 2px;
+  border: 0;
+  background: none;
+  color: var(--lp-text-2);
+  font-size: 13px;
+  cursor: pointer;
+  transition: color 160ms ease;
+}
+.lp-back:hover { color: var(--lp-text-1); }
+
+/* ---- 面板 ---- */
+.lp-panel {
+  min-width: 0;
+  background: var(--lp-surface);
+  border: 1px solid var(--lp-border);
+  border-radius: 20px;
+  color: var(--lp-text-1);
+  padding: 18px 20px 20px;
+}
+.lp-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px 16px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.lp-panel-head.is-center { align-items: center; }
+.lp-panel-headings { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.lp-panel-title-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; min-width: 0; }
+.lp-panel-title {
+  margin: 0;
+  color: var(--lp-text-1);
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+.lp-panel-desc { margin: 0; color: var(--lp-text-3); font-size: 12px; }
+
+.lp-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--lp-border);
+  background: var(--lp-elev);
+  color: var(--lp-text-2);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.lp-pill[data-status='online'] {
+  color: var(--lp-lat-excellent);
+  border-color: color-mix(in srgb, var(--lp-lat-excellent) 40%, var(--lp-border));
+  background: color-mix(in srgb, var(--lp-lat-excellent) 12%, var(--lp-elev));
+}
+.lp-pill[data-status='offline'] {
+  color: var(--lp-lat-critical);
+  border-color: color-mix(in srgb, var(--lp-lat-critical) 40%, var(--lp-border));
+  background: color-mix(in srgb, var(--lp-lat-critical) 12%, var(--lp-elev));
+}
+.lp-pill.is-muted { font-weight: 500; }
+
+/* 标题旁的快速切换节点 */
+.lp-switch-trigger {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  border: 1px solid var(--lp-border);
+  background: var(--lp-elev);
+  color: var(--lp-text-2);
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease;
+}
+.lp-switch-trigger:hover,
+.lp-switch-trigger[aria-expanded='true'] { background: var(--lp-hover); color: var(--lp-text-1); }
+/* 菜单走 portal，落在 .radix-themes 下，拿不到 --lp-*，这里只用 Radix 自带变量 */
+.lp-switch-menu { min-width: 220px; max-height: min(60vh, 460px); }
+.lp-switch-menu .rt-DropdownMenuItem { gap: 8px; }
+.lp-switch-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lp-switch-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--gray-8); flex: none; }
+.lp-switch-dot.is-online { background: var(--green-9); }
+.lp-switch-dot.is-offline { background: var(--red-9); }
+
+/* ---- 概览：系统 / 资源 / 网络 ---- */
 .lp-info-groups {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
-  margin-top: 12px;
 }
 .lp-info-group {
   min-width: 0;
-  border: 1px solid var(--monitor-border);
-  border-radius: 10px;
-  padding: 10px 12px;
-  background: var(--monitor-panel-muted);
+  border: 1px solid var(--lp-border);
+  border-radius: 16px;
+  background: var(--lp-elev);
+  padding: 12px 16px 10px;
 }
 .lp-info-group-title {
-  color: var(--monitor-muted-text);
-  font-size: 11px;
+  margin-bottom: 6px;
+  color: var(--lp-text-1);
+  font-size: 13px;
   font-weight: 700;
-  letter-spacing: 0.06em;
-  margin-bottom: 8px;
-}
-.lp-info-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 0;
-  padding: 0;
+  letter-spacing: 0.02em;
 }
 .lp-info-item {
+  min-width: 0;
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 12px;
-  min-width: 0;
+  gap: 16px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--lp-hairline);
 }
-.lp-info-label {
-  flex: none;
-  color: var(--monitor-muted-text);
+.lp-info-item:last-child { border-bottom: 0; }
+.lp-info-label { flex: none; color: var(--lp-text-2); font-size: 13px; }
+.lp-info-value {
+  min-width: 0;
+  color: var(--lp-text-1);
+  font-size: 13px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lp-info-item.is-stack { flex-direction: column; align-items: stretch; gap: 6px; }
+.lp-info-item.is-stack .lp-info-value { text-align: left; }
+.lp-info-note { margin: 4px 0 0; color: var(--lp-text-3); font-size: 11px; line-height: 1.5; }
+.lp-info-item.is-stack .lp-info-note { margin: 0; }
+.lp-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--lp-hairline);
+  overflow: hidden;
+}
+.lp-progress > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--lp-cpu), var(--lp-mem));
+}
+
+/* ---- 负载|Ping 切换 + 时间档位 ---- */
+.lp-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+.lp-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 4px;
+  border: 1px solid var(--lp-border);
+  border-radius: 14px;
+  background: var(--lp-surface);
+}
+.lp-seg.is-scroll { overflow-x: auto; }
+.lp-seg button {
+  min-height: 32px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: none;
+  color: var(--lp-text-2);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 160ms ease, background 160ms ease;
+}
+.lp-seg button:hover:not([data-active='true']) { background: var(--lp-hover); color: var(--lp-text-1); }
+.lp-seg button[data-active='true'] {
+  color: var(--lp-text-1);
+  border-color: color-mix(in srgb, var(--lp-ui-accent) 42%, var(--lp-border));
+  background: color-mix(in srgb, var(--lp-ui-accent) 14%, var(--lp-elev));
+}
+
+/* ---- 图表面板 ---- */
+.lp-head-meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.lp-meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 0 11px;
+  border: 1px solid var(--lp-border);
+  border-radius: 999px;
+  background: var(--lp-elev);
+  color: var(--lp-text-3);
   font-size: 11.5px;
   font-weight: 600;
 }
-.lp-info-value {
-  margin: 0;
-  min-width: 0;
-  color: var(--gray-12);
+.lp-meta-chip strong { color: var(--lp-text-1); font-weight: 700; }
+.lp-tool-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 11px;
+  border: 1px solid var(--lp-border);
+  border-radius: 10px;
+  background: var(--lp-elev);
+  color: var(--lp-text-2);
+  font: inherit;
   font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  text-align: right;
+  font-weight: 600;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease;
 }
+.lp-tool-btn:hover:not(:disabled) { background: var(--lp-hover); color: var(--lp-text-1); }
+.lp-tool-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.lp-tool-btn[aria-busy='true'] svg { animation: lp-spin 900ms linear infinite; }
+@keyframes lp-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .lp-tool-btn[aria-busy='true'] svg { animation: none; } }
 
-/* 负载 | Ping 切换 + 时间档位 */
-.lp-inst-controls {
-  background: var(--monitor-panel-strong);
-  border: 1px solid var(--monitor-border);
-  border-radius: 14px;
-  color: var(--gray-12);
+.lp-switch { gap: 8px; }
+.lp-switch-track {
+  position: relative;
+  width: 28px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--lp-hairline);
+  transition: background 160ms ease;
 }
+.lp-switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--lp-text-2);
+  transition: transform 160ms ease, background 160ms ease;
+}
+.lp-switch[data-active='true'] .lp-switch-track { background: color-mix(in srgb, var(--lp-ui-accent) 55%, transparent); }
+.lp-switch[data-active='true'] .lp-switch-thumb { transform: translateX(12px); background: #fff; }
+.lp-switch-state { color: var(--lp-text-3); font-weight: 500; min-width: 2em; }
 
-/* 负载模式：小表矩阵，3 列并排 */
-.lp-mini-grid {
+/* 负载：卡片栅格（3 列；8 张图时宽屏 4 列） */
+.lp-chart-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-  align-items: stretch;
+  gap: 14px;
 }
-.lp-mini-card {
+.lp-metric-card {
+  position: relative;
   min-width: 0;
-  background: var(--monitor-panel-strong);
-  border: 1px solid var(--monitor-border);
-  border-radius: 14px;
-  color: var(--gray-12);
-  padding: 12px 12px 8px;
+  overflow: hidden;
+  border: 1px solid var(--lp-border);
+  border-radius: 16px;
+  padding: 14px 16px 10px;
+  background: color-mix(in srgb, var(--lp-accent, var(--lp-cpu)) 5%, var(--lp-elev));
+  transition: border-color 160ms ease, transform 160ms ease;
 }
-.lp-mini-head {
+.lp-metric-card::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--lp-accent, var(--lp-cpu)), transparent 88%);
+  opacity: 0.85;
+}
+.lp-metric-card:hover { transform: translateY(-1px); border-color: var(--lp-border-strong); }
+.lp-metric-head {
   display: flex;
-  align-items: baseline;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 4px;
+  gap: 12px;
+  min-height: 40px;
+  margin-bottom: 6px;
 }
-.lp-mini-title {
-  color: var(--monitor-muted-text);
-  font-size: 12px;
-  font-weight: 700;
-}
-.lp-mini-value {
-  color: var(--gray-12);
+.lp-metric-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--lp-text-2);
   font-size: 13px;
   font-weight: 700;
+}
+.lp-metric-title svg { color: var(--lp-accent, var(--lp-cpu)); flex: none; }
+.lp-metric-values { display: flex; flex-direction: column; align-items: flex-end; min-width: 0; gap: 2px; }
+.lp-metric-value {
+  max-width: 100%;
+  color: var(--lp-text-1);
+  font-size: 14px;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.lp-mini-note {
-  color: var(--monitor-muted-text);
-  font-size: 10.5px;
-  margin: 0 0 4px;
+.lp-metric-sub {
+  max-width: 100%;
+  color: var(--lp-text-3);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.lp-mini-body {
+.lp-metric-note { margin: 0 0 4px; color: var(--lp-text-3); font-size: 10.5px; line-height: 1.4; }
+.lp-metric-body { min-width: 0; }
+
+/* Ping：图表占满面板宽度，更高；图例 + 数值做成胶囊 */
+.lp-ping-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.lp-ping-tasks { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.lp-ping-task {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   min-width: 0;
+  max-width: 100%;
+  padding: 5px 12px;
+  border: 1px solid var(--lp-border);
+  border-radius: 999px;
+  background: var(--lp-elev);
+  color: var(--lp-text-1);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: opacity 160ms ease, background 160ms ease, border-color 160ms ease;
+}
+.lp-ping-task:hover { background: var(--lp-hover); }
+.lp-ping-task[data-visible='false'] { opacity: 0.42; }
+.lp-ping-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.lp-ping-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.lp-ping-primary { font-weight: 700; font-variant-numeric: tabular-nums; }
+.lp-ping-loss { font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.lp-ping-chart { width: 100%; min-width: 0; }
+.lp-empty {
+  display: flex;
+  min-height: 160px;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  color: var(--lp-text-3);
+  font-size: 13px;
+}
+
+@media (min-width: 1500px) {
+  .lp-chart-grid[data-count='8'] { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@media (max-width: 1100px) {
+  .lp-chart-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 900px) {
+  .lp-info-groups { grid-template-columns: 1fr; }
+}
+@media (max-width: 720px) {
+  .lp-inst-page { padding-left: 8px; padding-right: 8px; }
+  .lp-panel { padding: 14px 12px 14px; border-radius: 16px; }
+  .lp-chart-grid { grid-template-columns: 1fr; }
+  .lp-controls { align-items: stretch; flex-direction: column; }
+  .lp-seg { width: 100%; }
+  .lp-seg button { flex: 1 1 auto; padding: 0 8px; }
+  .lp-head-meta { justify-content: flex-start; }
+  .lp-panel-title { font-size: 16px; }
 }
 
 /* 白天模式：既有浅色变量多为半透明，直接落在浅底上描边偏弱，
    这里给卡片描边补一层带主题色的边，保证浅底上轮廓可辨。 */
 html[data-theme-appearance='light'] .lp-card,
-html[data-theme-appearance='light'] .lp-stat-card,
-html[data-theme-appearance='light'] .lp-inst-summary,
-html[data-theme-appearance='light'] .lp-inst-chart,
-html[data-theme-appearance='light'] .lp-inst-ping,
-html[data-theme-appearance='light'] .lp-inst-sidebar-card,
-html[data-theme-appearance='light'] .lp-inst-controls,
-html[data-theme-appearance='light'] .lp-mini-card,
-html[data-theme-appearance='light'] .lp-info-group {
+html[data-theme-appearance='light'] .lp-stat-card {
   border-color: color-mix(in srgb, var(--monitor-accent) 22%, var(--monitor-border));
 }
 html[data-theme-appearance='light'] .lp-card[data-status='offline'] {
@@ -6398,25 +6706,10 @@ html[data-theme-appearance='light'] .lp-card[data-status='offline'] {
   .lp-node-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .lp-mini-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .lp-inst-grid {
-    grid-template-columns: 1fr;
-  }
-  .lp-inst-left {
-    position: static;
-  }
 }
 
 @media (max-width: 720px) {
   .lp-node-grid {
-    grid-template-columns: 1fr;
-  }
-  .lp-mini-grid {
-    grid-template-columns: 1fr;
-  }
-  .lp-info-groups {
     grid-template-columns: 1fr;
   }
   .lp-grid {

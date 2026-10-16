@@ -181,6 +181,7 @@ export default function Instance() {
     if (!uuid || authLoading) return;
     const requestId = ++recordsRequestRef.current;
     setRecordsLoading(true);
+    setRecords([]);
     setRecordsError(null);
     const endTs = Date.now();
     const startTs = endTs - timeRangeMs[range];
@@ -214,9 +215,6 @@ export default function Instance() {
     setSelectedPingTaskKeys([]);
     setPingError(null);
     setPingLoading(false);
-    setRecords([]);
-    setGpuRecords([]);
-    setGpuError(null);
   }, [uuid]);
 
   useEffect(() => {
@@ -240,6 +238,7 @@ export default function Instance() {
   useEffect(() => {
     if (!uuid || authLoading || !shouldLoadPing) return;
     const controller = new AbortController();
+    setPingSeries([]);
     setPingError(null);
     setPingLoading(true);
 
@@ -250,6 +249,7 @@ export default function Instance() {
       .catch(() => {
         if (!controller.signal.aborted) {
           setPingError('加载 Ping 数据失败');
+          setPingSeries([]);
         }
       })
       .finally(() => {
@@ -261,6 +261,7 @@ export default function Instance() {
 
   // Load GPU records (only for GPU-capable clients)
   useEffect(() => {
+    setGpuRecords([]);
     setGpuError(null);
     setGpuLoading(false);
     if (!uuid || authLoading || !client?.gpu_name || client.uuid !== uuid) return;
@@ -281,10 +282,12 @@ export default function Instance() {
     return () => controller.abort();
   }, [uuid, timeRange, client?.uuid, client?.gpu_name, authLoading, isAuthenticated, gpuRefresh]);
 
-  // 切档位只换 timeRange：旧数据留着继续展示，新数据到了才替换，不整片清空。
   const handleTimeRangeChange = (v: string) => {
     const range = v as TimeRange;
     setTimeRange(range);
+    setRecords([]);
+    setGpuRecords([]);
+    setRecordsLoading(true);
   };
 
   // 这些派生数据是纯函数且要遍历全部 ping 点，放在提前 return 之前并 memo，
@@ -441,7 +444,6 @@ export default function Instance() {
               <SegmentedControl.Item value="load">负载</SegmentedControl.Item>
               <SegmentedControl.Item value="ping">Ping</SegmentedControl.Item>
             </SegmentedControl.Root>
-            <Text weight="bold">{viewTab === 'load' ? '负载' : 'Ping 延迟'}</Text>
           </Flex>
           <Flex align="center" gap="3" wrap="wrap">
             <SegmentedControl.Root size="1" value={timeRange} onValueChange={handleTimeRangeChange}>
@@ -451,7 +453,7 @@ export default function Instance() {
               <SegmentedControl.Item value="3d">3天</SegmentedControl.Item>
               <SegmentedControl.Item value="7d">7天</SegmentedControl.Item>
             </SegmentedControl.Root>
-            <Text size="1" color="gray">{records.length} 个数据点{recordsLoading && records.length > 0 ? ' · 更新中…' : ''}</Text>
+            <Text size="1" color="gray">{records.length} 个数据点</Text>
           </Flex>
         </Flex>
       </Card>
@@ -616,7 +618,7 @@ export default function Instance() {
               title="GPU"
               value={lastGpuPoint ? `${Number(lastGpuPoint.utilization).toFixed(1)}%` : '—'}
             >
-              {gpuLoading && gpuRecords.length === 0 ? (
+              {gpuLoading ? (
                 <Flex align="center" justify="center" style={{ height: miniChartHeight }}>
                   <Text role="status" color="gray">正在加载 GPU 历史…</Text>
                 </Flex>
@@ -654,12 +656,6 @@ export default function Instance() {
         <Flex justify="between" align="center" mb="3" gap="3" wrap="wrap">
           <Flex align="center" gap="2">
             <Text weight="bold">Ping 延迟</Text>
-            {pingLoading && pingSeries.length > 0 && (
-              <Text size="1" color="gray">更新中…</Text>
-            )}
-            {!pingLoading && pingError && pingSeries.length > 0 && (
-              <Text size="1" color="red">刷新失败，显示旧数据</Text>
-            )}
             {pingSeriesWithRecords.length > 0 && (
               <Text size="1" color="gray">
                 测速点：{selectedPingTaskKeys.length === 0 ? '全部' : `${visiblePingSeries.length} 个已选`}
@@ -673,9 +669,9 @@ export default function Instance() {
           )}
         </Flex>
 
-        {pingLoading && pingSeries.length === 0 ? (
+        {pingLoading ? (
           <Loading />
-        ) : pingError && pingSeries.length === 0 ? (
+        ) : pingError ? (
           <Text size="2" color="red" align="center" style={{ display: 'block', padding: '20px' }}>
             {pingError}
           </Text>

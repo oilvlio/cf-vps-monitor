@@ -650,7 +650,7 @@ test('AUD-42 late node history cannot replace the current node history', async (
     setRecordsLoading() {}, setRecordsRangeEnd() {}, setRecordsError() {},
     setRecords: value => { current = value; },
   });
-  const a = load('node-a')('1h');
+  const a = load('node-a')('4h');
   const b = load('node-b')('3d');
   pending.get('node-b')([{ time: recordTime, cpu: 22 }]);
   await b;

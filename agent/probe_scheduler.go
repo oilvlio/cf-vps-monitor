@@ -150,7 +150,7 @@ func (s *pingReportState) runPingProbe(ctx context.Context, task PingTask, run *
 	case "http", "https":
 		value = executeHTTPPingWithContext(ctx, task.Target)
 	default:
-		value, _ = executeTCPProbeWithContext(ctx, task.Target, 3*time.Second)
+		value = executeTCPPingWithContext(ctx, task.Target)
 	}
 	s.mu.Lock()
 	if s.runningPing[task.ID] == run {

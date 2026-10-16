@@ -444,7 +444,7 @@ export async function fetchPingTaskSeries(
   };
 
   // 按窗口分流：>4h 走服务端分桶，单次 batch 必然拿齐（24h=720 / 3d=864 / 7d=672 桶 < 1000），无需回填；
-  // <=4h 读原始，60s 间隔下单页包圆（1h=60 / 4h=240 行），极小间隔任务靠下方逐任务分页兜底。
+  // <=4h 读原始，60s 间隔下单页包圆（4h=240 行），极小间隔任务靠下方逐任务分页兜底。
   const LONG_RANGE_MS = 4 * 60 * 60 * 1000;
   const rangeStartMs = rangeStart ? Date.parse(rangeStart) : NaN;
   const effectiveEndMs = Date.parse(effectiveEnd);
@@ -492,12 +492,17 @@ export async function fetchPingTaskSeries(
           task,
           records: normalizePingRecords(asRecord(recordsByTask)?.[String(task.id)]),
         }));
+        // 服务端按 time >= start 取数，最老一条几乎不可能恰好 <= rangeStartMs，
+        // 严格比较会让 batch 结果几乎总被判为"未覆盖"，白跑一次再逐任务分页。
+        // 判定为已覆盖的条件：①条数没触顶（没被 limit 截断）；②最老一条距窗口起点不超过 2 个采样间隔。
         const batchCoversRange = !rangeStart || batchSeries.every((item) => {
           if (item.records.length === 0) return true;
+          if (item.records.length < batchLimit) return true;
           const oldest = Math.min(...item.records.map((record) => Date.parse(record.time)));
-          return !Number.isFinite(oldest) || oldest <= rangeStartMs;
+          const slackMs = Math.max(item.task.intervalSec, 1) * 2000;
+          return !Number.isFinite(oldest) || oldest <= rangeStartMs + slackMs;
         });
-        // 极小间隔任务单页装不下时不直接返回，落到下方逐任务分页补齐。
+        // 极小间隔任务单页装不下（被截断且离窗口起点较远）时，落到下方逐任务分页补齐。
         if (batchCoversRange) return limitPingSeriesToRecentRange(batchSeries, rangeHours);
       }
     } catch (error) {

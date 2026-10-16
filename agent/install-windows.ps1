@@ -91,7 +91,7 @@ function Set-InstanceDefaults {
   $base = ConvertTo-InstanceId $InstanceId
   $script:NormalizedInstanceId = $base
   if ([string]::IsNullOrWhiteSpace($script:ServiceName)) {
-    $script:ServiceName = "CFVpsMonitorAgent-$base"
+    $script:ServiceName = "CFVpsMonitorAgent"
   }
   if ([string]::IsNullOrWhiteSpace($script:InstallDir)) {
     $script:InstallDir = Join-Path "$env:ProgramFiles\CF VPS Monitor" $base

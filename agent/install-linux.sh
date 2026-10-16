@@ -59,7 +59,7 @@ Options:
   --mode MODE               websocket or http, default: websocket.
   --instance-id ID          Instance id used for default service and install directory.
   --install-dir DIR         Install directory, default: /opt/cf-vps-monitor/<instance-id>.
-  --service-name NAME       systemd service name, default: cf-vps-monitor-agent-<instance-id>.
+  --service-name NAME       systemd service name, default: cf-vps-monitor-agent.
   --install-service-name NAME
                             Legacy alias for --service-name.
   --binary PATH             Existing agent binary.
@@ -923,7 +923,7 @@ apply_instance_defaults() {
   base="$(sanitize_instance_id "${INSTANCE_ID:-default}")" || return 1
   BASE_ID="$base"
   if [[ -z "$SERVICE_NAME" ]]; then
-    SERVICE_NAME="cf-vps-monitor-agent-${base}"
+    SERVICE_NAME="cf-vps-monitor-agent"
   fi
   if [[ -z "$INSTALL_DIR" ]]; then
     if is_macos; then

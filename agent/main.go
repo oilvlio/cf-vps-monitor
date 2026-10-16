@@ -109,6 +109,7 @@ var (
 	containerDiskTotalBytes containerDiskTotalValue
 	nicInclude              string
 	nicExclude              string
+	allowHostLoad           bool
 	trafficTracker          *trafficResetTracker
 	publicIPv4ProbeURLs     = []string{
 		"https://api.ipify.org",
@@ -496,6 +497,7 @@ func init() {
 	flag.Bool("disk-usage-once", false, "With --disk-usage-collector, collect one sample and exit")
 	flag.Bool("disk-usage-check", false, "Check whether root directory collection is required (exit 0 required, 3 not required)")
 	flag.StringVar(&nicInclude, "nic-include", "", "Comma-separated network interface patterns to include in traffic totals, for example eth*,ens*")
+	flag.BoolVar(&allowHostLoad, "allow-host-load", false, "In containers whose /proc/loadavg is the host's (no lxcfs loadavg), report the host load average instead of leaving load unavailable")
 	flag.StringVar(&nicExclude, "nic-exclude", "", "Comma-separated network interface patterns to exclude from traffic totals, for example lo,docker*,veth*")
 }
 
@@ -588,6 +590,12 @@ func applyEnvDefaults() {
 	}
 	if nicExclude == "" {
 		nicExclude = os.Getenv("CF_MONITOR_NIC_EXCLUDE")
+	}
+	if !flagWasSet("allow-host-load") {
+		switch strings.ToLower(strings.TrimSpace(os.Getenv("CF_MONITOR_ALLOW_HOST_LOAD"))) {
+		case "1", "true", "yes", "on":
+			allowHostLoad = true
+		}
 	}
 	if !flagWasSet("traffic-reset-day") {
 		if value := strings.TrimSpace(os.Getenv("CF_MONITOR_TRAFFIC_RESET_DAY")); value != "" {
@@ -1027,14 +1035,24 @@ func executeICMPPingWithContext(parent context.Context, target string) float64 {
 }
 
 func executeTCPPing(target string) float64 {
+	return executeTCPPingWithContext(context.Background(), target)
+}
+
+// executeTCPPingWithContext 是调度器实际使用的 TCP 延迟测量：首次 >1000ms
+// （通常是 SYN 重传的 1s/3s 台阶）会触发补测，补测仍超限则按失败(-1)处理，
+// 不会把 1000+/2000+ms 的重传耗时当作延迟上报。
+func executeTCPPingWithContext(ctx context.Context, target string) float64 {
 	result := resolveTCPPingSamples(func() float64 {
-		v, e := executeTCPProbeWithContext(context.Background(), target, 3*time.Second)
+		if ctx.Err() != nil {
+			return -1
+		}
+		v, e := executeTCPProbeWithContext(ctx, target, 3*time.Second)
 		if e != nil {
 			return -1
 		}
 		return v
 	})
-	if result < 0 {
+	if result < 0 && ctx.Err() == nil {
 		log.Printf("TCP ping failed for %q", target)
 	}
 	return result
@@ -2578,7 +2596,8 @@ func evaluateLoadAverageTrust(root string) (bool, string) {
 
 // loadAverageReportable 决定本轮是否上报负载。判定结果缓存，避免每个采样周期都扫 /proc。
 func loadAverageReportable() bool {
-	if runtime.GOOS != "linux" {
+	if runtime.GOOS != "linux" || allowHostLoad {
+		// allowHostLoad：运维明确接受容器上报宿主机负载（宿主机繁忙时容器同样受影响）。
 		return true
 	}
 

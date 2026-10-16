@@ -68,7 +68,7 @@ Options:
   --instance-id ID          Instance id used for default names and paths.
   --install-mode MODE       auto, system, or user. Default: auto.
   --install-dir DIR         Install directory. Default depends on mode.
-  --service-name NAME       system service name, default: cf-vps-monitor-agent-<instance-id>.
+  --service-name NAME       system service name, default: cf-vps-monitor-agent.
   --install-service-name NAME
                             Legacy alias for --service-name.
   --binary PATH             Existing agent binary.
@@ -1010,7 +1010,7 @@ resolve_build_dir() {
 
 apply_defaults() {
   BASE_ID="$(sanitize_instance_id "${INSTANCE_ID:-default}")"
-  [ -n "$SERVICE_NAME" ] || SERVICE_NAME="cf-vps-monitor-agent-${BASE_ID}"
+  [ -n "$SERVICE_NAME" ] || SERVICE_NAME="cf-vps-monitor-agent"
   if ! agent_service_name_is_safe "$SERVICE_NAME"; then
     die "--service-name must be a safe name using A-Z, a-z, 0-9, dot, underscore, dash, or @; it cannot be a dot segment or start with a dash."
   fi

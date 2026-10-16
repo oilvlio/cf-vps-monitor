@@ -1,10 +1,9 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { Badge, Box, Card, Flex, IconButton, Text, Tooltip } from '@radix-ui/themes';
-import { Activity, ArrowDown, ArrowUp, Cpu, HardDrive, MemoryStick, PackageX, Timer, TrendingUp } from 'lucide-react';
+import { Badge, Box, Card, Flex, Text, Tooltip } from '@radix-ui/themes';
+import { Activity, ArrowDown, ArrowUp, Cpu, HardDrive, MemoryStick, PackageX, Timer } from 'lucide-react';
 import Flag from './Flag';
 import PriceTags from './PriceTags';
-import MiniPingChartFloat from './MiniPingChartFloat';
 import type { HomePingNode } from '../utils/homePing';
 import { formatHomeLatency, formatHomeLoss, latencyLevel, lossLevel } from '../utils/homePing';
 import { diskUsagePresentation, formatLastReport, formatLoadValue, formatMetricBytes, formatMetricSpeed, formatMetricUptime, metricNumber, resourceUsage, type NodeStatus } from '../utils/nodeMetrics';
@@ -22,7 +21,6 @@ interface NodeCardProps {
   online: boolean;
   status?: NodeStatus;
   lastReportTime?: number;
-  includeHidden?: boolean;
   /** 首页探测点的分桶结果；节点没设置首页探测点时为空，不渲染色块 */
   homePing?: HomePingNode;
   homePingBucketSec?: number;
@@ -185,7 +183,7 @@ function NodeIpBadges({ client, className }: { client: ClientInfo; className?: s
   );
 }
 
-export default function NodeCard({ client, live, online, status, lastReportTime, includeHidden = false, homePing, homePingBucketSec }: NodeCardProps) {
+export default function NodeCard({ client, live, online, status, lastReportTime, homePing, homePingBucketSec }: NodeCardProps) {
   const isMobile = useIsMobile();
   const defaultLive: Partial<LiveRecord> = {
     temp: null,
@@ -226,12 +224,6 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
   const trafficPct = client.traffic_limit > 0 && trafficUsed !== null ? Math.min(100, (trafficUsed / client.traffic_limit) * 100) : undefined;
   const quotaLit = trafficPct === undefined ? 0 : (trafficUsed !== null && trafficUsed > 0 ? Math.max(1, Math.round((trafficPct / 100) * LP_DOT_COUNT)) : 0);
   const hasBillingInfo = (client.price !== undefined && client.price !== 0) || Boolean(getExpiryInfo(client.expired_at).label);
-  const handleCardLinkClick = (event: React.MouseEvent<HTMLAnchorElement>) => {
-    const target = event.target as HTMLElement | null;
-    if (target?.closest('[data-node-card-action="true"]')) {
-      event.preventDefault();
-    }
-  };
 
   return (
     <Card
@@ -240,7 +232,7 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
       style={{ width: '100%', margin: '0 auto', opacity: online ? 1 : 0.75 }}
       id={client.uuid}
     >
-      <Link className="node-card-link lp-link" to={`/instance/${client.uuid}`} onClick={handleCardLinkClick} style={{ textDecoration: 'none', color: 'inherit' }}>
+      <Link className="node-card-link lp-link" to={`/instance/${client.uuid}`} style={{ textDecoration: 'none', color: 'inherit' }}>
         <Flex className="node-card-body lp-body" direction="column" gap="2">
           <Flex className="node-card-header lp-head" justify="between" align="start" my={isMobile ? '-1' : '0'} data-has-message={d.message ? 'true' : undefined}>
             <Flex justify="start" align="center" style={{ flex: 1, minWidth: 0 }}>
@@ -274,19 +266,6 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
                   title={d.message}
                 >!</Box>
               )}
-              <MiniPingChartFloat
-                uuid={client.uuid}
-                chartWidth={460}
-                chartHeight={260}
-                limit={360}
-                rangeHours={4}
-                includeHidden={includeHidden}
-                trigger={
-                  <IconButton className="node-card-action" data-node-card-action="true" variant="ghost" size="2" aria-label="查看 Ping 延迟" title="查看 Ping 延迟走势">
-                    <TrendingUp size={16} />
-                  </IconButton>
-                }
-              />
               <Badge color={nodeStatus === 'online' ? 'green' : nodeStatus === 'offline' ? 'red' : 'gray'} variant="solid" radius="full">
                 {nodeStatus === 'online' ? '在线' : nodeStatus === 'offline' ? '离线' : '确认中'}
               </Badge>

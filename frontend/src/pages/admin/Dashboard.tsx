@@ -497,6 +497,23 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: Command
             <FieldInput label="网卡包含" value={installOptions.nicInclude} onChange={(v) => setOption('nicInclude', v)} placeholder="例如 eth*,ens*" />
             <FieldInput label="网卡排除" value={installOptions.nicExclude} onChange={(v) => setOption('nicExclude', v)} placeholder="例如 lo,docker*,veth*" />
             <FieldInput label="流量重置日期" value={installOptions.trafficResetDay} onChange={(v) => setOption('trafficResetDay', v)} type="number" min={1} step={1} placeholder="1" />
+            {platform === 'unix' && (
+              <>
+                <label>
+                  <Text size="2" weight="bold" style={{ display: 'block', marginBottom: 4 }}>容器宿主机负载</Text>
+                  <Select.Root value={installOptions.allowHostLoad ? 'on' : 'off'} onValueChange={(v) => setOption('allowHostLoad', v === 'on')}>
+                    <Select.Trigger style={{ width: '100%' }} />
+                    <Select.Content>
+                      <Select.Item value="off">不上报（LXC/Incus 等容器无法获得本机负载时留空）</Select.Item>
+                      <Select.Item value="on">上报宿主机负载</Select.Item>
+                    </Select.Content>
+                  </Select.Root>
+                </label>
+                {installOptions.allowHostLoad && (
+                  <FieldInput label="宿主机核数" value={installOptions.hostCpuCores} onChange={(v) => setOption('hostCpuCores', v)} type="number" min={1} step={1} placeholder="填写后按容器核数折算，使负载色点反映宿主机利用率" />
+                )}
+              </>
+            )}
           </div>
         </Flex>
 

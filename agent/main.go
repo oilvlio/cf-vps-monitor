@@ -109,6 +109,8 @@ var (
 	containerDiskTotalBytes containerDiskTotalValue
 	nicInclude              string
 	nicExclude              string
+	allowHostLoad           bool
+	hostCPUCores            int
 	trafficTracker          *trafficResetTracker
 	publicIPv4ProbeURLs     = []string{
 		"https://api.ipify.org",
@@ -187,28 +189,27 @@ type Report struct {
 	Temp   *float64 `json:"temp"`
 	// A nil disk or uptime value is unavailable, including host data that
 	// cannot be attributed to the current container. Keep JSON null explicit.
-	Disk                *int64               `json:"disk"`
-	DiskTotal           *int64               `json:"disk_total"`
-	DiskSource          string               `json:"disk_source,omitempty"`
-	DiskSampledAt       int64                `json:"disk_sampled_at,omitempty"`
-	NetIn               int64                `json:"net_in"`
-	NetOut              int64                `json:"net_out"`
-	NetTotalUp          int64                `json:"net_total_up"`
-	NetTotalDown        int64                `json:"net_total_down"`
-	ProcessCount        int                  `json:"process_count"`
-	Connections         int                  `json:"connections"`
-	ConnectionsUdp      int                  `json:"connections_udp"`
-	Uptime              *int64               `json:"uptime"`
-	Version             string               `json:"version"`
-	Name                string               `json:"name,omitempty"`
-	ReportInterval      int                  `json:"report_interval,omitempty"`
-	Timestamp           int64                `json:"timestamp,omitempty"`
-	IPv4                string               `json:"ipv4,omitempty"`
-	IPv6                string               `json:"ipv6,omitempty"`
-	GPUs                []GPUInfo            `json:"gpus,omitempty"`
-	BasicInfo           *BasicInfo           `json:"basic_info,omitempty"`
-	PingResults         []PingResult         `json:"ping_results,omitempty"`
-	WebsiteProbeResults []WebsiteProbeResult `json:"website_probe_results,omitempty"`
+	Disk           *int64       `json:"disk"`
+	DiskTotal      *int64       `json:"disk_total"`
+	DiskSource     string       `json:"disk_source,omitempty"`
+	DiskSampledAt  int64        `json:"disk_sampled_at,omitempty"`
+	NetIn          int64        `json:"net_in"`
+	NetOut         int64        `json:"net_out"`
+	NetTotalUp     int64        `json:"net_total_up"`
+	NetTotalDown   int64        `json:"net_total_down"`
+	ProcessCount   int          `json:"process_count"`
+	Connections    int          `json:"connections"`
+	ConnectionsUdp int          `json:"connections_udp"`
+	Uptime         *int64       `json:"uptime"`
+	Version        string       `json:"version"`
+	Name           string       `json:"name,omitempty"`
+	ReportInterval int          `json:"report_interval,omitempty"`
+	Timestamp      int64        `json:"timestamp,omitempty"`
+	IPv4           string       `json:"ipv4,omitempty"`
+	IPv6           string       `json:"ipv6,omitempty"`
+	GPUs           []GPUInfo    `json:"gpus,omitempty"`
+	BasicInfo      *BasicInfo   `json:"basic_info,omitempty"`
+	PingResults    []PingResult `json:"ping_results,omitempty"`
 
 	hasRawNetTotals bool
 	rawNetTotalUp   int64
@@ -217,11 +218,10 @@ type Report struct {
 	// 不能只靠上面的汇总标量做差：一旦参与统计的接口集合发生变化
 	//（隧道/VPN 接口起来、容器网卡出现），汇总值会跳增该接口的历史累计流量，
 	// 被当成一个采样周期内的增量，算出几百 MB/s 的荒谬速率。
-	netPerInterface     map[string]interfaceCounters
-	pingResultLeases    map[int]uint64
-	websiteResultLeases map[int]uint64
-	basicInfoOwner      *reportPreparer
-	basicInfoRevision   uint64
+	netPerInterface   map[string]interfaceCounters
+	pingResultLeases  map[int]uint64
+	basicInfoOwner    *reportPreparer
+	basicInfoRevision uint64
 }
 
 // interfaceCounters 是单个网卡的累计收发字节数。
@@ -263,30 +263,6 @@ type PingResult struct {
 	Value  float64 `json:"value"`
 }
 
-type WebsiteProbeTask struct {
-	ID                int    `json:"id"`
-	ConfigRevision    string `json:"config_revision"`
-	Name              string `json:"name"`
-	URL               string `json:"url"`
-	Method            string `json:"method"`
-	ExpectedStatusMin int    `json:"expected_status_min"`
-	ExpectedStatusMax int    `json:"expected_status_max"`
-	TimeoutSec        int    `json:"timeout_sec"`
-	IntervalSec       int    `json:"interval_sec"`
-}
-
-type WebsiteProbeResult struct {
-	MonitorID       int     `json:"monitor_id"`
-	ConfigRevision  string  `json:"config_revision"`
-	OK              bool    `json:"ok"`
-	EffectiveStatus string  `json:"effective_status"`
-	EffectiveReason string  `json:"effective_reason"`
-	StatusCode      *int    `json:"status_code"`
-	RawStatusCode   *int    `json:"raw_status_code"`
-	LatencyMS       int64   `json:"latency_ms"`
-	Error           *string `json:"error"`
-}
-
 type jsonBool bool
 
 func (b *jsonBool) UnmarshalJSON(data []byte) error {
@@ -312,10 +288,6 @@ type pingTaskScheduler struct {
 	lastRunByTaskID map[int]time.Time
 }
 
-type websiteProbeScheduler struct {
-	lastRunByTaskID map[int]time.Time
-}
-
 func newPingTaskScheduler() *pingTaskScheduler {
 	return &pingTaskScheduler{lastRunByTaskID: make(map[int]time.Time)}
 }
@@ -325,14 +297,6 @@ func pingTaskInterval(task PingTask) time.Duration {
 	if interval < 1 {
 		interval = pingInterval
 	}
-	if interval < 1 {
-		interval = defaultPingIntervalSec
-	}
-	return time.Duration(interval) * time.Second
-}
-
-func websiteProbeInterval(task WebsiteProbeTask) time.Duration {
-	interval := task.IntervalSec
 	if interval < 1 {
 		interval = defaultPingIntervalSec
 	}
@@ -372,35 +336,6 @@ func (s *pingTaskScheduler) dueTasks(tasks []PingTask, now time.Time, blocked ..
 	return due
 }
 
-func (s *websiteProbeScheduler) dueTasks(tasks []WebsiteProbeTask, now time.Time, blocked ...map[int]bool) []WebsiteProbeTask {
-	if s.lastRunByTaskID == nil {
-		s.lastRunByTaskID = make(map[int]time.Time)
-	}
-	seen := make(map[int]struct{}, len(tasks))
-	due := make([]WebsiteProbeTask, 0, len(tasks))
-	for _, task := range tasks {
-		if task.ID <= 0 {
-			continue
-		}
-		seen[task.ID] = struct{}{}
-		if len(blocked) > 0 && blocked[0][task.ID] {
-			continue
-		}
-		lastRun, ok := s.lastRunByTaskID[task.ID]
-		if ok && now.Sub(lastRun) < websiteProbeInterval(task) {
-			continue
-		}
-		s.lastRunByTaskID[task.ID] = now
-		due = append(due, task)
-	}
-	for taskID := range s.lastRunByTaskID {
-		if _, ok := seen[taskID]; !ok {
-			delete(s.lastRunByTaskID, taskID)
-		}
-	}
-	return due
-}
-
 type reportEnvelope struct {
 	Type string `json:"type"`
 	Data Report `json:"data"`
@@ -412,20 +347,19 @@ type reportsEnvelope struct {
 }
 
 type serverMessage struct {
-	Type              string             `json:"type"`
-	Timestamp         int64              `json:"timestamp,omitempty"`
-	Mode              string             `json:"mode,omitempty"`
-	SampleIntervalSec int                `json:"sample_interval_sec,omitempty"`
-	ReportIntervalSec int                `json:"report_interval_sec,omitempty"`
-	PingIntervalSec   int                `json:"ping_interval_sec,omitempty"`
-	PingPolicyVersion string             `json:"ping_policy_version,omitempty"`
-	PingTasks         []PingTask         `json:"ping_tasks,omitempty"`
-	WebsiteProbeTasks []WebsiteProbeTask `json:"website_probe_tasks,omitempty"`
-	ReportNow         bool               `json:"report_now,omitempty"`
-	ViewerCount       int                `json:"viewer_count,omitempty"`
-	ViewerTTLSec      int                `json:"viewer_ttl_sec,omitempty"`
-	PolicyTTL         int                `json:"policy_ttl_sec,omitempty"`
-	IdlePolicyTTL     int                `json:"idle_policy_ttl_sec,omitempty"`
+	Type              string     `json:"type"`
+	Timestamp         int64      `json:"timestamp,omitempty"`
+	Mode              string     `json:"mode,omitempty"`
+	SampleIntervalSec int        `json:"sample_interval_sec,omitempty"`
+	ReportIntervalSec int        `json:"report_interval_sec,omitempty"`
+	PingIntervalSec   int        `json:"ping_interval_sec,omitempty"`
+	PingPolicyVersion string     `json:"ping_policy_version,omitempty"`
+	PingTasks         []PingTask `json:"ping_tasks,omitempty"`
+	ReportNow         bool       `json:"report_now,omitempty"`
+	ViewerCount       int        `json:"viewer_count,omitempty"`
+	ViewerTTLSec      int        `json:"viewer_ttl_sec,omitempty"`
+	PolicyTTL         int        `json:"policy_ttl_sec,omitempty"`
+	IdlePolicyTTL     int        `json:"idle_policy_ttl_sec,omitempty"`
 	// 指针：字段缺席表示「后台没有这个节点的重置日」，此时保留本地取值，
 	// 不能被一个默认 1 悄悄改掉安装时指定的 --traffic-reset-day。
 	TrafficResetDay *int `json:"traffic_reset_day,omitempty"`
@@ -448,28 +382,22 @@ type reportPreparer struct {
 }
 
 type pingReportState struct {
-	mu               sync.Mutex
-	scheduler        *pingTaskScheduler
-	websiteScheduler *websiteProbeScheduler
-	tasks            []PingTask
-	websiteTasks     []WebsiteProbeTask
-	policyVersion    string
-	intervalSec      int
-	pendingPing      map[int]*queuedPingResult
-	pendingWebsites  map[int]*queuedWebsiteResult
-	pingOrder        []int
-	websiteOrder     []int
-	nextResultID     uint64
-	retryQueue       []Report
-	ctx              context.Context
-	cancel           context.CancelFunc
-	probeWake        chan struct{}
-	probeDone        chan struct{}
-	probeWorkers     sync.WaitGroup
-	runningPing      map[int]*probeRun
-	runningWebsites  map[int]*probeRun
-	activeProbes     int
-	preferWebsite    bool
+	mu            sync.Mutex
+	scheduler     *pingTaskScheduler
+	tasks         []PingTask
+	policyVersion string
+	intervalSec   int
+	pendingPing   map[int]*queuedPingResult
+	pingOrder     []int
+	nextResultID  uint64
+	retryQueue    []Report
+	ctx           context.Context
+	cancel        context.CancelFunc
+	probeWake     chan struct{}
+	probeDone     chan struct{}
+	probeWorkers  sync.WaitGroup
+	runningPing   map[int]*probeRun
+	activeProbes  int
 }
 
 type safeWebSocketConn struct {
@@ -496,6 +424,8 @@ func init() {
 	flag.Bool("disk-usage-once", false, "With --disk-usage-collector, collect one sample and exit")
 	flag.Bool("disk-usage-check", false, "Check whether root directory collection is required (exit 0 required, 3 not required)")
 	flag.StringVar(&nicInclude, "nic-include", "", "Comma-separated network interface patterns to include in traffic totals, for example eth*,ens*")
+	flag.BoolVar(&allowHostLoad, "allow-host-load", false, "In containers whose /proc/loadavg is the host's (no lxcfs loadavg), report the host load average instead of leaving load unavailable")
+	flag.IntVar(&hostCPUCores, "host-cpu-cores", 0, "Host CPU core count; with --allow-host-load, host load is scaled to this container's core count so load/cores reflects host utilization (0 = report the raw host load)")
 	flag.StringVar(&nicExclude, "nic-exclude", "", "Comma-separated network interface patterns to exclude from traffic totals, for example lo,docker*,veth*")
 }
 
@@ -588,6 +518,19 @@ func applyEnvDefaults() {
 	}
 	if nicExclude == "" {
 		nicExclude = os.Getenv("CF_MONITOR_NIC_EXCLUDE")
+	}
+	if !flagWasSet("allow-host-load") {
+		switch strings.ToLower(strings.TrimSpace(os.Getenv("CF_MONITOR_ALLOW_HOST_LOAD"))) {
+		case "1", "true", "yes", "on":
+			allowHostLoad = true
+		}
+	}
+	if !flagWasSet("host-cpu-cores") {
+		if value := strings.TrimSpace(os.Getenv("CF_MONITOR_HOST_CPU_CORES")); value != "" {
+			if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+				hostCPUCores = parsed
+			}
+		}
 	}
 	if !flagWasSet("traffic-reset-day") {
 		if value := strings.TrimSpace(os.Getenv("CF_MONITOR_TRAFFIC_RESET_DAY")); value != "" {
@@ -825,13 +768,11 @@ func detectAMDGPU() ([]string, []GPUInfo) {
 func newPingReportState() *pingReportState {
 	ctx, cancel := context.WithCancel(context.Background())
 	state := &pingReportState{
-		scheduler:        newPingTaskScheduler(),
-		websiteScheduler: &websiteProbeScheduler{lastRunByTaskID: make(map[int]time.Time)},
-		intervalSec:      defaultPingIntervalSec,
-		pendingPing:      make(map[int]*queuedPingResult),
-		pendingWebsites:  make(map[int]*queuedWebsiteResult),
-		ctx:              ctx, cancel: cancel, probeWake: make(chan struct{}, 1), probeDone: make(chan struct{}),
-		runningPing: make(map[int]*probeRun), runningWebsites: make(map[int]*probeRun), preferWebsite: true,
+		scheduler:   newPingTaskScheduler(),
+		intervalSec: defaultPingIntervalSec,
+		pendingPing: make(map[int]*queuedPingResult),
+		ctx:         ctx, cancel: cancel, probeWake: make(chan struct{}, 1), probeDone: make(chan struct{}),
+		runningPing: make(map[int]*probeRun),
 	}
 	go state.runProbeScheduler()
 	return state
@@ -856,19 +797,12 @@ func (s *pingReportState) applyPolicy(policy agentPolicy) {
 		}
 		tasks = append(tasks, task)
 	}
-	websiteTasks := make([]WebsiteProbeTask, 0, len(policy.WebsiteProbeTasks))
-	for _, task := range policy.WebsiteProbeTasks {
-		if task.IntervalSec < 1 {
-			task.IntervalSec = s.intervalSec
-		}
-		websiteTasks = append(websiteTasks, task)
-	}
-	s.invalidateResultsForPolicyLocked(tasks, websiteTasks)
-	s.tasks, s.websiteTasks = tasks, websiteTasks
+	s.invalidateResultsForPolicyLocked(tasks)
+	s.tasks = tasks
 	s.policyVersion = policy.PingPolicyVersion
 	s.signalProbeScheduler()
-	if len(tasks) > 0 || len(websiteTasks) > 0 {
-		log.Printf("policy updated: %d ping task(s), %d website probe(s), interval=%ds, version=%s", len(tasks), len(websiteTasks), s.intervalSec, s.policyVersion)
+	if len(tasks) > 0 {
+		log.Printf("policy updated: %d ping task(s), interval=%ds, version=%s", len(tasks), s.intervalSec, s.policyVersion)
 	}
 }
 
@@ -1027,14 +961,24 @@ func executeICMPPingWithContext(parent context.Context, target string) float64 {
 }
 
 func executeTCPPing(target string) float64 {
+	return executeTCPPingWithContext(context.Background(), target)
+}
+
+// executeTCPPingWithContext 是调度器实际使用的 TCP 延迟测量：首次 >1000ms
+// （通常是 SYN 重传的 1s/3s 台阶）会触发补测，补测仍超限则按失败(-1)处理，
+// 不会把 1000+/2000+ms 的重传耗时当作延迟上报。
+func executeTCPPingWithContext(ctx context.Context, target string) float64 {
 	result := resolveTCPPingSamples(func() float64 {
-		v, e := executeTCPProbeWithContext(context.Background(), target, 3*time.Second)
+		if ctx.Err() != nil {
+			return -1
+		}
+		v, e := executeTCPProbeWithContext(ctx, target, 3*time.Second)
 		if e != nil {
 			return -1
 		}
 		return v
 	})
-	if result < 0 {
+	if result < 0 && ctx.Err() == nil {
 		log.Printf("TCP ping failed for %q", target)
 	}
 	return result
@@ -1121,124 +1065,6 @@ func intPtr(value int) *int {
 	return &value
 }
 
-func stringPtr(value string) *string {
-	return &value
-}
-
-func normalizeWebsiteProbeHTTPResult(task WebsiteProbeTask, status int, latency int64) WebsiteProbeResult {
-	minStatus := task.ExpectedStatusMin
-	if minStatus < 100 {
-		minStatus = 200
-	}
-	maxStatus := task.ExpectedStatusMax
-	if maxStatus < minStatus || maxStatus > 599 {
-		maxStatus = 399
-	}
-	inRange := status >= minStatus && status <= maxStatus
-	challengeReachable := minStatus == 200 && maxStatus == 399 && (status == http.StatusUnauthorized || status == http.StatusForbidden || status == http.StatusMethodNotAllowed || status == http.StatusPreconditionFailed || status == http.StatusTooManyRequests)
-	ok := inRange || challengeReachable
-	reason := "http_status_mismatch"
-	if inRange {
-		reason = "status_in_expected_range"
-	} else if challengeReachable {
-		reason = "reachable_challenge"
-	}
-	result := WebsiteProbeResult{
-		MonitorID:       task.ID,
-		ConfigRevision:  task.ConfigRevision,
-		OK:              ok,
-		EffectiveStatus: "down",
-		EffectiveReason: reason,
-		StatusCode:      intPtr(status),
-		RawStatusCode:   intPtr(status),
-		LatencyMS:       latency,
-	}
-	if ok {
-		result.EffectiveStatus = "up"
-		return result
-	}
-	result.Error = stringPtr(fmt.Sprintf("http_%d", status))
-	return result
-}
-
-func websiteProbeError(task WebsiteProbeTask, latency int64, reason string) WebsiteProbeResult {
-	return WebsiteProbeResult{
-		MonitorID:       task.ID,
-		ConfigRevision:  task.ConfigRevision,
-		OK:              false,
-		EffectiveStatus: "down",
-		EffectiveReason: reason,
-		LatencyMS:       latency,
-		Error:           stringPtr(reason),
-	}
-}
-
-func websiteProbeTimeout(task WebsiteProbeTask) time.Duration {
-	seconds := task.TimeoutSec
-	if seconds <= 0 {
-		seconds = 5
-	}
-	if seconds > 30 {
-		seconds = 30
-	}
-	return time.Duration(seconds) * time.Second
-}
-
-func probeFailureReason(err error) string {
-	var networkError net.Error
-	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &networkError) && networkError.Timeout()) || strings.Contains(strings.ToLower(err.Error()), "timeout") {
-		return "timeout"
-	}
-	return "network_error"
-}
-
-func executeWebsiteHTTPProbe(task WebsiteProbeTask) WebsiteProbeResult {
-	return executeWebsiteHTTPProbeWithContext(context.Background(), task)
-}
-
-func executeWebsiteHTTPProbeWithContext(ctx context.Context, task WebsiteProbeTask) WebsiteProbeResult {
-	timeout := websiteProbeTimeout(task)
-	client := &http.Client{Timeout: timeout, Transport: publicHTTPTransport(timeout)}
-	defer client.CloseIdleConnections()
-	return executeWebsiteHTTPProbeWithClientContext(ctx, task, client)
-}
-
-func executeWebsiteHTTPProbeWithClient(task WebsiteProbeTask, client *http.Client) WebsiteProbeResult {
-	return executeWebsiteHTTPProbeWithClientContext(context.Background(), task, client)
-}
-
-func executeWebsiteHTTPProbeWithClientContext(parent context.Context, task WebsiteProbeTask, client *http.Client) WebsiteProbeResult {
-	target := task.URL
-	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
-		target = "https://" + target
-	}
-	parsed, err := url.Parse(target)
-	if err != nil || parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return websiteProbeError(task, 0, "invalid_url")
-	}
-	method := strings.ToUpper(task.Method)
-	if method != http.MethodHead {
-		method = http.MethodGet
-	}
-	ctx, cancel := context.WithTimeout(parent, websiteProbeTimeout(task))
-	defer cancel()
-	started := time.Now()
-	request, err := http.NewRequestWithContext(ctx, method, parsed.String(), nil)
-	if err != nil {
-		return websiteProbeError(task, 0, "invalid_url")
-	}
-	request.Header.Set("User-Agent", "cf-vps-monitor-agent/"+Version)
-	response, err := client.Do(request)
-	if err != nil {
-		return websiteProbeError(task, time.Since(started).Milliseconds(), probeFailureReason(err))
-	}
-	defer response.Body.Close()
-	if _, err := io.Copy(io.Discard, io.LimitReader(response.Body, 512)); err != nil {
-		return websiteProbeError(task, time.Since(started).Milliseconds(), probeFailureReason(err))
-	}
-	return normalizeWebsiteProbeHTTPResult(task, response.StatusCode, time.Since(started).Milliseconds())
-}
-
 func publicHTTPTransport(timeout time.Duration) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
@@ -1250,27 +1076,6 @@ func publicHTTPTransport(timeout time.Duration) *http.Transport {
 		return dialPublicTCP(ctx, network, host, port, timeout)
 	}
 	return transport
-}
-
-func executeWebsiteTCPProbe(task WebsiteProbeTask) WebsiteProbeResult {
-	return executeWebsiteTCPProbeWithContext(context.Background(), task)
-}
-
-func executeWebsiteTCPProbeWithContext(ctx context.Context, task WebsiteProbeTask) WebsiteProbeResult {
-	target := task.URL
-	if strings.HasPrefix(strings.ToLower(target), "tcp://") {
-		parsed, err := url.Parse(target)
-		if err != nil || parsed.Hostname() == "" || parsed.Port() == "" {
-			return websiteProbeError(task, 0, "invalid_url")
-		}
-		target = net.JoinHostPort(parsed.Hostname(), parsed.Port())
-	}
-	started := time.Now()
-	value, err := executeTCPProbeWithContext(ctx, target, websiteProbeTimeout(task))
-	if err != nil {
-		return websiteProbeError(task, time.Since(started).Milliseconds(), probeFailureReason(err))
-	}
-	return WebsiteProbeResult{MonitorID: task.ID, ConfigRevision: task.ConfigRevision, OK: true, EffectiveStatus: "up", EffectiveReason: "tcp_connect", LatencyMS: int64(value)}
 }
 
 // ==================== Original Functions (Enhanced) ====================
@@ -2576,8 +2381,9 @@ func evaluateLoadAverageTrust(root string) (bool, string) {
 		runtimeName, taskTotal, visibleThreads)
 }
 
-// loadAverageReportable 决定本轮是否上报负载。判定结果缓存，避免每个采样周期都扫 /proc。
-func loadAverageReportable() bool {
+// loadAverageTrusted 判断 /proc/loadavg 是否为本机（容器）自己的口径。判定结果缓存，
+// 避免每个采样周期都扫 /proc。
+func loadAverageTrusted() bool {
 	if runtime.GOOS != "linux" {
 		return true
 	}
@@ -2594,12 +2400,50 @@ func loadAverageReportable() bool {
 	loadAverageTrustStamp = time.Now()
 	if !trusted && !loadAverageTrustLogged {
 		loadAverageTrustLogged = true
-		log.Printf("load average is not container-local (%s); reporting load as unavailable", detail)
+		if allowHostLoad {
+			log.Printf("load average is not container-local (%s); --allow-host-load is set, reporting host load", detail)
+		} else {
+			log.Printf("load average is not container-local (%s); reporting load as unavailable", detail)
+		}
 	}
 	if trusted {
 		loadAverageTrustLogged = false
 	}
 	return trusted
+}
+
+// loadAverageReportable 决定本轮是否上报负载：本机口径可信，或运维显式
+// 允许（--allow-host-load）容器上报宿主机负载（宿主机繁忙时容器同样受影响）。
+func loadAverageReportable() bool {
+	trusted := loadAverageTrusted()
+	return trusted || allowHostLoad
+}
+
+// hostLoadScaleFactor 把宿主机负载折算为"本容器核数口径"的系数：
+// 前端用 load / cpu_cores 着色，折算后该比值等于宿主机的整体利用率。
+// 任一核数无效、或宿主机核数不大于容器核数时不折算（返回 1）。
+func hostLoadScaleFactor(containerCores, hostCores int) float64 {
+	if containerCores <= 0 || hostCores <= containerCores {
+		return 1
+	}
+	return float64(containerCores) / float64(hostCores)
+}
+
+// scaleHostLoadAverage 仅在"取自宿主机的负载 + 配置了宿主机核数"时折算；
+// 本机可信的负载一律原样上报。
+func scaleHostLoadAverage(avg load.AvgStat) load.AvgStat {
+	if !allowHostLoad || hostCPUCores <= 0 || loadAverageTrusted() {
+		return avg
+	}
+	containerCores := 1
+	if count, err := cpu.Counts(true); err == nil && count > 0 {
+		containerCores = count
+	}
+	factor := hostLoadScaleFactor(containerCores, hostCPUCores)
+	avg.Load1 *= factor
+	avg.Load5 *= factor
+	avg.Load15 *= factor
+	return avg
 }
 
 // applyLoadAverage 把 load.Avg() 的三元组写入 report，与 Load1 同门控：
@@ -3079,7 +2923,7 @@ func collectReportWithInterval(intervalSec int) Report {
 		}
 	}
 	if loadInfo, err := load.Avg(); err == nil && loadAverageReportable() {
-		applyLoadAverage(&r, *loadInfo, true)
+		applyLoadAverage(&r, scaleHostLoadAverage(*loadInfo), true)
 	}
 	r.Temp = nodeMetrics.temperature(context.Background())
 	diskSnapshot := nodeMetrics.diskSnapshot(mountInclude, mountExclude)

@@ -58,28 +58,28 @@ function formatIpSupport(supported?: boolean, sourceValue?: string) {
   return supported || Boolean(sourceValue) ? '支持' : '不支持';
 }
 
-type TimeRange = '1h' | '4h' | '24h' | '3d' | '7d';
+type TimeRange = '4h' | '12h' | '24h' | '3d' | '7d';
 type ViewTab = 'load' | 'ping';
 
 const timeRangeMs: Record<TimeRange, number> = {
-  '1h': 3600000,
   '4h': 14400000,
+  '12h': 43200000,
   '24h': 86400000,
   '3d': 259200000,
   '7d': 604800000,
 };
 
 const timeRangeHours: Record<TimeRange, number> = {
-  '1h': 1,
   '4h': 4,
+  '12h': 12,
   '24h': 24,
   '3d': 72,
   '7d': 168,
 };
 
 const timeRangePointLimit: Record<TimeRange, number> = {
-  '1h': 240,
   '4h': 360,
+  '12h': 720,
   '24h': 720,
   '3d': 1000,
   '7d': 400,
@@ -114,7 +114,7 @@ export default function Instance() {
   const recordsRequestRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [viewTab, setViewTab] = useState<ViewTab>('load');
-  const [timeRange, setTimeRange] = useState<TimeRange>('1h');
+  const [timeRange, setTimeRange] = useState<TimeRange>('4h');
   const [recordsRangeEnd, setRecordsRangeEnd] = useState(() => Date.now());
   const [pingSeries, setPingSeries] = useState<PingTaskSeries[]>([]);
   const [pingLoading, setPingLoading] = useState(false);
@@ -290,6 +290,21 @@ export default function Instance() {
     setRecordsLoading(true);
   };
 
+  // 这些派生数据是纯函数且要遍历全部 ping 点，放在提前 return 之前并 memo，
+  // 避免 hover/轮询等无关重渲染时反复重算。
+  const pingSeriesWithRecords = useMemo(() => getPingSeriesWithRecords(pingSeries), [pingSeries]);
+  const visiblePingSeries = useMemo(() => {
+    if (selectedPingTaskKeys.length === 0) return pingSeriesWithRecords;
+    const keySet = new Set(selectedPingTaskKeys);
+    return pingSeriesWithRecords.filter((item) => keySet.has(item.task.key));
+  }, [pingSeriesWithRecords, selectedPingTaskKeys]);
+  const pingChartRows = useMemo(() => buildPingChartRows(visiblePingSeries), [visiblePingSeries]);
+  const pingYAxisDomain = useMemo(() => getPingYAxisDomain(visiblePingSeries), [visiblePingSeries]);
+  const pingXAxisDomain = useMemo(
+    () => getPingTimeDomain(visiblePingSeries, timeRangeHours[timeRange]),
+    [visiblePingSeries, timeRange],
+  );
+
   if (clientLoading || (client && client.uuid !== uuid) || (recordsLoading && records.length === 0)) return <Loading />;
   if (error || !client) return <Text color="red" align="center" style={{ padding: 40 }}>{error || '未找到'}</Text>;
 
@@ -302,7 +317,7 @@ export default function Instance() {
     const dateInput = typeof value === 'string' || typeof value === 'number' || value instanceof Date ? value : '';
     const date = new Date(dateInput);
     if (Number.isNaN(date.getTime())) return '';
-    return timeRange !== '1h'
+    return timeRange !== '4h'
       ? date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
       : date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
   };
@@ -322,14 +337,7 @@ export default function Instance() {
   }));
   const lastGpuPoint = gpuChartData.length > 0 ? gpuChartData[gpuChartData.length - 1] : null;
 
-  const pingSeriesWithRecords = getPingSeriesWithRecords(pingSeries);
   const selectedPingTaskKeySet = new Set(selectedPingTaskKeys);
-  const visiblePingSeries = selectedPingTaskKeys.length === 0
-    ? pingSeriesWithRecords
-    : pingSeriesWithRecords.filter((item) => selectedPingTaskKeySet.has(item.task.key));
-  const pingChartRows = buildPingChartRows(visiblePingSeries);
-  const pingYAxisDomain = getPingYAxisDomain(visiblePingSeries);
-  const pingXAxisDomain = getPingTimeDomain(visiblePingSeries, timeRangeHours[timeRange]);
 
   const togglePingTask = (taskKey: string) => {
     setSelectedPingTaskKeys((current) => {
@@ -342,7 +350,7 @@ export default function Instance() {
     });
   };
 
-  const timeRangeLabel = timeRange === '1h' ? '最近1小时' : timeRange === '4h' ? '最近4小时' : timeRange === '24h' ? '最近24小时' : timeRange === '3d' ? '最近3天' : '最近7天';
+  const timeRangeLabel = timeRange === '4h' ? '最近4小时' : timeRange === '12h' ? '最近12小时' : timeRange === '24h' ? '最近24小时' : timeRange === '3d' ? '最近3天' : '最近7天';
   // 与 DetailsGrid 同口径的展示数据：字段一个不少，只是按系统 / 资源 / 网络分组横排。
   const infoDisk = diskUsagePresentation(latest || undefined, client.disk_total);
   const infoIpValue = `IPv4 ${formatIpSupport(client.has_ipv4, client.ipv4)} / IPv6 ${formatIpSupport(client.has_ipv6, client.ipv6)}`;
@@ -441,8 +449,8 @@ export default function Instance() {
           </Flex>
           <Flex align="center" gap="3" wrap="wrap">
             <SegmentedControl.Root size="1" value={timeRange} onValueChange={handleTimeRangeChange}>
-              <SegmentedControl.Item value="1h">1小时</SegmentedControl.Item>
               <SegmentedControl.Item value="4h">4小时</SegmentedControl.Item>
+              <SegmentedControl.Item value="12h">12小时</SegmentedControl.Item>
               <SegmentedControl.Item value="24h">24小时</SegmentedControl.Item>
               <SegmentedControl.Item value="3d">3天</SegmentedControl.Item>
               <SegmentedControl.Item value="7d">7天</SegmentedControl.Item>

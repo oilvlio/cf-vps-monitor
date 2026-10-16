@@ -276,7 +276,6 @@ export default function Index() {
           online={ld.online.includes(client.uuid)}
           status={getNodeStatus(client.uuid, ld)}
           lastReportTime={getNodeLastReportTime(client.uuid, ld)}
-          includeHidden={isAuthenticated}
           homePing={homePing?.nodes[client.uuid]}
           homePingBucketSec={homePing?.bucket_sec}
         />
@@ -314,7 +313,6 @@ export default function Index() {
           dataAvailable={clients !== undefined}
           gridRenderer={renderGrid}
           offlinePosition={offlinePosition}
-          includeHidden={isAuthenticated}
         />
       </React.Suspense>
     </div>

@@ -50,4 +50,18 @@ assert.equal(
   `wget -qO- 'https://raw.githubusercontent.com/${CF_MONITOR_REPOSITORY}/refs/heads/main/agent/install.sh' | sh -s -- '--uninstall-all' '--yes'`,
 );
 
+const hostLoadCommand = buildAgentInstallCommand({
+  platform: 'unix',
+  ...base,
+  options: { ...defaultAgentInstallOptions, allowHostLoad: true, hostCpuCores: '64' },
+});
+assert.ok(hostLoadCommand.endsWith("'--allow-host-load' '--host-cpu-cores' '64'"), hostLoadCommand);
+assert.ok(!buildAgentInstallCommand({ platform: 'unix', ...base, options: { ...defaultAgentInstallOptions, allowHostLoad: true } }).includes('host-cpu-cores'));
+assert.ok(!buildAgentInstallCommand({ platform: 'unix', ...base, options: { ...defaultAgentInstallOptions, hostCpuCores: '64' } }).includes('host-cpu-cores'), 'cores without allowHostLoad must not leak into the command');
+assert.ok(!/allow-host-load|host-cpu-cores/i.test(buildAgentInstallCommand({
+  platform: 'windows',
+  ...base,
+  options: { ...defaultAgentInstallOptions, allowHostLoad: true, hostCpuCores: '64' },
+})), 'Windows installer has no host-load option');
+
 await rm(tmp, { recursive: true, force: true });

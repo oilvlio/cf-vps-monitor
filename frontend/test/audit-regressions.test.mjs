@@ -328,6 +328,50 @@ test('AUD-43 short-range Ping with tiny intervals falls back to per-task paging'
   assert.ok(Math.min(...series[0].records.map(record => Date.parse(record.time))) <= rangeStart);
 });
 
+test('AUD-43 short-range Ping trusts an untruncated raw batch instead of re-paging every task', async () => {
+  const end = Date.parse('2026-09-06T00:00:00Z');
+  // 60s 间隔、4h 窗口：最老一条必然晚于 rangeStart（查询是 time >= start），但条数远小于 limit，没有被截断。
+  const batch = Array.from({ length: 239 }, (_, index) => ({ time: new Date(end - (index + 1) * 60000).toISOString(), value: 10, task_id: 1 }));
+  const calls = [];
+  const ping = productionModule('src/utils/pingChart.ts', {}, {
+    fetch: async url => {
+      const parsed = new URL(url, 'https://synthetic.invalid');
+      calls.push(parsed.pathname);
+      if (parsed.pathname === '/api/task/ping') return new Response(JSON.stringify([{ id: 1, name: 'Synthetic ping', clients: ['node-a'], interval: 60, interval_sec: 60 }]));
+      if (parsed.pathname === '/api/records/ping/batch') return new Response(JSON.stringify({ 1: batch }));
+      throw new Error(`Unexpected path ${parsed.pathname}`);
+    },
+  });
+  const series = await ping.fetchPingTaskSeries('node-a', { rangeHours: 4, limit: 360, cursor: new Date(end).toISOString(), start: new Date(end - 4 * 3600000).toISOString(), end: new Date(end).toISOString() });
+  assert.equal(series[0].records.length, 239);
+  assert.ok(!calls.includes('/api/records/ping'), `per-task paging must not run: ${calls.join(',')}`);
+});
+
+test('AUD-43 concurrent Ping task-list requests share one network call and aborting one caller does not cancel it', async () => {
+  const end = Date.parse('2026-09-06T00:00:00Z');
+  let taskListCalls = 0;
+  const ping = productionModule('src/utils/pingChart.ts', {}, {
+    fetch: async url => {
+      const parsed = new URL(url, 'https://synthetic.invalid');
+      if (parsed.pathname === '/api/task/ping') {
+        taskListCalls += 1;
+        return new Response(JSON.stringify([{ id: 1, name: 'Synthetic ping', clients: ['node-a'], interval: 60, interval_sec: 60 }]));
+      }
+      if (parsed.pathname === '/api/records/ping/batch') return new Response(JSON.stringify({ 1: [] }));
+      throw new Error(`Unexpected path ${parsed.pathname}`);
+    },
+  });
+  const first = new AbortController();
+  const options = { rangeHours: 4, limit: 360, cursor: new Date(end).toISOString(), start: new Date(end - 4 * 3600000).toISOString(), end: new Date(end).toISOString() };
+  const aborted = ping.fetchPingTaskSeries('node-a', { ...options, signal: first.signal });
+  const surviving = ping.fetchPingTaskSeries('node-a', options);
+  first.abort();
+  await assert.rejects(() => aborted, { name: 'AbortError' });
+  const series = await surviving;
+  assert.equal(taskListCalls, 1, 'StrictMode double effect must not hit /api/task/ping twice');
+  assert.equal(series.length, 1);
+});
+
 test('AUD-43 cursor traversal rejects repeated cursors and is bounded and abortable', async () => {
   const collect = productionModule('src/utils/publicHistory.ts').collectCursorHistory;
   const options = { cursor: '2026-09-06T00:00:00Z', start: '2026-09-03T00:00:00Z', normalize: normalizePublicMonitorRecords };
@@ -650,7 +694,7 @@ test('AUD-42 late node history cannot replace the current node history', async (
     setRecordsLoading() {}, setRecordsRangeEnd() {}, setRecordsError() {},
     setRecords: value => { current = value; },
   });
-  const a = load('node-a')('1h');
+  const a = load('node-a')('4h');
   const b = load('node-b')('3d');
   pending.get('node-b')([{ time: recordTime, cpu: 22 }]);
   await b;

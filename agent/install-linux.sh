@@ -38,6 +38,8 @@ DISK_USAGE_FILE_SET="0"
 DISK_USAGE_FILE_PRESENT="0"
 NIC_INCLUDE=""
 NIC_EXCLUDE=""
+ALLOW_HOST_LOAD="0"
+HOST_CPU_CORES="0"
 DISABLE_WEB_SSH="0"
 DISABLE_AUTO_UPDATE="0"
 IGNORE_UNSAFE_CERT="0"
@@ -59,7 +61,7 @@ Options:
   --mode MODE               websocket or http, default: websocket.
   --instance-id ID          Instance id used for default service and install directory.
   --install-dir DIR         Install directory, default: /opt/cf-vps-monitor/<instance-id>.
-  --service-name NAME       systemd service name, default: cf-vps-monitor-agent-<instance-id>.
+  --service-name NAME       systemd service name, default: cf-vps-monitor-agent.
   --install-service-name NAME
                             Legacy alias for --service-name.
   --binary PATH             Existing agent binary.
@@ -77,6 +79,8 @@ Options:
   --disk-usage-file PATH    Administrator disk cache; empty disables the companion.
   --nic-include LIST        Comma-separated network interface patterns included in traffic totals.
   --nic-exclude LIST        Comma-separated network interface patterns excluded from traffic totals.
+  --allow-host-load         In containers, report the host load average instead of leaving load unavailable.
+  --host-cpu-cores N        Host CPU core count; scales host load to this container's cores (0 = no scaling).
   --disable-web-ssh         Accepted as a legacy no-op option.
   --disable-auto-update     Accepted as a legacy no-op option.
   --ignore-unsafe-cert      Accepted as a legacy no-op option.
@@ -923,7 +927,7 @@ apply_instance_defaults() {
   base="$(sanitize_instance_id "${INSTANCE_ID:-default}")" || return 1
   BASE_ID="$base"
   if [[ -z "$SERVICE_NAME" ]]; then
-    SERVICE_NAME="cf-vps-monitor-agent-${base}"
+    SERVICE_NAME="cf-vps-monitor-agent"
   fi
   if [[ -z "$INSTALL_DIR" ]]; then
     if is_macos; then
@@ -994,6 +998,8 @@ while [[ $# -gt 0 ]]; do
     --disk-usage-file) DISK_USAGE_FILE="${2:-}"; DISK_USAGE_FILE_SET=1; shift 2 ;;
     --nic-include) NIC_INCLUDE="${2:-}"; shift 2 ;;
     --nic-exclude) NIC_EXCLUDE="${2:-}"; shift 2 ;;
+    --allow-host-load) ALLOW_HOST_LOAD="1"; shift ;;
+    --host-cpu-cores) HOST_CPU_CORES="${2:-}"; shift 2 ;;
     --disable-web-ssh) DISABLE_WEB_SSH="1"; shift ;;
     --disable-auto-update) DISABLE_AUTO_UPDATE="1"; shift ;;
     --ignore-unsafe-cert) IGNORE_UNSAFE_CERT="1"; shift ;;
@@ -1198,6 +1204,10 @@ reject_env_value "mount-exclude" "$MOUNT_EXCLUDE"
 reject_env_value "nic-include" "$NIC_INCLUDE"
 reject_env_value "nic-exclude" "$NIC_EXCLUDE"
 reject_env_value "traffic-reset-day" "$TRAFFIC_RESET_DAY"
+if ! [[ "$HOST_CPU_CORES" =~ ^[0-9]+$ ]] || (( HOST_CPU_CORES > 65535 )); then
+  echo "--host-cpu-cores must be a number from 0 to 65535." >&2
+  exit 1
+fi
 
 if is_macos; then
   if [[ "$DRY_RUN" != "1" ]] && ! command -v launchctl >/dev/null 2>&1; then
@@ -1218,6 +1228,8 @@ export CF_MONITOR_CONTAINER_DISK_TOTAL_BYTES=$(shell_quote "$CONTAINER_DISK_TOTA
 export CF_MONITOR_DISK_USAGE_FILE=$(shell_quote "$DISK_USAGE_FILE")
 export CF_MONITOR_NIC_INCLUDE=$(shell_quote "$NIC_INCLUDE")
 export CF_MONITOR_NIC_EXCLUDE=$(shell_quote "$NIC_EXCLUDE")
+export CF_MONITOR_ALLOW_HOST_LOAD=$(shell_quote "$ALLOW_HOST_LOAD")
+export CF_MONITOR_HOST_CPU_CORES=$(shell_quote "$HOST_CPU_CORES")
 export CF_MONITOR_TRAFFIC_RESET_DAY=$(shell_quote "$TRAFFIC_RESET_DAY")
 export CF_MONITOR_TRAFFIC_STATE_FILE=$(shell_quote "${STATE_DIR}/traffic-state.json")
 exec $(shell_quote "${INSTALL_DIR}/cf-vps-monitor-agent") --interval ${INTERVAL} --ping-interval ${PING_INTERVAL} --traffic-reset-day ${TRAFFIC_RESET_DAY}
@@ -1271,6 +1283,8 @@ CF_MONITOR_CONTAINER_DISK_TOTAL_BYTES=$(systemd_env_quote "$CONTAINER_DISK_TOTAL
 CF_MONITOR_DISK_USAGE_FILE=$(systemd_env_quote "$DISK_USAGE_FILE")
 CF_MONITOR_NIC_INCLUDE=$(systemd_env_quote "$NIC_INCLUDE")
 CF_MONITOR_NIC_EXCLUDE=$(systemd_env_quote "$NIC_EXCLUDE")
+CF_MONITOR_ALLOW_HOST_LOAD=$(systemd_env_quote "$ALLOW_HOST_LOAD")
+CF_MONITOR_HOST_CPU_CORES=$(systemd_env_quote "$HOST_CPU_CORES")
 CF_MONITOR_TRAFFIC_RESET_DAY=$(systemd_env_quote "$TRAFFIC_RESET_DAY")
 CF_MONITOR_TRAFFIC_STATE_FILE=$(systemd_env_quote "$STATE_DIR/traffic-state.json")
 EOF

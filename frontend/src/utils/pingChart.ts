@@ -385,6 +385,38 @@ export function formatPingMs(value: number | null | undefined): string {
   return `${Math.round(numberValue)} ms`;
 }
 
+// 同一 URL 的任务列表请求在飞行中合并。React.StrictMode（开发环境）会把 effect
+// 执行两次，前一次 cleanup 随即 abort；若每个调用方各自 fetch，第一次请求会被浏览器
+// 标记为 canceled，再发第二次。这里让底层请求不绑定任何调用方的 signal，
+// 各调用方只对自己的等待过程响应 abort，因此只会发出一次网络请求。
+const pingTaskListInFlight = new Map<string, Promise<unknown>>();
+
+function fetchPingTaskList(includeHidden: boolean, signal?: AbortSignal): Promise<unknown> {
+  const url = `/api/task/ping?${includeHidden ? 'include_hidden=1' : ''}`;
+  let shared = pingTaskListInFlight.get(url);
+  if (!shared) {
+    shared = (async () => {
+      const response = await fetchWithBootstrapRetry(url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    })().finally(() => {
+      pingTaskListInFlight.delete(url);
+    });
+    pingTaskListInFlight.set(url, shared);
+  }
+  if (!signal) return shared;
+  const pending = shared;
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(new DOMException('The operation was aborted.', 'AbortError'));
+    if (signal.aborted) {
+      abort();
+      return;
+    }
+    signal.addEventListener('abort', abort, { once: true });
+    pending.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+  });
+}
+
 export async function fetchPingTaskSeries(
   uuid: string,
   {
@@ -408,10 +440,7 @@ export async function fetchPingTaskSeries(
   } = {},
 ): Promise<PingTaskSeries[]> {
   const hiddenQuery = includeHidden ? '&include_hidden=1' : '';
-  const taskResponse = await fetchWithBootstrapRetry(`/api/task/ping?${hiddenQuery.slice(1)}`, { signal });
-  if (!taskResponse.ok) throw new Error(`HTTP ${taskResponse.status}`);
-
-  const taskData = await taskResponse.json();
+  const taskData = await fetchPingTaskList(includeHidden, signal);
   const applicableTasks = (Array.isArray(taskData) ? taskData : [])
     .filter((task) => pingTaskAppliesToClient(task, uuid))
     .map((task, index) => normalizePingTask(task, index))
@@ -444,7 +473,7 @@ export async function fetchPingTaskSeries(
   };
 
   // 按窗口分流：>4h 走服务端分桶，单次 batch 必然拿齐（24h=720 / 3d=864 / 7d=672 桶 < 1000），无需回填；
-  // <=4h 读原始，60s 间隔下单页包圆（1h=60 / 4h=240 行），极小间隔任务靠下方逐任务分页兜底。
+  // <=4h 读原始，60s 间隔下单页包圆（4h=240 行），极小间隔任务靠下方逐任务分页兜底。
   const LONG_RANGE_MS = 4 * 60 * 60 * 1000;
   const rangeStartMs = rangeStart ? Date.parse(rangeStart) : NaN;
   const effectiveEndMs = Date.parse(effectiveEnd);
@@ -492,12 +521,17 @@ export async function fetchPingTaskSeries(
           task,
           records: normalizePingRecords(asRecord(recordsByTask)?.[String(task.id)]),
         }));
+        // 服务端按 time >= start 取数，最老一条几乎不可能恰好 <= rangeStartMs，
+        // 严格比较会让 batch 结果几乎总被判为"未覆盖"，白跑一次再逐任务分页。
+        // 判定为已覆盖的条件：①条数没触顶（没被 limit 截断）；②最老一条距窗口起点不超过 2 个采样间隔。
         const batchCoversRange = !rangeStart || batchSeries.every((item) => {
           if (item.records.length === 0) return true;
+          if (item.records.length < batchLimit) return true;
           const oldest = Math.min(...item.records.map((record) => Date.parse(record.time)));
-          return !Number.isFinite(oldest) || oldest <= rangeStartMs;
+          const slackMs = Math.max(item.task.intervalSec, 1) * 2000;
+          return !Number.isFinite(oldest) || oldest <= rangeStartMs + slackMs;
         });
-        // 极小间隔任务单页装不下时不直接返回，落到下方逐任务分页补齐。
+        // 极小间隔任务单页装不下（被截断且离窗口起点较远）时，落到下方逐任务分页补齐。
         if (batchCoversRange) return limitPingSeriesToRecentRange(batchSeries, rangeHours);
       }
     } catch (error) {

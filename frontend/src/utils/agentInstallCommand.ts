@@ -17,6 +17,10 @@ export type AgentInstallOptions = {
   mountExclude: string;
   nicInclude: string;
   nicExclude: string;
+  // 仅 Unix 安装脚本支持：容器内 /proc/loadavg 是宿主机口径时，仍上报宿主机负载。
+  allowHostLoad: boolean;
+  // 宿主机 CPU 核数，配合 allowHostLoad 把宿主机负载折算到本容器核数口径；空 = 不折算。
+  hostCpuCores: string;
 };
 
 export const defaultAgentInstallOptions: AgentInstallOptions = {
@@ -34,6 +38,8 @@ export const defaultAgentInstallOptions: AgentInstallOptions = {
   mountExclude: '',
   nicInclude: '',
   nicExclude: '',
+  allowHostLoad: false,
+  hostCpuCores: '',
 };
 
 export const CF_MONITOR_BRANCH = 'main';
@@ -165,6 +171,12 @@ function normalizeTrafficResetDay(value: string) {
   return String(Math.min(31, Math.max(1, day)));
 }
 
+function normalizeHostCpuCores(value: string) {
+  const cores = Number.parseInt(value.trim(), 10);
+  if (!Number.isFinite(cores) || cores <= 0) return '';
+  return String(Math.min(65535, cores));
+}
+
 function normalizeInstanceId(value?: string) {
   const cleaned = (value || 'default')
     .trim()
@@ -208,6 +220,8 @@ export function buildAgentInstallCommand({
   const nicInclude = options.nicInclude.trim();
   const nicExclude = options.nicExclude.trim();
   const trafficResetDay = normalizeTrafficResetDay(options.trafficResetDay);
+  const allowHostLoad = Boolean(options.allowHostLoad);
+  const hostCpuCores = allowHostLoad ? normalizeHostCpuCores(options.hostCpuCores || '') : '';
 
   switch (platform) {
     case 'unix': {
@@ -227,6 +241,8 @@ export function buildAgentInstallCommand({
       if (mountExclude) args.push('--mount-exclude', mountExclude);
       if (nicInclude) args.push('--nic-include', nicInclude);
       if (nicExclude) args.push('--nic-exclude', nicExclude);
+      if (allowHostLoad) args.push('--allow-host-load');
+      if (hostCpuCores) args.push('--host-cpu-cores', hostCpuCores);
       return shPipe(
         `wget -qO- ${shellQuote(cfMonitorAgentScriptUrl('install.sh', ghproxy, releaseTag, scriptRef))}`,
         args,

@@ -12,8 +12,8 @@ async function cleanupHarness(database) {
   const { runRecordCleanup } = await loadTypeScriptFunctions(new URL('./index.ts', import.meta.url), ['runRecordCleanup'], {
     RECORD_CLEANUP_LAST_RUN_KEY: 'maintenance_last_cleanup_at', RECORD_CLEANUP_INTERVAL_MS: 86_400_000,
     db: {
+      buildHistoryRollup: async () => ({}),
       deleteOldRecords: deletes('cfm_delete_old_records'),
-      deleteOldWebsiteChecks: deletes('cfm_delete_old_website_checks'),
       deleteOldPingRecords: deletes('cfm_delete_old_ping_records'),
       deleteOldAuditLogs: deletes('cfm_delete_old_audit_logs'),
       cleanupNotificationDeliveryState: (_connection, now, options = {}) => rpc(database, 'cfm_cleanup_notification_delivery_state', {
@@ -34,6 +34,7 @@ async function cleanupHarness(database) {
 test('AUD-07 a full cleanup batch continues next Cron before recording completion', async () => {
   const database = await createTestDatabase();
   try {
+    await database.exec(`insert into settings (key, value) values ('record_preserve_time', '72'), ('ping_record_preserve_time', '72') on conflict (key) do update set value = excluded.value;`);
     await database.exec(`
       insert into clients (uuid, name) values ('node-a', 'Synthetic');
       insert into records (client,time) select 'node-a', '2026-09-01T00:00:00Z'::timestamptz - n * interval '1 second'
@@ -59,6 +60,7 @@ test('AUD-07 a full cleanup batch continues next Cron before recording completio
 test('AUD-07 seven days of 50 nodes at 120 seconds do not accumulate expired history', async () => {
   const database = await createTestDatabase();
   try {
+    await database.exec(`insert into settings (key, value) values ('record_preserve_time', '72'), ('ping_record_preserve_time', '72') on conflict (key) do update set value = excluded.value;`);
     await database.exec("insert into clients (uuid) select 'node-' || n from generate_series(1,50) n;");
     const cleanup = await cleanupHarness(database);
     for (let day = 0; day < 7; day += 1) {
@@ -90,12 +92,10 @@ test('AUD-07 small delete budgets report remaining work for every history family
   try {
     await database.exec(`
       insert into clients (uuid) values ('node-a');
-      insert into website_monitors (id,name,url) values (1,'Synthetic','https://example.com');
-      insert into website_checks (monitor_id,checked_at,ok) select 1,'2026-01-01',true from generate_series(1,101);
       insert into ping_snapshots (client,time) select 'node-a','2026-01-01' from generate_series(1,101);
       insert into audit_logs (time) select '2026-01-01' from generate_series(1,101);
     `);
-    for (const name of ['cfm_delete_old_website_checks', 'cfm_delete_old_ping_records', 'cfm_delete_old_audit_logs']) {
+    for (const name of ['cfm_delete_old_ping_records', 'cfm_delete_old_audit_logs']) {
       const input = { input_before_time: '2026-09-01', input_max_batches: 1 };
       assert.equal((await rpc(database, name, input)).has_more, true, `${name} reports bounded backlog`);
       assert.equal((await rpc(database, name, input)).has_more, false, `${name} reports drained backlog`);

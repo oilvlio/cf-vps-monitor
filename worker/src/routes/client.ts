@@ -423,11 +423,6 @@ function agentPingTasksForClient(tasks: db.PingTask[], uuid: string, intervalSec
   }), intervalSec);
 }
 
-async function agentWebsiteProbeTasksForClient(database: db.QueryDatabase, uuid?: string): Promise<db.WebsiteMonitor[]> {
-  if (!uuid) return [];
-  return db.listAgentWebsiteProbeTasks(database, uuid, new Date().toISOString(), 20);
-}
-
 async function pingPolicyVersion(tasks: db.PingTask[], intervalSec: number): Promise<string> {
   const digestInput = JSON.stringify({
     interval_sec: intervalSec,
@@ -783,7 +778,6 @@ async function fallbackAgentPolicy(database: db.QueryDatabase, uuid?: string) {
   const pingTasks = uuid
     ? agentPingTasksForClient(await listAgentPingTasks(database), uuid, Math.floor(pingIntervalSec))
     : [];
-  const websiteProbeTasks = await agentWebsiteProbeTasksForClient(database, uuid);
   const client = uuid ? await db.getClient(database, uuid).catch(() => null) : null;
   const trafficResetDay = Number(client?.traffic_reset_day);
   return {
@@ -794,7 +788,6 @@ async function fallbackAgentPolicy(database: db.QueryDatabase, uuid?: string) {
     ping_interval_sec: Math.floor(pingIntervalSec),
     ping_policy_version: await pingPolicyVersion(pingTasks, Math.floor(pingIntervalSec)),
     ping_tasks: pingTasks,
-    website_probe_tasks: websiteProbeTasks,
     report_now: false,
     viewer_count: 0,
     viewer_ttl_sec: Math.floor(viewerTtlSec),
@@ -1076,7 +1069,6 @@ clientRoutes.get('/policy', clientIdentityAuth, async (c) => {
         ping_interval_sec: 120,
         ping_policy_version: 'fallback',
         ping_tasks: [],
-        website_probe_tasks: [],
         report_now: false,
         viewer_count: 0,
         viewer_ttl_sec: 120,

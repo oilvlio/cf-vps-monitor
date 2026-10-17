@@ -13,7 +13,7 @@ async function estimate({ pingCount = 2, recordEnabled = true, viewMinutes = 0 }
   const pingTasks = Array.from({ length: pingCount }, (_, i) => ({ id: i + 1, name: `Ping ${i + 1}`, all_clients: true, clients: [], interval_sec: 120 }));
   const functions = await loadTypeScriptFunctions(new URL('../routes/admin.ts', import.meta.url), [
     'parsePositiveNumber', 'parseBoundedNumber', 'parseJsonArray', 'estimatePingSnapshotRowsPerDay',
-    'estimateAgentPingTaskPullsPerDay', 'estimateCapacityCountCheckIntervalSec', 'buildCapacityEstimate',
+    'estimateAgentPingTaskPullsPerDay', 'estimateCapacityCountCheckIntervalSec', 'estimateRollupRowsPerClient', 'buildCapacityEstimate',
   ], {
     ...quota, ...helpers, buildAdminSettings,
     capacityEstimateCache: null, CAPACITY_ESTIMATE_CACHE_MS: 30_000, CAPACITY_ESTIMATE_SETTING_KEYS: [],

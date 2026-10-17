@@ -20,7 +20,6 @@ import { bestEffortRecordHealthEvent, errorDetail, type StoredHealthComponent } 
 import { isPublicIpAddress } from '../utils/request-ip';
 import { unwrapMonitorReportEnvelope } from '../utils/report-envelope';
 import { isRecordPersistDue } from '../utils/record-persist';
-import { checkWebsiteMonitorHttp } from '../utils/website-monitor';
 import { toPublicReport } from '../utils/public-report';
 import { projectAgentClientMetadata, projectClientMetadata } from '../utils/client-metadata';
 import { compactLiveReport, serializedBytes } from '../utils/live-report-state';
@@ -70,8 +69,6 @@ const RECORD_CAPACITY_AUDIT_THROTTLE_MS = 10 * 60 * 1000;
 const HOT_PATH_HEALTH_OK_THROTTLE_MS = 60 * 60 * 1000;
 const POLICY_SETTING_CACHE_MS = 30_000;
 const PING_TASK_CACHE_MS = 120_000;
-const WEBSITE_PROBE_TASK_CACHE_MS = 120_000;
-const AGENT_POLICY_OPTIONAL_ERROR_THROTTLE_MS = 5 * 60 * 1000;
 const RECORD_CAPACITY_SNAPSHOT_KEY = 'record:capacity:snapshot';
 const AGENT_POLICY_SETTING_KEYS = [
   'live_poll_active_interval_sec',
@@ -154,7 +151,6 @@ interface AgentPolicyMessage {
   ping_interval_sec: number;
   ping_policy_version: string;
   ping_tasks: db.PingTask[];
-  website_probe_tasks: db.WebsiteMonitor[];
   policy_ttl_sec: number;
   idle_policy_ttl_sec: number;
   // 只有在后台确实存有该节点的重置日时才下发；缺省时探针保留自己的
@@ -439,9 +435,6 @@ export class LiveDataDO {
   private policySettingsPending: Promise<AgentPolicySettings> | null = null;
   private pingTasksCache: { value: db.PingTask[]; expiresAt: number } | null = null;
   private pingTasksPending: Promise<db.PingTask[]> | null = null;
-  private websiteProbeTasksCache: Map<string, { value: db.WebsiteMonitor[]; expiresAt: number }> = new Map();
-  private websiteProbeTasksPending: Map<string, Promise<db.WebsiteMonitor[]>> = new Map();
-  private policyOptionalErrorLastWriteAt: Map<string, number> = new Map();
   private adminClientsUpdatedAt: number | null = null;
   private adminClientsSnapshot: AdminClientsSnapshot | null = null;
   private adminClientMetadata = new Map<string, JsonObject>();
@@ -1104,52 +1097,6 @@ export class LiveDataDO {
     this.pingTasksPending = null;
   }
 
-  private invalidateWebsiteProbeTasksCache(): void {
-    this.websiteProbeTasksCache.clear();
-    this.websiteProbeTasksPending.clear();
-  }
-
-  private async getWebsiteProbeTasks(now: number, clientId?: string, requireSuccess = false): Promise<db.WebsiteMonitor[]> {
-    const database = this.getQueryDatabase();
-    if (!database || !clientId) return [];
-    const cached = this.websiteProbeTasksCache.get(clientId);
-    if (cached && cached.expiresAt > now) return cached.value;
-    const existing = this.websiteProbeTasksPending.get(clientId);
-    if (existing) return existing;
-
-    const pending = db.listAgentWebsiteProbeTasks(database, clientId, new Date(now).toISOString(), 20)
-      .then((tasks) => {
-        this.websiteProbeTasksCache.set(clientId, {
-          value: tasks,
-          expiresAt: now + WEBSITE_PROBE_TASK_CACHE_MS,
-        });
-        return tasks;
-      });
-    this.websiteProbeTasksPending.set(clientId, pending);
-    try {
-      return await pending;
-    } catch (error) {
-      const component = 'agent_policy_website_probe_tasks';
-      const previous = this.policyOptionalErrorLastWriteAt.get(component) || 0;
-      if (now - previous >= AGENT_POLICY_OPTIONAL_ERROR_THROTTLE_MS) {
-        this.policyOptionalErrorLastWriteAt.set(component, now);
-        await bestEffortRecordHealthEvent(
-          database,
-          component,
-          'error',
-          `website probe tasks lookup failed; policy sent without website probes: ${errorDetail(error)}`,
-          { auditAction: 'agent_policy_website_probe_tasks_error' },
-        );
-      }
-      if (requireSuccess) throw error;
-      return [];
-    } finally {
-      if (this.websiteProbeTasksPending.get(clientId) === pending) {
-        this.websiteProbeTasksPending.delete(clientId);
-      }
-    }
-  }
-
   private activeViewerCount(now: number): number {
     let count = 0;
     for (const [id, role] of this.sessionRoles) {
@@ -1193,7 +1140,6 @@ export class LiveDataDO {
     const viewerCount = this.activeViewerCount(now);
     const mode: AgentPolicyMode = viewerCount > 0 ? 'active' : 'idle';
     const pingTasks = this.pingTasksForClient(await this.getPingTasks(now), clientId);
-    const websiteProbeTasks = await this.getWebsiteProbeTasks(now, clientId);
     return {
       type: 'policy',
       mode,
@@ -1205,7 +1151,6 @@ export class LiveDataDO {
       ping_interval_sec: settings.pingIntervalSec,
       ping_policy_version: await this.pingPolicyVersion(pingTasks, settings.pingIntervalSec),
       ping_tasks: pingTasks,
-      website_probe_tasks: websiteProbeTasks,
       policy_ttl_sec: mode === 'active' ? 30 : 120,
       idle_policy_ttl_sec: 120,
       traffic_reset_day: await this.trafficResetDayFor(clientId),
@@ -1786,8 +1731,6 @@ export class LiveDataDO {
         }
         await this.persistPingResultsFromReport(clientId, rawReport, reportTime);
         this.assertReportCurrent(lifecycle);
-        await this.persistWebsiteProbeResultsFromReport(clientId, rawReport, reportTime);
-        this.assertReportCurrent(lifecycle);
       }
 
       await this.scheduleExpiryAlarm(now);
@@ -1900,84 +1843,6 @@ export class LiveDataDO {
     await this.persistPingResult(clientId, { results }, nowMs);
   }
 
-  private websiteProbeResultsFromReport(report: JsonObject): JsonObject[] {
-    const results = report.website_probe_results;
-    return Array.isArray(results) ? results.slice(0, 50).filter(isObjectPayload) : [];
-  }
-
-  private async persistWebsiteProbeResultsFromReport(clientId: string, report: JsonObject, nowMs: number): Promise<void> {
-    const results = this.websiteProbeResultsFromReport(report);
-    if (results.length === 0) return;
-    const database = this.getQueryDatabase();
-    if (!database) return;
-
-    try {
-      if (!(await this.isRecordPersistenceEnabled(nowMs))) return;
-      if (!(await this.canPersistWithinCapacity(nowMs))) return;
-
-      const assigned = new Set((await this.getWebsiteProbeTasks(nowMs, clientId, true)).map(task => task.id));
-      if (assigned.size === 0) return;
-      const checkedAt = new Date(nowMs).toISOString();
-      let changed = false;
-      const fallbackChecked = new Set<number>();
-      for (const item of results) {
-        const monitorId = Number(item.monitor_id);
-        const configRevision = item.config_revision;
-        const latencyMs = Math.round(Number(item.latency_ms));
-        const statusCode = item.status_code === null || item.status_code === undefined ? null : Number(item.status_code);
-        const rawStatusCode = item.raw_status_code === null || item.raw_status_code === undefined ? statusCode : Number(item.raw_status_code);
-        const effectiveStatus = item.effective_status === 'up' ? 'up' : item.effective_status === 'down' ? 'down' : null;
-        if (
-          !Number.isInteger(monitorId) ||
-          !assigned.has(monitorId) ||
-          typeof configRevision !== 'string' ||
-          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(configRevision) ||
-          !Number.isFinite(latencyMs) ||
-          latencyMs < 0 ||
-          latencyMs > 60_000 ||
-          !effectiveStatus ||
-          (statusCode !== null && (!Number.isInteger(statusCode) || statusCode < 100 || statusCode > 599)) ||
-          (rawStatusCode !== null && (!Number.isInteger(rawStatusCode) || rawStatusCode < 100 || rawStatusCode > 599))
-        ) {
-          continue;
-        }
-        const updated = await db.recordWebsiteCheck(database, {
-          monitor_id: monitorId,
-          config_revision: configRevision,
-          checked_at: checkedAt,
-          ok: Boolean(item.ok) && effectiveStatus === 'up',
-          effective_status: effectiveStatus,
-          effective_reason: typeof item.effective_reason === 'string' ? item.effective_reason.slice(0, 80) : effectiveStatus,
-          status_code: statusCode,
-          raw_status_code: rawStatusCode,
-          latency_ms: latencyMs,
-          error: typeof item.error === 'string' && item.error ? item.error.slice(0, 120) : null,
-          source_type: 'agent',
-          source_client: clientId,
-        });
-        if (!updated) continue;
-        changed = true;
-
-        if (effectiveStatus === 'down' && updated.agent_probe_status_enabled && !fallbackChecked.has(monitorId)) {
-          fallbackChecked.add(monitorId);
-          const fallbackCheck = await checkWebsiteMonitorHttp(updated);
-          const fallbackUpdated = await db.recordWebsiteCheck(database, fallbackCheck);
-          changed = Boolean(fallbackUpdated) || changed;
-        }
-      }
-      if (changed) this.broadcastMetadataChanged({ websites: true });
-    } catch (error) {
-      await bestEffortRecordHealthEvent(
-        database,
-        'website_probe_persistence',
-        'error',
-        `website probe persist failed for ${clientId}: ${errorDetail(error)}`,
-        { auditAction: 'website_probe_persistence_error' },
-      );
-      throw error;
-    }
-  }
-
   private async restoreClients(request: Request): Promise<Response> {
     const parsed = await parseJsonRequestWithLimit(request, MAX_BACKUP_BYTES);
     if ('response' in parsed) return parsed.response;
@@ -2023,7 +1888,6 @@ export class LiveDataDO {
       this.recordPersistenceCheckedAt = 0;
       this.policySettingsCheckedAt = 0;
       this.invalidatePingTasksCache();
-      this.invalidateWebsiteProbeTasksCache();
       this.broadcastMetadataChanged({ clients: true });
       for (const [id, socket] of this.sessions) {
         if (this.sessionRoles.get(id) === 'viewer') this.sendSnapshot(socket);
@@ -2086,7 +1950,6 @@ export class LiveDataDO {
     }
 
     if (request.method === 'POST' && url.pathname === '/policy-refresh') {
-      this.invalidateWebsiteProbeTasksCache();
       await this.broadcastAgentPolicy(Date.now(), false, true);
       return Response.json({ success: true });
     }
@@ -2099,7 +1962,6 @@ export class LiveDataDO {
 
     if (request.method === 'POST' && url.pathname === '/ping-tasks-refresh') {
       this.invalidatePingTasksCache();
-      this.invalidateWebsiteProbeTasksCache();
       await this.broadcastAgentPolicy(Date.now(), false, true);
       return Response.json({ success: true });
     }
@@ -2244,8 +2106,6 @@ export class LiveDataDO {
           reportsToPersist.push({ report: rawReport, reportTime });
         }
         await this.persistPingResultsFromReport(clientId, rawReport, reportTime);
-        this.assertReportCurrent(lifecycle);
-        await this.persistWebsiteProbeResultsFromReport(clientId, rawReport, reportTime);
         this.assertReportCurrent(lifecycle);
       }
 

@@ -5,12 +5,9 @@ import type {
   LoadNotificationMetric,
   OfflineNotification,
   PingTask,
-  WebsiteMonitor,
-  WebsiteMonitorInput,
 } from '../db/queries.ts';
 import { sanitizeSettingsForStorage } from '../settings/schema.ts';
 import { validatePingTaskInput } from './ping-task.ts';
-import { validateWebsiteMonitorInput } from './website-monitor.ts';
 
 export const BACKUP_SCHEMA_ID = 'cf-monitor.backup';
 export const ENCRYPTED_BACKUP_SCHEMA_ID = 'cf-monitor.encrypted-backup';
@@ -32,8 +29,6 @@ export const BACKUP_EXCLUDED_MODULES = [
   'gpu_snapshots',
   'ping_records',
   'ping_snapshots',
-  'website_checks',
-  'website_monitor_health',
   'themes',
   'theme_assets',
   'audit_logs',
@@ -42,7 +37,6 @@ export const MAX_BACKUP_BYTES = 5 * 1024 * 1024;
 
 const MAX_CLIENTS = 1000;
 const MAX_PING_TASKS = 1000;
-const MAX_WEBSITE_MONITORS = 1000;
 const MAX_NOTIFICATIONS = 5000;
 
 type BackupModuleKey =
@@ -51,10 +45,7 @@ type BackupModuleKey =
   | 'ping_tasks'
   | 'offline_notifications'
   | 'expiry_notifications'
-  | 'load_notifications'
-  | 'website_monitors';
-
-export type WebsiteMonitorBackup = WebsiteMonitorInput & { id?: number; sort_order: number };
+  | 'load_notifications';
 
 export interface BackupData {
   schema?: string;
@@ -70,7 +61,6 @@ export interface BackupData {
   offline_notifications?: OfflineNotification[];
   expiry_notifications?: ExpiryNotification[];
   load_notifications?: LoadNotification[];
-  website_monitors?: WebsiteMonitorBackup[];
 }
 
 export interface EncryptedBackupData {
@@ -98,7 +88,6 @@ export interface BackupSummary {
   offline_notifications: number;
   expiry_notifications: number;
   load_notifications: number;
-  website_monitors: number;
 }
 
 export type BackupValidationResult =
@@ -415,64 +404,6 @@ function validatePingTasks(items: unknown[], errors: string[]): PingTask[] {
   });
 }
 
-export function websiteMonitorConfiguration(monitor: WebsiteMonitor): WebsiteMonitorBackup {
-  return {
-    id: monitor.id,
-    name: monitor.name,
-    url: monitor.url,
-    method: monitor.method,
-    expected_status_min: monitor.expected_status_min,
-    expected_status_max: monitor.expected_status_max,
-    interval_sec: monitor.interval_sec,
-    timeout_sec: monitor.timeout_sec,
-    grace_period_sec: monitor.grace_period_sec,
-    enabled: monitor.enabled,
-    hidden: monitor.hidden,
-    hide_url: monitor.hide_url,
-    agent_probe_mode: monitor.agent_probe_mode,
-    agent_probe_clients: [...monitor.agent_probe_clients],
-    agent_probe_limit: monitor.agent_probe_limit,
-    agent_probe_status_enabled: monitor.agent_probe_status_enabled,
-    sort_order: monitor.sort_order,
-  };
-}
-
-function validateWebsiteMonitors(items: unknown[], errors: string[], clients?: Partial<Client>[]): WebsiteMonitorBackup[] {
-  const ids = new Set<number>();
-  const clientIds = clients ? new Set(clients.map(client => client.uuid)) : null;
-  return items.flatMap((item, index) => {
-    const field = `website_monitors[${index}]`;
-    if (!isPlainObject(item)) {
-      errors.push(`${field} 必须是对象`);
-      return [];
-    }
-    const id = item.id === undefined ? undefined : integerField(item.id, `${field}.id`, errors, 0, 1, Number.MAX_SAFE_INTEGER);
-    if (id !== undefined) {
-      if (ids.has(id)) errors.push(`${field}.id 重复: ${id}`);
-      ids.add(id);
-    }
-    if (item.agent_probe_mode !== undefined && !['off', 'selected', 'country_auto'].includes(String(item.agent_probe_mode))) {
-      errors.push(`${field}.agent_probe_mode 无效`);
-    }
-    const agents = stringArrayField(item.agent_probe_clients, `${field}.agent_probe_clients`, errors, 100);
-    if (clientIds) {
-      for (const agent of agents) {
-        if (!clientIds.has(agent)) errors.push(`${field}.agent_probe_clients 引用了不存在的节点: ${agent}`);
-      }
-    }
-    const validated = validateWebsiteMonitorInput({ ...item, agent_probe_clients: agents });
-    if (!validated.ok) {
-      errors.push(`${field}: ${validated.error}`);
-      return [];
-    }
-    return [{
-      ...(id === undefined ? {} : { id }),
-      ...validated.value,
-      sort_order: integerField(item.sort_order, `${field}.sort_order`, errors, index + 1, 0, 2_147_483_647),
-    }];
-  });
-}
-
 function validateOfflineNotifications(items: unknown[], errors: string[]): OfflineNotification[] {
   return items.flatMap((item, index) => {
     if (!isPlainObject(item)) {
@@ -615,12 +546,6 @@ export function validateBackup(input: unknown): BackupValidationResult {
     hasModule = true;
   }
 
-  const websiteMonitors = requireArray(input, 'website_monitors', MAX_WEBSITE_MONITORS, errors);
-  if (websiteMonitors) {
-    backup.website_monitors = validateWebsiteMonitors(websiteMonitors, errors, backup.clients);
-    hasModule = true;
-  }
-
   if (!hasModule) {
     errors.push('备份至少需要包含一个可恢复模块');
   }
@@ -740,6 +665,5 @@ export function summarizeBackup(backup: Pick<BackupData, BackupModuleKey>): Back
     offline_notifications: backup.offline_notifications?.length || 0,
     expiry_notifications: backup.expiry_notifications?.length || 0,
     load_notifications: backup.load_notifications?.length || 0,
-    website_monitors: backup.website_monitors?.length || 0,
   };
 }

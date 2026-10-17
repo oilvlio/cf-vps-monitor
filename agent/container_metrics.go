@@ -164,11 +164,22 @@ func containerDiskMountReportable(partition disk.PartitionStat, mounts []nodeMet
 		}
 		// Conflicting stacked mounts do not prove which filesystem statfs
 		// will observe. Require every matching entry to satisfy the scope.
-		if mount.root != "/" || mount.fstype != partition.Fstype || !strings.HasPrefix(mount.source, "/dev/") {
+		if mount.root != "/" || mount.fstype != partition.Fstype {
 			return false
 		}
 		switch mount.fstype {
 		case "ext2", "ext3", "ext4", "xfs":
+			if !strings.HasPrefix(mount.source, "/dev/") {
+				return false
+			}
+			found = true
+		case "zfs":
+			// ZFS 的 statfs 按 dataset 的 quota/refquota 折算 Size/Avail，
+			// 容器根是独立 dataset（pool/.../name）时 df 的结果就是容器自己的配额。
+			// 只接受"非绝对路径且带层级"的 dataset 名，排除直接挂存储池根（pool）的情况。
+			if strings.HasPrefix(mount.source, "/") || !strings.Contains(mount.source, "/") {
+				return false
+			}
 			found = true
 		default:
 			return false

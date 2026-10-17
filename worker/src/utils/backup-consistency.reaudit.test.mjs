@@ -14,7 +14,7 @@ async function configuration(sql) {
   return (await sql.query(`select jsonb_build_object(
     'site_title', (select value from settings where key='site_title'),
     'clients', (select coalesce(jsonb_agg(uuid order by uuid),'[]'::jsonb) from clients),
-    'websites', (select coalesce(jsonb_agg(jsonb_build_object('id',id,'clients',agent_probe_clients) order by id),'[]'::jsonb) from website_monitors)
+    'ping_tasks', (select coalesce(jsonb_agg(jsonb_build_object('id',id,'clients',clients) order by id),'[]'::jsonb) from ping_tasks)
   ) as value`)).rows[0].value;
 }
 
@@ -22,7 +22,7 @@ function projected(backup) {
   return {
     site_title: backup.settings.site_title,
     clients: backup.clients.map(row => row.uuid).sort(),
-    websites: backup.website_monitors.map(row => ({ id: row.id, clients: row.agent_probe_clients })).sort((a, b) => a.id - b.id),
+    ping_tasks: backup.ping_tasks.map(row => ({ id: row.id, clients: row.clients })).sort((a, b) => a.id - b.id),
   };
 }
 
@@ -30,14 +30,14 @@ async function seed(sql, second = false) {
   await sql.exec(`
     insert into clients(uuid,name,token,hidden,auto_renewal,traffic_reset_day)
       values ('node-a','Synthetic A','synthetic-token-a',1,1,12);
-    insert into website_monitors(id,name,url,agent_probe_mode,agent_probe_clients,agent_probe_status_enabled)
-      values (1,'Synthetic A','https://a.audit.example.com','selected','["node-a"]',true);
+    insert into ping_tasks(id,name,clients,all_clients,type,target,interval_sec,sort_order)
+      values (1,'Synthetic A','["node-a"]'::jsonb,0,'icmp','a.audit.example.com',60,1);
     update settings set value='Before' where key='site_title';
   `);
   if (second) await sql.exec(`
     insert into clients(uuid,name,token) values ('node-b','Synthetic B','synthetic-token-b');
-    insert into website_monitors(id,name,url,agent_probe_mode,agent_probe_clients)
-      values (2,'Synthetic B','https://b.audit.example.com','selected','["node-b"]');
+    insert into ping_tasks(id,name,clients,all_clients,type,target,interval_sec,sort_order)
+      values (2,'Synthetic B','["node-b"]'::jsonb,0,'icmp','b.audit.example.com',60,2);
   `);
 }
 
@@ -75,13 +75,13 @@ async function withSnapshot(run, { afterFirst = null, second = false } = {}) {
 const interleavings = [
   { name: 'create', sql: `
     insert into clients(uuid,name,token) values ('node-b','Synthetic B','synthetic-token-b');
-    insert into website_monitors(id,name,url,agent_probe_mode,agent_probe_clients)
-      values (2,'Synthetic B','https://b.audit.example.com','selected','["node-b"]');
+    insert into ping_tasks(id,name,clients,all_clients,type,target,interval_sec,sort_order)
+      values (2,'Synthetic B','["node-b"]'::jsonb,0,'icmp','b.audit.example.com',60,2);
   ` },
-  { name: 'delete', second: true, sql: "delete from website_monitors where id=2; delete from clients where uuid='node-b';" },
+  { name: 'delete', second: true, sql: "delete from ping_tasks where id=2; delete from clients where uuid='node-b';" },
   { name: 'reference replacement', sql: `
     insert into clients(uuid,name,token) values ('node-b','Synthetic B','synthetic-token-b');
-    update website_monitors set agent_probe_clients='["node-b"]' where id=1;
+    update ping_tasks set clients='["node-b"]'::jsonb where id=1;
     delete from clients where uuid='node-a';
   ` },
 ];
@@ -105,7 +105,7 @@ for (const change of interleavings) {
   });
 }
 
-test('R-D05 no-concurrency export keeps normalized fields and excludes website health/version', async () => {
+test('R-D05 no-concurrency export keeps normalized fields', async () => {
   await withSnapshot(async ({ sql, before, snapshot }) => {
     const backup = await snapshot();
     assert.equal(validateBackup(backup).ok, true);
@@ -120,10 +120,7 @@ test('R-D05 no-concurrency export keeps normalized fields and excludes website h
       from pg_proc p where p.oid='public.cfm_backup_configuration_snapshot()'::regprocedure`)).rows[0];
     assert.deepEqual(access, { volatility: 's', anon: false, authenticated: false, service: true },
       'backup secrets use the caller snapshot and are executable only through the Worker role');
-    assert.deepEqual(copy(backup.website_monitors[0].agent_probe_clients), ['node-a']);
-    for (const key of ['config_revision', 'status', 'last_checked_at', 'last_notified_at']) {
-      assert.equal(Object.hasOwn(backup.website_monitors[0], key), false);
-    }
+    assert.deepEqual(copy(backup.ping_tasks[0].clients), ['node-a']);
     const encrypted = await encryptBackup(backup, password);
     assert.equal(encrypted.ok, true);
     const decrypted = await decryptBackup(encrypted.encryptedBackup, password);
@@ -131,21 +128,4 @@ test('R-D05 no-concurrency export keeps normalized fields and excludes website h
     await rpc(sql, 'cfm_restore_backup_data', { input_backup: decrypted.backup });
     assert.deepEqual(await configuration(sql), before);
   });
-});
-
-test('R-D05 export rejects an inconsistent stored configuration before returning a download', async () => {
-  await withSnapshot(async ({ sql, snapshot }) => {
-    await sql.exec("update website_monitors set agent_probe_clients='[\"missing-agent\"]' where id=1");
-    await assert.rejects(snapshot, /备份.*校验|backup.*valid/i);
-  });
-});
-
-test('R-D05 encryption cannot seal a backup that its own decrypt/restore validation rejects', async () => {
-  const bad = { version: '2.0.0', clients: [], website_monitors: [{
-    id: 1, name: 'Synthetic broken reference', url: 'https://broken.audit.example.com',
-    agent_probe_mode: 'selected', agent_probe_clients: ['missing-agent'],
-  }] };
-  assert.equal(validateBackup(bad).ok, false, 'strict restoration validation is the precondition');
-  const encrypted = await encryptBackup(bad, password);
-  assert.equal(encrypted.ok, false, 'invalid self-generated files must fail before encryption');
 });

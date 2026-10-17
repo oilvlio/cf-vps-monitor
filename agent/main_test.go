@@ -17,6 +17,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/shirou/gopsutil/v3/disk"
+	"github.com/shirou/gopsutil/v3/load"
 	gnet "github.com/shirou/gopsutil/v3/net"
 )
 
@@ -979,6 +980,36 @@ func TestReportSerializesUnavailableLoadAsNull(t *testing.T) {
 	}
 }
 
+// 负载三元组与 Load1 同门控：可信时三个值一起上报，不可信时全 nil（序列化成 null）。
+func TestApplyLoadAverageTriple(t *testing.T) {
+	stat := load.AvgStat{Load1: 1.25, Load5: 0.75, Load15: 0.5}
+
+	trusted := Report{}
+	applyLoadAverage(&trusted, stat, true)
+	if trusted.Load == nil || trusted.Load5 == nil || trusted.Load15 == nil {
+		t.Fatalf("trusted report = %+v, want all three loads set", trusted)
+	}
+	if *trusted.Load != 1.25 || *trusted.Load5 != 0.75 || *trusted.Load15 != 0.5 {
+		t.Fatalf("trusted loads = %v/%v/%v, want 1.25/0.75/0.5",
+			*trusted.Load, *trusted.Load5, *trusted.Load15)
+	}
+
+	distrusted := Report{}
+	applyLoadAverage(&distrusted, stat, false)
+	if distrusted.Load != nil || distrusted.Load5 != nil || distrusted.Load15 != nil {
+		t.Fatalf("distrusted report = %+v, want all three loads nil", distrusted)
+	}
+	payload, err := json.Marshal(distrusted)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{`"load":null`, `"load5":null`, `"load15":null`} {
+		if !strings.Contains(string(payload), key) {
+			t.Fatalf("payload = %s, want %s", payload, key)
+		}
+	}
+}
+
 func writeFileTree(t *testing.T, root string, files map[string]string) {
 	t.Helper()
 	for name, content := range files {
@@ -1366,6 +1397,36 @@ func TestExecuteTCPPingExcludesDNSResolutionTime(t *testing.T) {
 	}
 }
 
+func TestTCPPingRetestRules(t *testing.T) {
+	cases := []struct {
+		name   string
+		values []float64
+		want   float64
+	}{
+		{name: "normal does not retest", values: []float64{80}, want: 80},
+		{name: "retest until normal", values: []float64{1200, 1500, 1100, 900}, want: 900},
+		{name: "large drop is loss", values: []float64{2000, 900}, want: -1},
+		{name: "high latency after retries is loss", values: []float64{1200, 1500, 1300, 1101}, want: -1},
+		{name: "failed retest is loss", values: []float64{1200, -1}, want: -1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			got := resolveTCPPingSamples(func() float64 {
+				value := tc.values[calls]
+				calls++
+				return value
+			})
+			if got != tc.want {
+				t.Fatalf("got %.0f, want %.0f", got, tc.want)
+			}
+			if tc.name == "normal does not retest" && calls != 1 {
+				t.Fatalf("normal result made %d probes, want 1", calls)
+			}
+		})
+	}
+}
+
 func TestFetchPublicIPFromURLsKeepsOnlyRequestedPublicFamily(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("10.0.0.2 203.0.113.10 8.8.8.8 fc00::1 2001:db8::1 2606:4700:4700::1111"))
@@ -1377,29 +1438,6 @@ func TestFetchPublicIPFromURLsKeepsOnlyRequestedPublicFamily(t *testing.T) {
 	}
 	if got := fetchPublicIPFromURLs(context.Background(), server.Client(), []string{server.URL}, true); got != "2606:4700:4700::1111" {
 		t.Fatalf("fetchPublicIPFromURLs(v6) = %q, want 2606:4700:4700::1111", got)
-	}
-}
-
-func TestWebsiteHTTPProbeReportsStatusAndLatency(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer server.Close()
-
-	result := executeWebsiteHTTPProbeWithClient(WebsiteProbeTask{
-		ID:                1,
-		URL:               server.URL,
-		Method:            "GET",
-		ExpectedStatusMin: 200,
-		ExpectedStatusMax: 299,
-		TimeoutSec:        5,
-	}, server.Client())
-
-	if !result.OK || result.EffectiveStatus != "up" || result.StatusCode == nil || *result.StatusCode != http.StatusNoContent {
-		t.Fatalf("unexpected result: %+v", result)
-	}
-	if result.LatencyMS < 0 {
-		t.Fatalf("latency = %d, want non-negative", result.LatencyMS)
 	}
 }
 

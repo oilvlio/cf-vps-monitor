@@ -1,16 +1,12 @@
 ﻿import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { Flex, Text, Button, DropdownMenu } from '@radix-ui/themes';
 import {
-  Flex, Card, Text, Badge, Heading,
-  Button, Box, Tabs, SegmentedControl
-} from '@radix-ui/themes';
-import {
-  ArrowLeft,
-  Server, Globe, Activity,
-  Layers
+  ChevronLeft, ChevronDown, Check, RefreshCw, Eye,
+  Cpu, MemoryStick, HardDrive, Network, Cable, Activity, Thermometer, MonitorSpeaker,
 } from 'lucide-react';
 import Loading from '../components/Loading';
-import DetailsGrid from '../components/DetailsGrid';
+import { useIsMobile } from '../hooks/useIsMobile';
 import Flag from '../components/Flag';
 import PingYAxisTick from '../components/PingYAxisTick';
 import { useLiveData } from '../contexts/LiveDataContext';
@@ -25,24 +21,32 @@ import {
   type PublicMonitorRecord,
 } from '../utils/publicHistory';
 import type { ClientInfo, LiveDataMap } from '../types';
-import { formatLastReport, formatMetricUptime, getNodeDisplayRecord, getNodeLastReportTime, getNodeStatus } from '../utils/nodeMetrics';
+import { diskUsagePresentation, formatLastReport, formatLoadTriple, formatMetricBytes, formatMetricSpeed, formatMetricUptime, getNodeDisplayRecord, getNodeLastReportTime, getNodeStatus, resourceTotal } from '../utils/nodeMetrics';
+import { formatCpuSpec } from '../utils/cpuFormat';
 import { filterMonitorNodes } from '../utils/monitorView';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, Area, AreaChart
+  ResponsiveContainer, Area, ComposedChart
 } from 'recharts';
 import {
   buildPingChartRows,
   fetchPingTaskSeries,
+  formatPingLossRate,
   formatPingMs,
-  getPingSeriesAverage,
+  getPingLossRate,
+  getPingSeriesP75,
   getPingSeriesWithRecords,
   getPingTimeDomain,
   getPingYAxisDomain,
   PingTaskSeries,
 } from '../utils/pingChart';
 import { buildMonitorChartData, getMonitorChartRenderData } from '../utils/monitorChartData';
-import { monitorYAxisProps, pingYAxisProps, wideYAxisProps } from '../utils/monitorChartAxis';
+import {
+  buildPingGapLayers, buildPingYAxis, cutPeakRows, latencyHeatColor, lossHeatColor,
+  pingDashKey, pingSolidKey,
+} from '../utils/pingChartView';
+import { metricNumber } from '../utils/nodeMetrics';
+import { parseTrafficLimitType, formatTrafficLimitLabel } from '../utils/traffic';
 import { chartTooltipProps } from '../utils/chartTooltip';
 
 const formatSpeed = (bytes: number): string => {
@@ -52,33 +56,50 @@ const formatSpeed = (bytes: number): string => {
   return `${(bytes / Math.pow(1024, i)).toFixed(i >= 2 ? 1 : 0)} ${units[i]}`;
 };
 
-type TimeRange = '1h' | '4h' | '24h' | '3d';
-type ChartTab = 'cpu' | 'ram' | 'disk' | 'network' | 'connections' | 'process' | 'temp' | 'gpu';
+function formatIpSupport(supported?: boolean, sourceValue?: string) {
+  return supported || Boolean(sourceValue) ? '支持' : '不支持';
+}
+
+type TimeRange = '4h' | '12h' | '24h' | '3d' | '7d';
+type ViewTab = 'load' | 'ping';
 
 const timeRangeMs: Record<TimeRange, number> = {
-  '1h': 3600000,
   '4h': 14400000,
+  '12h': 43200000,
   '24h': 86400000,
   '3d': 259200000,
+  '7d': 604800000,
 };
 
 const timeRangeHours: Record<TimeRange, number> = {
-  '1h': 1,
   '4h': 4,
+  '12h': 12,
   '24h': 24,
   '3d': 72,
+  '7d': 168,
 };
 
 const timeRangePointLimit: Record<TimeRange, number> = {
-  '1h': 240,
   '4h': 360,
+  '12h': 720,
   '24h': 720,
   '3d': 1000,
+  '7d': 400,
 };
 
-const monitorChartMargin = { top: 12, right: 16, bottom: 4, left: 4 };
-const monitorChartHeight = 296;
-const pingChartHeight = 210;
+const pingChartMargin = { top: 14, right: 20, bottom: 4, left: 4 };
+const miniChartMargin = { top: 8, right: 10, bottom: 0, left: 0 };
+// 详情页整体放大：图表不再是 150/210 的小图。窄屏（<720）由 useChartHeights 回落。
+const miniChartHeight = 200;
+const pingChartHeight = 400;
+const lpYAxisBase = { fontSize: 11, tickCount: 4, tickLine: false, axisLine: false, tickMargin: 4 } as const;
+const lpYAxis = { ...lpYAxisBase, width: 44 };
+const lpYAxisWide = { ...lpYAxisBase, width: 62 };
+
+const timeRangeLabel: Record<TimeRange, string> = {
+  '4h': '4 小时', '12h': '12 小时', '24h': '24 小时', '3d': '3 天', '7d': '7 天',
+};
+
 
 function historyQuery(params: Record<string, string | number | undefined>): string {
   const query = new URLSearchParams();
@@ -90,6 +111,7 @@ function historyQuery(params: Record<string, string | number | undefined>): stri
 export default function Instance() {
   const { uuid } = useParams<{ uuid: string }>();
   const navigate = useNavigate();
+  const isMobile = useIsMobile(720);
   const { authLoading, isAuthenticated } = useAuth();
   const [client, setClient] = useState<ClientInfo | null>(null);
   const [clients, setClients] = useState<ClientInfo[]>([]);
@@ -103,13 +125,19 @@ export default function Instance() {
   const clientRequestRef = useRef(0);
   const recordsRequestRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
-  const [chartTab, setChartTab] = useState<ChartTab>('cpu');
-  const [timeRange, setTimeRange] = useState<TimeRange>('1h');
+  const [viewTab, setViewTab] = useState<ViewTab>('load');
+  const [timeRange, setTimeRange] = useState<TimeRange>('4h');
   const [recordsRangeEnd, setRecordsRangeEnd] = useState(() => Date.now());
   const [pingSeries, setPingSeries] = useState<PingTaskSeries[]>([]);
   const [pingLoading, setPingLoading] = useState(false);
   const [pingError, setPingError] = useState<string | null>(null);
   const [shouldLoadPing, setShouldLoadPing] = useState(false);
+  // 选中的测速点：空 = 全部显示；点图例选中谁就只显示谁（与参考主题一致），再点一次取消选中。
+  const [selectedPingKeys, setSelectedPingKeys] = useState<string[]>([]);
+  const [pingCutPeak, setPingCutPeak] = useState(false);
+  // 断点连线默认关闭：关闭时缺口用虚线桥接、孤立点画成圆点，不会把"没数据"画成"有数据"。
+  const [pingConnectGaps, setPingConnectGaps] = useState(false);
+  const [pingRefresh, setPingRefresh] = useState(0);
   const [gpuRecords, setGpuRecords] = useState<PublicGpuRecord[]>([]);
   const pingSectionRef = useRef<HTMLDivElement | null>(null);
   const { liveData, snapshotReady } = useLiveData();
@@ -168,8 +196,8 @@ export default function Instance() {
   const loadRecords = useCallback(async (range: TimeRange, signal?: AbortSignal) => {
     if (!uuid || authLoading) return;
     const requestId = ++recordsRequestRef.current;
+    // 不清空 records：切换时间范围时页头的数值保持不动，只有图表区显示加载态。
     setRecordsLoading(true);
-    setRecords([]);
     setRecordsError(null);
     const endTs = Date.now();
     const startTs = endTs - timeRangeMs[range];
@@ -185,11 +213,20 @@ export default function Instance() {
       );
       if (!signal?.aborted && requestId === recordsRequestRef.current) setRecords(data);
     } catch {
-      if (!signal?.aborted && requestId === recordsRequestRef.current) setRecordsError('加载监控历史失败，请重试');
+      if (!signal?.aborted && requestId === recordsRequestRef.current) {
+        setRecords([]);
+        setRecordsError('加载监控历史失败，请重试');
+      }
     } finally {
       if (!signal?.aborted && requestId === recordsRequestRef.current) setRecordsLoading(false);
     }
   }, [uuid, authLoading, isAuthenticated]);
+
+  // 换节点时旧节点的历史不能留着当页头数值用。
+  useEffect(() => {
+    setRecords([]);
+    setRecordsLoading(true);
+  }, [uuid]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -200,12 +237,13 @@ export default function Instance() {
   useEffect(() => {
     setShouldLoadPing(false);
     setPingSeries([]);
+    setSelectedPingKeys([]);
     setPingError(null);
     setPingLoading(false);
   }, [uuid]);
 
   useEffect(() => {
-    if (shouldLoadPing) return;
+    if (shouldLoadPing || viewTab !== 'ping') return;
     const target = pingSectionRef.current;
     if (!target || typeof IntersectionObserver === 'undefined') {
       setShouldLoadPing(true);
@@ -219,7 +257,7 @@ export default function Instance() {
     }, { rootMargin: '240px 0px' });
     observer.observe(target);
     return () => observer.disconnect();
-  }, [shouldLoadPing, uuid]);
+  }, [shouldLoadPing, uuid, viewTab]);
 
   // Load ping tasks and records only when the Ping card is near the viewport.
   useEffect(() => {
@@ -229,7 +267,7 @@ export default function Instance() {
     setPingError(null);
     setPingLoading(true);
 
-    fetchPingTaskSeries(uuid, { limit: 360, maxTasks: 8, rangeHours: timeRangeHours[timeRange], cursor: new Date().toISOString(), includeHidden: isAuthenticated, signal: controller.signal })
+    fetchPingTaskSeries(uuid, { limit: timeRangePointLimit[timeRange], maxTasks: 8, rangeHours: timeRangeHours[timeRange], cursor: new Date().toISOString(), start: new Date(Date.now() - timeRangeMs[timeRange]).toISOString(), end: new Date().toISOString(), includeHidden: isAuthenticated, signal: controller.signal })
       .then((series) => {
         if (!controller.signal.aborted) setPingSeries(series);
       })
@@ -244,13 +282,9 @@ export default function Instance() {
       });
 
     return () => controller.abort();
-  }, [shouldLoadPing, timeRange, uuid, authLoading, isAuthenticated]);
+  }, [shouldLoadPing, timeRange, uuid, authLoading, isAuthenticated, pingRefresh]);
 
   // Load GPU records (only for GPU-capable clients)
-  useEffect(() => {
-    if (client && !client.gpu_name) setChartTab(current => current === 'gpu' ? 'cpu' : current);
-  }, [client?.uuid, client?.gpu_name]);
-
   useEffect(() => {
     setGpuRecords([]);
     setGpuError(null);
@@ -276,12 +310,36 @@ export default function Instance() {
   const handleTimeRangeChange = (v: string) => {
     const range = v as TimeRange;
     setTimeRange(range);
-    setRecords([]);
     setGpuRecords([]);
     setRecordsLoading(true);
   };
 
-  if (clientLoading || (client && client.uuid !== uuid) || (recordsLoading && records.length === 0)) return <Loading />;
+  // 这些派生数据是纯函数且要遍历全部 ping 点，放在提前 return 之前并 memo，
+  // 避免 hover/轮询等无关重渲染时反复重算。
+  const pingSeriesWithRecords = useMemo(() => getPingSeriesWithRecords(pingSeries), [pingSeries]);
+  const visiblePingSeries = useMemo(() => {
+    if (selectedPingKeys.length === 0) return pingSeriesWithRecords;
+    const selected = new Set(selectedPingKeys);
+    return pingSeriesWithRecords.filter((item) => selected.has(item.task.key));
+  }, [pingSeriesWithRecords, selectedPingKeys]);
+  const pingGapLayers = useMemo(() => {
+    const rows = buildPingChartRows(visiblePingSeries);
+    const prepared = pingCutPeak ? cutPeakRows(rows, visiblePingSeries.map((item) => item.task.key)) : rows;
+    return buildPingGapLayers(
+      prepared,
+      visiblePingSeries.map((item) => ({ key: item.task.key, intervalSec: item.task.intervalSec })),
+      pingConnectGaps,
+    );
+  }, [visiblePingSeries, pingCutPeak, pingConnectGaps]);
+  const pingChartRows = pingGapLayers.rows;
+  const pingYAxis = useMemo(() => buildPingYAxis(getPingYAxisDomain(visiblePingSeries)), [visiblePingSeries]);
+  const pingXAxisDomain = useMemo(
+    () => getPingTimeDomain(visiblePingSeries, timeRangeHours[timeRange]),
+    [visiblePingSeries, timeRange],
+  );
+
+  // 只有拿不到节点信息时才整页加载；历史数据在图表区自己显示加载态。
+  if (clientLoading || (client && client.uuid !== uuid)) return <Loading />;
   if (error || !client) return <Text color="red" align="center" style={{ padding: 40 }}>{error || '未找到'}</Text>;
 
   const latestHistory = records.length > 0 ? records[records.length - 1] : null;
@@ -293,7 +351,7 @@ export default function Instance() {
     const dateInput = typeof value === 'string' || typeof value === 'number' || value instanceof Date ? value : '';
     const date = new Date(dateInput);
     if (Number.isNaN(date.getTime())) return '';
-    return timeRange === '24h' || timeRange === '3d'
+    return timeRange !== '4h'
       ? date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
       : date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
   };
@@ -301,6 +359,9 @@ export default function Instance() {
   const chartData = buildMonitorChartData(records);
   const chartRenderData = getMonitorChartRenderData(chartData, timeRangeMs[timeRange], recordsRangeEnd);
   const monitorXAxisDomain = [recordsRangeEnd - timeRangeMs[timeRange], recordsRangeEnd] as [number, number];
+  const lastPoint = chartData.length > 0 ? chartData[chartData.length - 1] : null;
+  const hasDiskData = chartData.some((point) => point.disk !== null);
+  const hasTempData = chartData.some((point) => point.temp !== null);
 
   const gpuChartData = gpuRecords.map((r) => ({
     time: new Date(r.time).getTime(),
@@ -308,409 +369,567 @@ export default function Instance() {
     memory: r.mem_total > 0 ? Number(((r.mem_used / r.mem_total) * 100).toFixed(1)) : 0,
     temp: r.temperature || 0,
   }));
+  const lastGpuPoint = gpuChartData.length > 0 ? gpuChartData[gpuChartData.length - 1] : null;
 
-  const pingSeriesWithRecords = getPingSeriesWithRecords(pingSeries);
-  const pingChartRows = buildPingChartRows(pingSeriesWithRecords);
-  const pingYAxisDomain = getPingYAxisDomain(pingSeriesWithRecords);
-  const pingXAxisDomain = getPingTimeDomain(pingSeriesWithRecords, timeRangeHours[timeRange]);
+  const togglePingTask = (taskKey: string) => {
+    setSelectedPingKeys((current) => (
+      current.includes(taskKey) ? current.filter((key) => key !== taskKey) : [...current, taskKey]
+    ));
+  };
+
+  // 与 DetailsGrid 同口径的展示数据：字段一个不少，只是按系统 / 资源 / 网络分组横排。
+  const infoDisk = diskUsagePresentation(latest || undefined, client.disk_total);
+  const infoIpValue = `IPv4 ${formatIpSupport(client.has_ipv4, client.ipv4)} / IPv6 ${formatIpSupport(client.has_ipv6, client.ipv6)}`;
+  const normalizedRemark = client.public_remark?.trim();
+
+  const memTotal = resourceTotal(latest?.ram_total, client.mem_total);
+  const swapTotal = latest?.swap_total ?? client.swap_total;
+  const memUsedText = liveRecord && memTotal ? `${formatMetricBytes(liveRecord.ram)} / ${formatMetricBytes(memTotal)}` : formatMetricBytes(memTotal);
+  const swapUsedText = liveRecord && swapTotal ? `${formatMetricBytes(liveRecord.swap)} / ${formatMetricBytes(swapTotal)}` : formatMetricBytes(swapTotal);
+  const loadText = lastPoint && (lastPoint.load !== null || lastPoint.load5 !== null || lastPoint.load15 !== null)
+    ? formatLoadTriple(lastPoint.load, lastPoint.load5, lastPoint.load15) : '—';
+
+  // 实时网络 / 累计流量 / 配额进度（口径与首页 NodeCard 一致）。
+  const rtIn = metricNumber(liveRecord?.net_in ?? lastPoint?.net_in);
+  const rtOut = metricNumber(liveRecord?.net_out ?? lastPoint?.net_out);
+  const totalUp = metricNumber(liveRecord?.net_total_up);
+  const totalDown = metricNumber(liveRecord?.net_total_down);
+  const trafficLimit = client.traffic_limit > 0 ? client.traffic_limit : 0;
+  const trafficUsed = (() => {
+    if (!trafficLimit || totalUp === null || totalDown === null) return null;
+    switch (parseTrafficLimitType(client.traffic_limit_type)) {
+      case 'max': return Math.max(totalUp, totalDown);
+      case 'min': return Math.min(totalUp, totalDown);
+      case 'up': return totalUp;
+      case 'down': return totalDown;
+      default: return totalUp + totalDown;
+    }
+  })();
+  const trafficFraction = trafficLimit && trafficUsed !== null ? Math.min(1, trafficUsed / trafficLimit) : 0;
+  const lastUpdateText = latestRecordTime ? formatLastReport(latestRecordTime) : '—';
+
+  const miniH = isMobile ? 170 : miniChartHeight;
+  const pingH = isMobile ? 300 : pingChartHeight;
+
+  const miniXAxis = (
+    <XAxis
+      dataKey="time"
+      type="number"
+      domain={monitorXAxisDomain}
+      tickFormatter={chartTimeFormatter}
+      fontSize={11}
+      minTickGap={56}
+      tickLine={false}
+      axisLine={false}
+    />
+  );
+  const miniGrid = <CartesianGrid strokeDasharray="3 3" opacity={0.22} />;
+  const pct = (value: unknown) => `${Number(value).toFixed(1)}%`;
+  const pctTick = (value: unknown) => `${Number(value).toFixed(0)}%`;
+
+  const statusLabel = nodeStatus === 'online' ? `在线 · 已运行 ${formatMetricUptime(latest?.uptime)}` : nodeStatus === 'offline' ? '离线' : '确认中';
 
   return (
-    <div className="instance-page">
-      <div className="instance-shell">
-        <InstanceNodeSidebar
-          groups={groupedClients}
-          activeUuid={uuid || ''}
-          onlineSet={onlineSet}
-          statusReady={snapshotReady}
-          liveData={liveData?.data || {}}
-          onSelect={(nextUuid) => navigate(`/instance/${nextUuid}`)}
-        />
+    <div className="lp-inst-page">
+      <div className="lp-inst-inner">
+        <button type="button" className="lp-back" onClick={() => navigate('/')}>
+          <ChevronLeft size={14} /> 返回
+        </button>
 
-        <section className="instance-detail-panel">
-      {/* Top bar */}
-      <Flex justify="between" align="center" mb="4">
-        <Button variant="ghost" onClick={() => navigate('/')}>
-          <ArrowLeft size={16} /> 返回
-        </Button>
-      </Flex>
-
-      {/* Header + compact details */}
-      <Card className="instance-top-summary" mb="3">
-        <Flex align="center" gap="3" wrap="wrap" className="instance-top-summary-header">
-          <Server size={26} color="var(--accent-9)" />
-          <Heading size="5">{client.name}</Heading>
-          {client.region && <Badge color="gray"><Globe size={12} /> {client.region}</Badge>}
-          {client.group && <Badge color="purple"><Layers size={12} /> {client.group}</Badge>}
-          <Badge color={nodeStatus === 'online' ? 'green' : nodeStatus === 'offline' ? 'red' : 'gray'} variant="solid">
-            <Activity size={12} /> {nodeStatus === 'online' ? `在线 · 已运行 ${formatMetricUptime(latest?.uptime)}` : nodeStatus === 'offline' ? '离线' : '确认中'}
-          </Badge>
-          {nodeStatus === 'offline' && <Text size="1" color="gray">最后上报 {formatLastReport(latestRecordTime)} · 上报时已运行 {formatMetricUptime(latest?.uptime)}</Text>}
-        </Flex>
-        <DetailsGrid client={client} live={latest || undefined} compact remark={client.public_remark} />
-      </Card>
-
-      {/* Chart section */}
-      <Card mb="4">
-        {recordsError && <Flex align="center" gap="2" mb="2"><Text color="red" role="alert">{recordsError}</Text><Button size="1" variant="soft" onClick={() => void loadRecords(timeRange)}>重试</Button></Flex>}
-        {chartTab === 'gpu' && gpuError && <Flex align="center" gap="2" mb="2"><Text color="red" role="alert">{gpuError}</Text><Button size="1" variant="soft" onClick={() => setGpuRefresh(value => value + 1)}>重试 GPU 历史</Button></Flex>}
-        <Flex justify="between" align="center" mb="3" gap="3" wrap="wrap">
-          <Text weight="bold">监控图表 · {timeRange === '1h' ? '最近1小时' : timeRange === '4h' ? '最近4小时' : timeRange === '24h' ? '最近24小时' : '最近3天'}</Text>
-          <Flex align="center" gap="3" wrap="wrap">
-            <SegmentedControl.Root size="1" value={timeRange} onValueChange={handleTimeRangeChange}>
-              <SegmentedControl.Item value="1h">1小时</SegmentedControl.Item>
-              <SegmentedControl.Item value="4h">4小时</SegmentedControl.Item>
-              <SegmentedControl.Item value="24h">24小时</SegmentedControl.Item>
-              <SegmentedControl.Item value="3d">3天</SegmentedControl.Item>
-            </SegmentedControl.Root>
-            <Text size="1" color="gray">{records.length} 个数据点</Text>
-          </Flex>
-        </Flex>
-        <Tabs.Root value={chartTab} onValueChange={(value) => setChartTab(value as ChartTab)}>
-          <Flex justify="center" className="instance-chart-tabs">
-            <Tabs.List>
-              <Tabs.Trigger value="cpu">CPU</Tabs.Trigger>
-              <Tabs.Trigger value="ram">内存</Tabs.Trigger>
-              <Tabs.Trigger value="disk">磁盘</Tabs.Trigger>
-              <Tabs.Trigger value="network">网络</Tabs.Trigger>
-              <Tabs.Trigger value="connections">连接数</Tabs.Trigger>
-              <Tabs.Trigger value="process">进程数</Tabs.Trigger>
-              <Tabs.Trigger value="temp">温度</Tabs.Trigger>
-              {client.gpu_name && (
-                <Tabs.Trigger value="gpu">GPU</Tabs.Trigger>
+        {/* 概览：名称 + 节点切换 + 状态；下面横排 系统 / 资源 / 网络 三组 */}
+        <section className="lp-panel">
+          <header className="lp-panel-head">
+            <div className="lp-panel-headings">
+              <div className="lp-panel-title-row">
+                <Flag region={client.region} size={20} />
+                <h2 className="lp-panel-title">{client.name}</h2>
+                <LpNodeSwitcher groups={groupedClients} activeUuid={uuid || ''} onlineSet={onlineSet} statusReady={snapshotReady} onSelect={(next) => navigate(`/instance/${next}`)} />
+                <span className="lp-pill" data-status={nodeStatus}>
+                  <Activity size={12} aria-hidden /> {statusLabel}
+                </span>
+                {client.group && <span className="lp-pill is-muted">{client.group}</span>}
+              </div>
+              {nodeStatus === 'offline' && (
+                <p className="lp-panel-desc">最后上报 {formatLastReport(latestRecordTime)} · 上报时已运行 {formatMetricUptime(latest?.uptime)}</p>
               )}
-            </Tabs.List>
-          </Flex>
-
-          <Box pt="3">
-            {chartTab === 'disk' && <Text as="p" size="1" color="gray" mb="2">按上报时间记录，可能包含容器文件占用估算；同一次磁盘采样可出现在多次上报中。</Text>}
-            {(chartTab === 'temp' || chartTab === 'disk') && !recordsLoading && !recordsError && !chartData.some((point) => point[chartTab] !== null) ? (
-              <Flex align="center" justify="center" style={{ height: monitorChartHeight }}>
-                <Text role="status" color="gray">{chartTab === 'temp' ? '温度数据不可用' : '磁盘使用量数据不可用'}</Text>
-              </Flex>
-            ) : chartTab === 'gpu' && gpuLoading ? (
-              <Text role="status" color="gray">正在加载 GPU 历史…</Text>
-            ) : chartTab === 'gpu' && !gpuError && gpuRecords.length === 0 ? (
-              <Text role="status" color="gray">暂无 GPU 历史记录</Text>
-            ) : chartTab === 'gpu' && gpuError ? null : chartTab === 'gpu' ? (
-              <ResponsiveContainer width="100%" height={monitorChartHeight}>
-                <LineChart data={gpuChartData} margin={monitorChartMargin}>
-                  <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.3} />
-                  <XAxis
-                    dataKey="time"
-                    type="number"
-                    domain={monitorXAxisDomain}
-                    tickFormatter={chartTimeFormatter}
-                    fontSize={12}
-                    minTickGap={28}
-                    tickLine={false}
-                    axisLine={false}
-                  />
-                  <YAxis {...monitorYAxisProps} domain={[0, 100]} tickFormatter={(value) => `${value}%`} />
-                  <Tooltip
-                    {...chartTooltipProps}
-                    labelFormatter={chartTimeFormatter}
-                    formatter={(value: number, name) => [
-                      `${Number(value).toFixed(1)}${name === '温度 °C' ? ' °C' : '%'}`,
-                      name,
-                    ]}
-                  />
-                  <Line type="monotone" dataKey="utilization" stroke="var(--accent-9)" dot={false} strokeWidth={2} name="利用率 %" isAnimationActive={false} />
-                  <Line type="monotone" dataKey="memory" stroke="var(--green-9)" dot={false} strokeWidth={2} name="显存 %" isAnimationActive={false} />
-                  <Line type="monotone" dataKey="temp" stroke="var(--red-9)" dot={false} strokeWidth={2} name="温度 °C" isAnimationActive={false} />
-                </LineChart>
-              </ResponsiveContainer>
-            ) : chartTab === 'network' ? (
-              <ResponsiveContainer width="100%" height={monitorChartHeight}>
-                <AreaChart data={chartRenderData} margin={monitorChartMargin}>
-                  <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.3} />
-                  <XAxis
-                    dataKey="time"
-                    type="number"
-                    domain={monitorXAxisDomain}
-                    tickFormatter={chartTimeFormatter}
-                    fontSize={12}
-                    minTickGap={28}
-                    tickLine={false}
-                    axisLine={false}
-                  />
-                  <YAxis {...wideYAxisProps} tickFormatter={(value) => formatSpeed(Number(value))} unit="" />
-                  <Tooltip
-                    {...chartTooltipProps}
-                    labelFormatter={chartTimeFormatter}
-                    formatter={(value: number, name) => [formatSpeed(Number(value)), name]}
-                  />
-                  <Area type="monotone" dataKey="net_in" stroke="var(--green-9)" fill="var(--green-3)" fillOpacity={0.32} dot={false} name="下载" isAnimationActive={false} />
-                  <Area type="monotone" dataKey="net_out" stroke="var(--blue-9)" fill="var(--blue-3)" fillOpacity={0.32} dot={false} name="上传" isAnimationActive={false} />
-                </AreaChart>
-              </ResponsiveContainer>
-            ) : chartTab === 'connections' ? (
-              <ResponsiveContainer width="100%" height={monitorChartHeight}>
-                <LineChart data={chartRenderData} margin={monitorChartMargin}>
-                  <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.3} />
-                  <XAxis
-                    dataKey="time"
-                    type="number"
-                    domain={monitorXAxisDomain}
-                    tickFormatter={chartTimeFormatter}
-                    fontSize={12}
-                    minTickGap={28}
-                    tickLine={false}
-                    axisLine={false}
-                  />
-                  <YAxis {...wideYAxisProps} domain={['auto', 'auto']} allowDecimals={false} unit=" 个" />
-                  <Tooltip
-                    {...chartTooltipProps}
-                    labelFormatter={chartTimeFormatter}
-                    formatter={(value: number, name) => [Number(value).toFixed(0), name]}
-                  />
-                  <Line type="monotone" dataKey="connections" stroke="var(--accent-9)" dot={false} strokeWidth={2} name="TCP" isAnimationActive={false} />
-                  <Line type="monotone" dataKey="connections_udp" stroke="var(--cyan-9)" dot={false} strokeWidth={2} name="UDP" isAnimationActive={false} />
-                </LineChart>
-              </ResponsiveContainer>
-            ) : chartTab === 'process' ? (
-              <ResponsiveContainer width="100%" height={monitorChartHeight}>
-                <LineChart data={chartRenderData} margin={monitorChartMargin}>
-                  <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.3} />
-                  <XAxis
-                    dataKey="time"
-                    type="number"
-                    domain={monitorXAxisDomain}
-                    tickFormatter={chartTimeFormatter}
-                    fontSize={12}
-                    minTickGap={28}
-                    tickLine={false}
-                    axisLine={false}
-                  />
-                  <YAxis {...wideYAxisProps} domain={['auto', 'auto']} allowDecimals={false} unit=" 个" />
-                  <Tooltip
-                    {...chartTooltipProps}
-                    labelFormatter={chartTimeFormatter}
-                    formatter={(value: number) => [Number(value).toFixed(0), '进程数']}
-                  />
-                  <Line type="monotone" dataKey="process_count" stroke="var(--accent-9)" dot={false} strokeWidth={2} isAnimationActive={false} />
-                </LineChart>
-              </ResponsiveContainer>
-            ) : (
-              <ResponsiveContainer width="100%" height={monitorChartHeight}>
-                <LineChart data={chartRenderData} margin={monitorChartMargin}>
-                  <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.3} />
-                  <XAxis
-                    dataKey="time"
-                    type="number"
-                    domain={monitorXAxisDomain}
-                    tickFormatter={chartTimeFormatter}
-                    fontSize={12}
-                    minTickGap={28}
-                    tickLine={false}
-                    axisLine={false}
-                  />
-                  <YAxis
-                    {...monitorYAxisProps}
-                    domain={chartTab === 'temp' ? ['auto', 'auto'] : [0, 100]}
-                    tickFormatter={(value) => {
-                      if (chartTab === 'temp') return `${Number(value).toFixed(0)}°C`;
-                      return `${Number(value).toFixed(0)}%`;
-                    }}
-                  />
-                  <Tooltip
-                    {...chartTooltipProps}
-                    labelFormatter={chartTimeFormatter}
-                    formatter={(value: number) => {
-                      if (chartTab === 'temp') return [`${Number(value).toFixed(1)} °C`, '温度'];
-                      return [`${Number(value).toFixed(1)}%`, chartTab === 'cpu' ? 'CPU' : chartTab === 'ram' ? '内存' : '磁盘'];
-                    }}
-                  />
-                  <Line type="monotone" dataKey={chartTab} stroke="var(--accent-9)" dot={chartTab === 'temp' || chartTab === 'disk' ? { r: 2 } : false} connectNulls={false} strokeWidth={2} isAnimationActive={false} />
-                </LineChart>
-              </ResponsiveContainer>
-            )}
-          </Box>
-        </Tabs.Root>
-      </Card>
-
-      {/* Ping chart */}
-      <div ref={pingSectionRef}>
-      <Card mb="4">
-        <Flex justify="between" align="center" mb="3" gap="3" wrap="wrap">
-          <Text weight="bold">Ping 延迟</Text>
-          {pingSeries.length > 0 && (
-            <Text size="1" color="gray">
-              {pingSeriesWithRecords.length} / {pingSeries.length} 个任务有记录
-            </Text>
-          )}
-        </Flex>
-
-        {pingLoading ? (
-          <Loading />
-        ) : pingError ? (
-          <Text size="2" color="red" align="center" style={{ display: 'block', padding: '20px' }}>
-            {pingError}
-          </Text>
-        ) : pingSeries.length === 0 ? (
-          <Text size="2" color="gray" align="center" style={{ display: 'block', padding: '20px' }}>
-            暂无 Ping 任务
-          </Text>
-        ) : pingChartRows.length === 0 || pingSeriesWithRecords.length === 0 ? (
-          <Text size="2" color="gray" align="center" style={{ display: 'block', padding: '20px' }}>
-            暂无该节点的 Ping 记录
-          </Text>
-        ) : (
-          <>
-            <ResponsiveContainer width="100%" height={pingChartHeight}>
-              <LineChart data={pingChartRows} margin={monitorChartMargin}>
-                <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.3} />
-                <XAxis
-                  dataKey="time"
-                  type="number"
-                  domain={pingXAxisDomain}
-                  tickFormatter={chartTimeFormatter}
-                  fontSize={12}
-                  minTickGap={28}
-                  tickLine={false}
-                  axisLine={false}
-                />
-                <YAxis
-                  {...pingYAxisProps}
-                  domain={pingYAxisDomain}
-                  allowDecimals={false}
-                  tick={<PingYAxisTick />}
-                />
-                <Tooltip
-                  {...chartTooltipProps}
-                  labelFormatter={chartTimeFormatter}
-                  formatter={(value: number, name) => [
-                    formatPingMs(value),
-                    name,
-                  ]}
-                />
-                {pingSeriesWithRecords.map((item) => (
-                  <Line
-                    key={item.task.key}
-                    type="monotone"
-                    dataKey={item.task.key}
-                    name={item.task.label}
-                    stroke={item.task.color}
-                    strokeWidth={2.5}
-                    dot={false}
-                    connectNulls
-                    isAnimationActive={false}
-                  />
-                ))}
-              </LineChart>
-            </ResponsiveContainer>
-
-            <div className="instance-ping-series-grid">
-              {pingSeriesWithRecords.map((item) => {
-                const avg = getPingSeriesAverage(item.records);
-                return (
-                  <div
-                    key={item.task.key}
-                    className="instance-ping-series-item"
-                    style={{
-                      borderColor: item.task.color,
-                      background: `color-mix(in srgb, ${item.task.color} 9%, var(--color-panel-solid))`,
-                    }}
-                    title={`${item.task.type} ${item.task.target}`}
-                  >
-                    <Flex align="center" gap="2" style={{ minWidth: 0 }}>
-                      <span
-                        aria-hidden="true"
-                        style={{
-                          width: 8,
-                          height: 8,
-                          borderRadius: 999,
-                          background: item.task.color,
-                          flexShrink: 0,
-                        }}
-                      />
-                      <Text size="1" weight="bold" truncate style={{ color: item.task.color }}>
-                        {item.task.label}
-                      </Text>
-                    </Flex>
-                    <Text size="1" color="gray" className="instance-ping-series-stat">
-                      {avg === null ? '全部超时' : `平均 ${formatPingMs(avg)}`}
-                    </Text>
-                  </div>
-                );
-              })}
             </div>
-          </>
-        )}
-      </Card>
-      </div>
+          </header>
 
+          <div className="lp-info-groups">
+            <div className="lp-info-group">
+              <div className="lp-info-group-title">系统</div>
+              <LpInfoRow label="CPU" value={formatCpuSpec(client.cpu_name, client.cpu_cores)} />
+              <LpInfoRow label="架构" value={client.arch || '-'} />
+              <LpInfoRow label="虚拟化" value={client.virtualization || '-'} />
+              <LpInfoRow label="操作系统" value={client.os || '-'} />
+              <LpInfoRow label="内核" value={client.kernel_version || '-'} />
+              <LpInfoRow label="GPU" value={client.gpu_name || '-'} />
+            </div>
+
+            <div className="lp-info-group">
+              <div className="lp-info-group-title">资源</div>
+              <LpInfoRow label="内存" value={memUsedText} />
+              <LpInfoRow label="交换空间" value={swapTotal ? swapUsedText : '无'} />
+              <LpInfoRow label="磁盘" value={infoDisk.estimated ? infoDisk.detail : formatMetricBytes(resourceTotal(latest?.disk_total, client.disk_total))} />
+              <LpInfoRow label="负载" value={loadText} />
+              <LpInfoRow label="运行时长" value={formatMetricUptime(latest?.uptime)} />
+              <LpInfoRow label="Agent" value={client.version || '-'} />
+              {infoDisk.estimated && <p className="lp-info-note">{infoDisk.description} {infoDisk.sampleLabel}</p>}
+            </div>
+
+            <div className="lp-info-group">
+              <div className="lp-info-group-title">网络</div>
+              <LpInfoRow label="实时网络" value={rtIn === null && rtOut === null ? '—' : `↓ ${formatMetricSpeed(rtIn)} · ↑ ${formatMetricSpeed(rtOut)}`} />
+              <LpInfoRow label="最近更新" value={lastUpdateText} />
+              <LpInfoRow label="IP 支持" value={infoIpValue} />
+              <LpInfoRow label="地区" value={client.region || '-'} />
+              {normalizedRemark && <LpInfoRow label="备注" value={normalizedRemark} />}
+              <div className="lp-info-item is-stack">
+                <span className="lp-info-label">累计流量</span>
+                <span className="lp-info-value">
+                  {totalUp === null || totalDown === null ? '—' : `↑ ${formatMetricBytes(totalUp)} · ↓ ${formatMetricBytes(totalDown)}`}
+                </span>
+                {trafficLimit > 0 && (
+                  <>
+                    <div className="lp-progress" aria-hidden><span style={{ width: `${trafficFraction * 100}%` }} /></div>
+                    <span className="lp-info-note">
+                      {trafficUsed === null ? '—' : formatMetricBytes(trafficUsed)} / {formatTrafficLimitLabel(client.traffic_limit, client.traffic_limit_type)}
+                    </span>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
         </section>
+
+        {/* 负载 | Ping 切换 + 时间档位 */}
+        <div className="lp-controls">
+          <div className="lp-seg" role="group" aria-label="图表类型">
+            <button type="button" data-active={viewTab === 'load'} aria-pressed={viewTab === 'load'} onClick={() => setViewTab('load')}>负载</button>
+            <button type="button" data-active={viewTab === 'ping'} aria-pressed={viewTab === 'ping'} onClick={() => setViewTab('ping')}>Ping</button>
+          </div>
+          <div className="lp-seg is-scroll" role="group" aria-label="时间范围">
+            {(Object.keys(timeRangeLabel) as TimeRange[]).map((range) => (
+              <button key={range} type="button" data-active={timeRange === range} aria-pressed={timeRange === range} onClick={() => handleTimeRangeChange(range)}>
+                {timeRangeLabel[range]}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {viewTab === 'load' ? (
+          <section className="lp-panel lp-chart-panel">
+            <header className="lp-panel-head is-center">
+              <h2 className="lp-panel-title">负载图表</h2>
+              <div className="lp-head-meta">
+                <span className="lp-meta-chip">覆盖 <strong>{timeRangeLabel[timeRange]}</strong></span>
+                <span className="lp-meta-chip">采样 <strong>{recordsLoading ? '…' : records.length}</strong> 个点</span>
+                <button type="button" className="lp-tool-btn" onClick={() => void loadRecords(timeRange)} disabled={recordsLoading} aria-busy={recordsLoading}>
+                  <RefreshCw size={14} aria-hidden /> {recordsLoading ? '刷新中' : '刷新'}
+                </button>
+              </div>
+            </header>
+
+            {recordsError && <Flex align="center" gap="2" mb="3"><Text color="red" role="alert">{recordsError}</Text><Button size="1" variant="soft" onClick={() => void loadRecords(timeRange)}>重试</Button></Flex>}
+            {gpuError && <Flex align="center" gap="2" mb="3"><Text color="red" role="alert">{gpuError}</Text><Button size="1" variant="soft" onClick={() => setGpuRefresh(value => value + 1)}>重试 GPU 历史</Button></Flex>}
+
+            <div className="lp-chart-grid" data-count={6 + (hasTempData ? 1 : 0) + (client.gpu_name ? 1 : 0)}>
+              <LpMetricCard loading={recordsLoading} height={miniH} icon={<Cpu size={14} />} accent="var(--lp-cpu)" title="CPU" value={lastPoint ? pct(lastPoint.cpu) : '—'} sub="使用率">
+                <LpAreaChart id="cpu" data={chartRenderData} height={miniH} margin={miniChartMargin} grid={miniGrid} xAxis={miniXAxis}
+                  yProps={{ ...lpYAxis, domain: [0, 100], tickFormatter: pctTick }} labelFormatter={chartTimeFormatter}
+                  series={[{ key: 'cpu', name: 'CPU', color: 'var(--lp-cpu)', band: true, format: pct }]} />
+              </LpMetricCard>
+
+              <LpMetricCard loading={recordsLoading} height={miniH} icon={<MemoryStick size={14} />} accent="var(--lp-mem)" title="内存" value={lastPoint ? pct(lastPoint.ram) : '—'} sub={liveRecord && memTotal ? memUsedText : undefined}>
+                <LpAreaChart id="mem" data={chartRenderData} height={miniH} margin={miniChartMargin} grid={miniGrid} xAxis={miniXAxis}
+                  yProps={{ ...lpYAxis, domain: [0, 100], tickFormatter: pctTick }} labelFormatter={chartTimeFormatter}
+                  series={[{ key: 'ram', name: '内存', color: 'var(--lp-mem)', band: true, format: pct }]} />
+              </LpMetricCard>
+
+              <LpMetricCard loading={recordsLoading} height={miniH}
+                icon={<HardDrive size={14} />} accent="var(--lp-disk)" title="磁盘"
+                value={lastPoint?.disk !== null && lastPoint?.disk !== undefined ? pct(lastPoint.disk) : '—'}
+                sub={infoDisk.estimated ? infoDisk.detail : '已用空间'}
+                note="按上报时间记录，可能包含容器文件占用估算；同一次磁盘采样可出现在多次上报中。"
+              >
+                {!recordsLoading && !recordsError && !hasDiskData ? (
+                  <Flex align="center" justify="center" style={{ height: miniH }}><Text role="status" color="gray">磁盘使用量数据不可用</Text></Flex>
+                ) : (
+                  <LpAreaChart id="disk" data={chartRenderData} height={miniH} margin={miniChartMargin} grid={miniGrid} xAxis={miniXAxis}
+                    yProps={{ ...lpYAxis, domain: [0, 100], tickFormatter: pctTick }} labelFormatter={chartTimeFormatter}
+                    series={[{ key: 'disk', name: '磁盘', color: 'var(--lp-disk)', band: true, dots: true, format: pct }]} />
+                )}
+              </LpMetricCard>
+
+              <LpMetricCard loading={recordsLoading} height={miniH} icon={<Network size={14} />} accent="var(--lp-net)" title="网络"
+                value={lastPoint ? `↓ ${formatSpeed(lastPoint.net_in)} · ↑ ${formatSpeed(lastPoint.net_out)}` : '—'}
+                sub={totalUp !== null && totalDown !== null ? `累计 ↓ ${formatMetricBytes(totalDown)} · ↑ ${formatMetricBytes(totalUp)}` : undefined}>
+                <LpAreaChart id="net" data={chartRenderData} height={miniH} margin={miniChartMargin} grid={miniGrid} xAxis={miniXAxis}
+                  yProps={{ ...lpYAxisWide, tickFormatter: (value: unknown) => formatSpeed(Number(value)) }} labelFormatter={chartTimeFormatter}
+                  series={[
+                    { key: 'net_in', name: '下载', color: 'var(--lp-net)', format: (v) => formatSpeed(Number(v)) },
+                    { key: 'net_out', name: '上传', color: 'var(--lp-net-up)', format: (v) => formatSpeed(Number(v)) },
+                  ]} />
+              </LpMetricCard>
+
+              <LpMetricCard loading={recordsLoading} height={miniH} icon={<Cable size={14} />} accent="var(--lp-conn)" title="连接数"
+                value={lastPoint ? `TCP ${Number(lastPoint.connections).toFixed(0)} / UDP ${Number(lastPoint.connections_udp).toFixed(0)}` : '—'} sub="连接">
+                <LpAreaChart id="conn" data={chartRenderData} height={miniH} margin={miniChartMargin} grid={miniGrid} xAxis={miniXAxis}
+                  yProps={{ ...lpYAxis, domain: ['auto', 'auto'], allowDecimals: false }} labelFormatter={chartTimeFormatter}
+                  series={[
+                    { key: 'connections', name: 'TCP', color: 'var(--lp-conn)', format: (v) => Number(v).toFixed(0) },
+                    { key: 'connections_udp', name: 'UDP', color: 'var(--lp-conn-udp)', format: (v) => Number(v).toFixed(0) },
+                  ]} />
+              </LpMetricCard>
+
+              <LpMetricCard loading={recordsLoading} height={miniH} icon={<Activity size={14} />} accent="var(--lp-proc)" title="进程"
+                value={lastPoint ? Number(lastPoint.process_count).toFixed(0) : '—'} sub={loadText !== '—' ? `负载 ${loadText}` : undefined}>
+                <LpAreaChart id="proc" data={chartRenderData} height={miniH} margin={miniChartMargin} grid={miniGrid} xAxis={miniXAxis}
+                  yProps={{ ...lpYAxis, domain: ['auto', 'auto'], allowDecimals: false }} labelFormatter={chartTimeFormatter}
+                  series={[{ key: 'process_count', name: '进程数', color: 'var(--lp-proc)', format: (v) => Number(v).toFixed(0) }]} />
+              </LpMetricCard>
+
+              {hasTempData && (
+                <LpMetricCard loading={recordsLoading} height={miniH} icon={<Thermometer size={14} />} accent="var(--lp-temp)" title="温度"
+                  value={lastPoint?.temp !== null && lastPoint?.temp !== undefined ? `${Number(lastPoint.temp).toFixed(1)} °C` : '—'} sub="CPU / SoC">
+                  <LpAreaChart id="temp" data={chartRenderData} height={miniH} margin={miniChartMargin} grid={miniGrid} xAxis={miniXAxis}
+                    yProps={{ ...lpYAxis, domain: ['auto', 'auto'], tickFormatter: (value: unknown) => `${Number(value).toFixed(0)}°C` }} labelFormatter={chartTimeFormatter}
+                    series={[{ key: 'temp', name: '温度', color: 'var(--lp-temp)', band: true, dots: true, format: (v) => `${Number(v).toFixed(1)} °C` }]} />
+                </LpMetricCard>
+              )}
+
+              {client.gpu_name && (
+                <LpMetricCard icon={<MonitorSpeaker size={14} />} accent="var(--lp-gpu)" title="GPU"
+                  value={lastGpuPoint ? pct(lastGpuPoint.utilization) : '—'} sub={client.gpu_name}>
+                  {gpuLoading ? (
+                    <Flex align="center" justify="center" style={{ height: miniH }}><Text role="status" color="gray">正在加载 GPU 历史…</Text></Flex>
+                  ) : !gpuError && gpuRecords.length === 0 ? (
+                    <Flex align="center" justify="center" style={{ height: miniH }}><Text role="status" color="gray">暂无 GPU 历史记录</Text></Flex>
+                  ) : gpuError ? null : (
+                    <LpAreaChart id="gpu" data={gpuChartData} height={miniH} margin={miniChartMargin} grid={miniGrid} xAxis={miniXAxis}
+                      yProps={{ ...lpYAxis, domain: [0, 100], tickFormatter: pctTick }} labelFormatter={chartTimeFormatter}
+                      series={[
+                        { key: 'utilization', name: '利用率 %', color: 'var(--lp-gpu)', format: pct },
+                        { key: 'memory', name: '显存 %', color: 'var(--lp-net)', format: pct },
+                        { key: 'temp', name: '温度 °C', color: 'var(--lp-temp)', fill: false, format: (v) => `${Number(v).toFixed(1)} °C` },
+                      ]} />
+                  )}
+                </LpMetricCard>
+              )}
+            </div>
+          </section>
+        ) : (
+          <div ref={pingSectionRef}>
+            <section className="lp-panel lp-chart-panel lp-ping-panel">
+              <header className="lp-panel-head is-center">
+                <div className="lp-panel-headings">
+                  <h2 className="lp-panel-title">Ping 图表</h2>
+                  <p className="lp-panel-desc">
+                    覆盖 {timeRangeLabel[timeRange]}
+                    {pingSeries.length > 0 && ` · ${pingSeriesWithRecords.length} / ${pingSeries.length} 个任务有记录`}
+                  </p>
+                </div>
+                <div className="lp-head-meta">
+                  <LpSwitch label="削峰平滑" title="剔除与邻近点相差过大的尖峰，再做平滑" active={pingCutPeak} onToggle={() => setPingCutPeak((v) => !v)} />
+                  <LpSwitch label="断点连线" title="关闭：缺口用虚线连接、孤立点画成圆点，如实显示哪里没有数据；开启：缺口一律用实线连成完整曲线" active={pingConnectGaps} onToggle={() => setPingConnectGaps((v) => !v)} />
+                  {selectedPingKeys.length > 0 && (
+                    <button type="button" className="lp-tool-btn" onClick={() => setSelectedPingKeys([])}>
+                      <Eye size={14} aria-hidden /> 显示全部
+                    </button>
+                  )}
+                  <button type="button" className="lp-tool-btn" onClick={() => setPingRefresh((v) => v + 1)} disabled={pingLoading} aria-busy={pingLoading}>
+                    <RefreshCw size={14} aria-hidden /> {pingLoading ? '刷新中' : '刷新'}
+                  </button>
+                </div>
+              </header>
+
+              {pingLoading || !shouldLoadPing ? (
+                <LpChartLoading height={pingH + 52} />
+              ) : pingError ? (
+                <p className="lp-empty" role="alert">{pingError}</p>
+              ) : pingSeries.length === 0 ? (
+                <p className="lp-empty">暂无 Ping 任务</p>
+              ) : pingSeriesWithRecords.length === 0 ? (
+                <p className="lp-empty">暂无该节点的 Ping 记录</p>
+              ) : (
+                <>
+                  <div className="lp-ping-tasks" data-filtered={selectedPingKeys.length > 0}>
+                    {pingSeriesWithRecords.map((item) => {
+                      const selected = selectedPingKeys.includes(item.task.key);
+                      const filtered = selectedPingKeys.length > 0;
+                      const lastValid = [...item.records].reverse().find((r) => Number.isFinite(Number(r.value)) && Number(r.value) >= 0);
+                      const latestMs = lastValid ? Number(lastValid.value) : null;
+                      const lossRate = getPingLossRate(item.records);
+                      const p75 = getPingSeriesP75(item.records);
+                      return (
+                        <button
+                          key={item.task.key}
+                          type="button"
+                          className="lp-ping-task"
+                          data-selected={selected}
+                          data-dim={filtered && !selected}
+                          aria-pressed={selected}
+                          onClick={() => togglePingTask(item.task.key)}
+                          style={{ borderColor: !filtered || selected ? item.task.color : undefined }}
+                          title={`${item.task.type} ${item.task.target}\n最新 ${formatPingMs(latestMs)} · P75 ${p75 === null ? '-' : formatPingMs(p75)} · 丢包 ${formatPingLossRate(lossRate)}\n点击只显示这一条，可多选`}
+                        >
+                          <span className="lp-pt-dot" style={{ background: item.task.color }} aria-hidden />
+                          <span className="lp-pt-name">{item.task.label}</span>
+                          <span className="lp-pt-primary" style={{ color: latencyHeatColor(latestMs) }}>{latestMs === null ? '—' : `${latestMs.toFixed(1)} ms`}</span>
+                          <span className="lp-pt-loss" style={{ color: lossHeatColor(lossRate) }}>{formatPingLossRate(lossRate)}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="lp-ping-chart">
+                    <ResponsiveContainer width="100%" height={pingH}>
+                      <LineChart data={pingChartRows} margin={pingChartMargin}>
+                        <CartesianGrid strokeDasharray="3 3" opacity={0.22} />
+                        <XAxis
+                          dataKey="time"
+                          type="number"
+                          domain={pingXAxisDomain}
+                          tickFormatter={chartTimeFormatter}
+                          fontSize={11}
+                          minTickGap={48}
+                          tickLine={false}
+                          axisLine={false}
+                        />
+                        <YAxis
+                          {...lpYAxisBase}
+                          width={56}
+                          domain={pingYAxis.domain}
+                          ticks={pingYAxis.ticks}
+                          interval={0}
+                          allowDecimals={false}
+                          tick={<PingYAxisTick />}
+                        />
+                        <Tooltip
+                          {...chartTooltipProps}
+                          labelFormatter={chartTimeFormatter}
+                          itemSorter={(item) => Number(item.value ?? 0)}
+                          formatter={(value, name) => [formatPingMs(Number(value)), name]}
+                        />
+                        {visiblePingSeries.flatMap((item) => {
+                          const { key, color, label } = item.task;
+                          const isolated = pingGapLayers.isolated.get(key);
+                          return [
+                            // 缺口：虚线（只在「断点连线」关闭时才有这一层）
+                            !pingConnectGaps && (
+                              <Line
+                                key={`${key}-dash`}
+                                type="linear"
+                                dataKey={pingDashKey(key)}
+                                stroke={color}
+                                strokeOpacity={0.55}
+                                strokeWidth={1.5}
+                                strokeDasharray="4 4"
+                                dot={false}
+                                activeDot={false}
+                                connectNulls={false}
+                                isAnimationActive={false}
+                                legendType="none"
+                                tooltipType="none"
+                              />
+                            ),
+                            // 有数据的区段：实线（缺口内的插值只用于画线，tooltip 不读）
+                            <Line
+                              key={`${key}-solid`}
+                              type="monotone"
+                              dataKey={pingSolidKey(key)}
+                              stroke={color}
+                              strokeWidth={2}
+                              dot={false}
+                              activeDot={false}
+                              connectNulls={false}
+                              isAnimationActive={false}
+                              legendType="none"
+                              tooltipType="none"
+                            />,
+                            // 真实采样值：不画线，只负责孤立点的圆点、悬停高亮和 tooltip
+                            <Line
+                              key={`${key}-raw`}
+                              type="monotone"
+                              dataKey={key}
+                              name={label}
+                              stroke={color}
+                              strokeOpacity={0}
+                              dot={(dotProps: { cx?: number; cy?: number; payload?: { time?: number }; index?: number }) => {
+                                const { cx, cy, payload, index } = dotProps;
+                                const keyId = `${key}-dot-${index ?? payload?.time}`;
+                                if (cx === undefined || cy === undefined || !payload?.time || !isolated?.has(payload.time)) {
+                                  return <g key={keyId} />;
+                                }
+                                return <circle key={keyId} cx={cx} cy={cy} r={3} fill={color} stroke="var(--lp-surface)" strokeWidth={1} />;
+                              }}
+                              activeDot={{ r: 3.5, fill: color, stroke: 'var(--lp-surface)', strokeWidth: 1 }}
+                              connectNulls={false}
+                              isAnimationActive={false}
+                            />,
+                          ];
+                        })}
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </>
+              )}
+            </section>
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
-function InstanceNodeSidebar({
-  groups,
-  activeUuid,
-  onlineSet,
-  statusReady,
-  liveData,
-  onSelect,
-}: {
+function LpInfoRow({ label, value }: { label: string; value: React.ReactNode }) {
+  const title = typeof value === 'string' || typeof value === 'number' ? String(value) : undefined;
+  return (
+    <div className="lp-info-item">
+      <span className="lp-info-label">{label}</span>
+      <span className="lp-info-value" title={title}>{value || '-'}</span>
+    </div>
+  );
+}
+
+function LpSwitch({ label, title, active, disabled, onToggle }: { label: string; title?: string; active: boolean; disabled?: boolean; onToggle: () => void }) {
+  return (
+    <button type="button" className="lp-tool-btn lp-switch" data-active={active && !disabled} aria-pressed={active} disabled={disabled} title={title} onClick={onToggle}>
+      <span>{label}</span>
+      <span className="lp-switch-track" aria-hidden><span className="lp-switch-thumb" /></span>
+      <span className="lp-switch-state">{active ? '开启' : '关闭'}</span>
+    </button>
+  );
+}
+
+function LpChartLoading({ height, text = '加载中…' }: { height: number; text?: string }) {
+  return (
+    <div className="lp-chart-loading" style={{ height }} role="status" aria-busy="true">
+      <span className="lp-spinner" aria-hidden />
+      <span>{text}</span>
+    </div>
+  );
+}
+
+function LpMetricCard({ icon, accent, title, value, sub, note, loading, height, children }: {
+  icon: React.ReactNode; accent: string; title: string; value: string; sub?: string; note?: string;
+  /** 只让图表区显示加载态，标题和数值保持不动 */
+  loading?: boolean; height?: number; children: React.ReactNode;
+}) {
+  return (
+    <section className="lp-mc" aria-label={title} style={{ ['--lp-accent' as string]: accent }}>
+      <header className="lp-mc-head">
+        <span className="lp-mc-title">{icon}{title}</span>
+        <span className="lp-mc-values">
+          <span className="lp-mc-value" title={value}>{value}</span>
+          {sub && <span className="lp-mc-sub" title={sub}>{sub}</span>}
+        </span>
+      </header>
+      {note && <p className="lp-mc-note">{note}</p>}
+      <div className="lp-mc-body">{loading ? <LpChartLoading height={height ?? 200} /> : children}</div>
+    </section>
+  );
+}
+
+type LpSeriesSpec = {
+  key: string;
+  name: string;
+  color: string;
+  /** 画 xxx_min / xxx_max 两条淡线（聚合桶的极值带） */
+  band?: boolean;
+  dots?: boolean;
+  fill?: boolean;
+  format: (value: unknown) => string;
+};
+
+function LpAreaChart({ id, data, height, margin, grid, xAxis, yProps, labelFormatter, series }: {
+  id: string;
+  data: object[];
+  height: number;
+  margin: { top: number; right: number; bottom: number; left: number };
+  grid: React.ReactElement;
+  xAxis: React.ReactElement;
+  yProps: React.ComponentProps<typeof YAxis>;
+  labelFormatter: (value: unknown) => string;
+  series: LpSeriesSpec[];
+}) {
+  const byName = new Map(series.map((item) => [item.name, item]));
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <ComposedChart data={data} margin={margin}>
+        <defs>
+          {series.map((item) => (
+            <linearGradient key={item.key} id={`lp-fill-${id}-${item.key}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" style={{ stopColor: item.color, stopOpacity: 0.34 }} />
+              <stop offset="100%" style={{ stopColor: item.color, stopOpacity: 0.02 }} />
+            </linearGradient>
+          ))}
+        </defs>
+        {grid}
+        {xAxis}
+        <YAxis {...yProps} />
+        <Tooltip
+          {...chartTooltipProps}
+          labelFormatter={labelFormatter}
+          formatter={(value: number, name) => [byName.get(String(name))?.format(value) ?? String(value), name]}
+        />
+        {series.filter((item) => item.band).flatMap((item) => [
+          <Line key={`${item.key}-max`} type="monotone" dataKey={`${item.key}_max`} stroke={item.color} strokeOpacity={0.28} dot={false} strokeWidth={1} isAnimationActive={false} legendType="none" tooltipType="none" />,
+          <Line key={`${item.key}-min`} type="monotone" dataKey={`${item.key}_min`} stroke={item.color} strokeOpacity={0.28} dot={false} strokeWidth={1} isAnimationActive={false} legendType="none" tooltipType="none" />,
+        ])}
+        {series.map((item) => (
+          <Area
+            key={item.key}
+            type="monotone"
+            dataKey={item.key}
+            name={item.name}
+            stroke={item.color}
+            strokeWidth={1.8}
+            fill={item.fill === false ? 'none' : `url(#lp-fill-${id}-${item.key})`}
+            dot={item.dots ? { r: 2 } : false}
+            activeDot={{ r: 3.5 }}
+            connectNulls={false}
+            isAnimationActive={false}
+          />
+        ))}
+      </ComposedChart>
+    </ResponsiveContainer>
+  );
+}
+
+function LpNodeSwitcher({ groups, activeUuid, onlineSet, statusReady, onSelect }: {
   groups: Array<{ group: string; nodes: ClientInfo[] }>;
   activeUuid: string;
   onlineSet: Set<string>;
   statusReady: boolean;
-  liveData: Record<string, Partial<PublicMonitorRecord>>;
   onSelect: (uuid: string) => void;
 }) {
-  const total = groups.reduce((sum, group) => sum + group.nodes.length, 0);
-
+  if (groups.length === 0) return null;
   return (
-    <aside className="instance-node-sidebar" aria-label="节点列表">
-      <Card className="instance-node-sidebar-card">
-        <Flex direction="column" style={{ height: '100%', minHeight: 0 }}>
-          <Flex justify="between" align="center" className="instance-sidebar-header">
-            <Box>
-              <Text size="2" weight="bold" style={{ display: 'block' }}>节点列表</Text>
-              <Text size="1" color="gray">{statusReady ? onlineSet.size : '—'} / {total} 在线</Text>
-            </Box>
-          </Flex>
-
-          <Box className="instance-sidebar-scroll">
-            {groups.map((group) => (
-              <Box key={group.group}>
-                <div className="instance-sidebar-group">
-                  {group.group} ({group.nodes.length})
-                </div>
-                {group.nodes.map((node) => {
-                  const isActive = node.uuid === activeUuid;
-                  const isOnline = onlineSet.has(node.uuid);
-                  const live = liveData[node.uuid];
-
-                  return (
-                    <button
-                      key={node.uuid}
-                      type="button"
-                      className={`instance-sidebar-node${isActive ? ' is-active' : ''}`}
-                      onClick={() => onSelect(node.uuid)}
-                      title={node.name}
-                    >
-                      <span
-                        className={`instance-sidebar-status${isOnline ? ' is-online' : statusReady ? ' is-offline' : ''}`}
-                        aria-hidden="true"
-                      />
-                      <Flag region={node.region} size={16} />
-                      <span className="instance-sidebar-node-main">
-                        <span className="instance-sidebar-node-name">{node.name}</span>
-                        <span className="instance-sidebar-node-meta">
-                          {isOnline ? `CPU ${typeof live?.cpu === 'number' ? `${live.cpu.toFixed(0)}%` : '—'}` : statusReady ? '离线' : '确认中'}
-                        </span>
-                      </span>
-                    </button>
-                  );
-                })}
-              </Box>
-            ))}
-          </Box>
-        </Flex>
-      </Card>
-    </aside>
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger>
+        <button type="button" className="lp-switch-trigger" aria-label="切换节点" title="切换节点">
+          <ChevronDown size={14} aria-hidden />
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Content size="1" align="start" className="lp-switch-menu">
+        {groups.map((group) => (
+          <div key={group.group}>
+            <DropdownMenu.Label>{group.group} ({group.nodes.length})</DropdownMenu.Label>
+            {group.nodes.map((node) => {
+              const online = onlineSet.has(node.uuid);
+              return (
+                <DropdownMenu.Item key={node.uuid} onSelect={() => onSelect(node.uuid)}>
+                  <span className={`lp-switch-dot${online ? ' is-online' : statusReady ? ' is-offline' : ''}`} aria-hidden />
+                  <Flag region={node.region} size={14} />
+                  <span className="lp-switch-name">{node.name}</span>
+                  {node.uuid === activeUuid && <Check size={13} aria-hidden />}
+                </DropdownMenu.Item>
+              );
+            })}
+          </div>
+        ))}
+      </DropdownMenu.Content>
+    </DropdownMenu.Root>
   );
 }

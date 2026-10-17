@@ -10,6 +10,8 @@ export type MonitorReportPayload = JsonObject & {
   swap: number;
   swap_total: number;
   load: number | null;
+  load5: number | null;
+  load15: number | null;
   temp: number | null;
   disk: number | null;
   disk_total: number | null;
@@ -131,6 +133,8 @@ export function normalizeMonitorReport(input: unknown): MonitorReportPayload {
     swap: boundedNumber(0, MAX_COUNTER_VALUE, report.swap, swap.used),
     swap_total: boundedNumber(0, MAX_COUNTER_VALUE, report.swap_total, swap.total),
     load: boundedNullableNumber(0, MAX_LOAD_VALUE, report.load, load.load1),
+    load5: boundedNullableNumber(0, MAX_LOAD_VALUE, report.load5),
+    load15: boundedNullableNumber(0, MAX_LOAD_VALUE, report.load15),
     temp: measuredTemperature(report.temp),
     disk: boundedNullableNumber(0, MAX_COUNTER_VALUE, report.disk, disk.used),
     disk_total: boundedNullableNumber(0, MAX_COUNTER_VALUE, report.disk_total, disk.total),
@@ -180,6 +184,8 @@ export function toMonitorRecord(client: string, time: string, input: unknown): M
     swap: report.swap || 0,
     swap_total: report.swap_total || 0,
     load: report.load ?? null,
+    load5: report.load5 ?? null,
+    load15: report.load15 ?? null,
     temp: report.temp,
     disk: report.disk ?? 0,
     disk_total: diskAvailable ? report.disk_total || 0 : 0,

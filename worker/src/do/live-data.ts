@@ -100,6 +100,12 @@ const VIEWER_DEFAULT_TTL_MS = 120 * 1000;
 const VIEWER_MAX_TOTAL_SESSIONS = 128;
 const VIEWER_MAX_SESSIONS_PER_IP = 8;
 const PING_RESULT_STORAGE_PREFIX = 'ping-result:';
+// 「值没变就不落库」的省存储压缩。默认关闭：24h 内的 Ping 历史按落库间隔全量保存，
+// 详情页 4h 直接画原始点、12h/24h 用 120s 分桶（见 routes/public.ts historyBucketSec），
+// 容量估算（utils/capacity-estimate.ts）也是按「每个到期间隔写一行」算的。
+// 打开后：与上次落库值相差 <5ms 的结果会被整批丢掉，延迟稳定的任务每 30 分钟才剩一个点，
+// 曲线会非常稀疏，且无法区分「延迟没变」和「探针没上报」。
+const PING_DEDUPE_UNCHANGED = false;
 const PING_VALUE_CHANGE_THRESHOLD_MS = 5;
 const PING_UNCHANGED_HEARTBEAT_MS = 30 * 60_000;
 const GPU_SNAPSHOT_META_PREFIX = 'gpu-snapshot-meta:';
@@ -2592,6 +2598,7 @@ export class LiveDataDO {
   }
 
   private shouldPersistPingResult(result: PingPersistenceResult, state: PingResultState, nowMs: number): boolean {
+    if (!PING_DEDUPE_UNCHANGED) return true;
     const previousValue = Number(state.value);
     const previousPersistedAt = Number(state.persistedAt || 0);
     if (!Number.isFinite(previousValue) || !Number.isFinite(previousPersistedAt) || previousPersistedAt <= 0) {

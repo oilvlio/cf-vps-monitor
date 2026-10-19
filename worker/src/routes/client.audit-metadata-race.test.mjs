@@ -21,7 +21,7 @@ async function reportAcrossAdminChange(action, basic) {
     getSetting: async () => null, setSetting: async () => {},
     updateClient: async () => {}, markClientTokenUsed: async () => {},
     insertAuditLog: async () => {}, tryClaimAuditThrottle: async () => true,
-    listPingTasks: async () => [], listAgentWebsiteProbeTasks: async () => [],
+    listPingTasks: async () => [],
   } });
   const { LiveDataDO } = loader.load('worker/src/do/live-data.ts');
   const object = new LiveDataDO(storage.state, {});

@@ -26,13 +26,13 @@ function derivedCapacity(capacity, settings = capacitySettings) {
   return productionSelected('src/pages/admin/SettingsGeneral.tsx', 'derived', { capacity, settings, originalSettings: capacitySettings })();
 }
 
-test('AUD-07 partial maintenance reports remaining work and counts website checks', async () => {
+test('AUD-07 partial maintenance reports remaining work and counts ping records', async () => {
   for (const hasMore of [true, false]) {
     let requests = 0;
     const messages = [];
     const cleanup = productionDeclaration('src/pages/admin/SettingsGeneral.tsx', 'handleMaintenanceCleanup', {
       setCleaning() {}, refreshCapacity: async () => true,
-      apiFetch: async () => { requests += 1; if (requests > 1) throw new Error('Unexpected client cleanup loop'); return { success: true, has_more: hasMore, deleted: { records: 1, website_checks: 2 } }; },
+      apiFetch: async () => { requests += 1; if (requests > 1) throw new Error('Unexpected client cleanup loop'); return { success: true, has_more: hasMore, deleted: { records: 1, ping_records: 2 } }; },
       formatInteger: productionDeclaration('src/pages/admin/SettingsGeneral.tsx', 'formatInteger'),
       toast: { info: message => messages.push(['info', message]), success: message => messages.push(['success', message]), error: message => messages.push(['error', message]) },
     });
@@ -225,6 +225,8 @@ test('AUD-43 monitoring and GPU history include the oldest and newest available 
     let records = [];
     const bindings = {
       uuid: 'node-a', client: { uuid: 'node-a', gpu_name: 'Synthetic GPU' }, authLoading: false, isAuthenticated: false, timeRange: '3d', AbortController,
+      viewTab: 'load',
+      gpuRefresh: 0, gpuCacheRef: { current: new Map() },
       recordsRequestRef: { current: 0 },
       timeRangeMs: productionDeclaration('src/pages/Instance.tsx', 'timeRangeMs'),
       timeRangePointLimit: productionDeclaration('src/pages/Instance.tsx', 'timeRangePointLimit'),
@@ -253,22 +255,123 @@ test('AUD-43 monitoring and GPU history include the oldest and newest available 
   }
 });
 
-test('AUD-43 long-range Ping history continues beyond a full recent batch', async () => {
+test('AUD-43 long-range Ping history is served by a single bucketed batch without backfill', async () => {
   const end = Date.parse('2026-09-06T00:00:00Z');
-  const batch = Array.from({ length: 360 }, (_, index) => ({ time: new Date(end - (index + 1) * 120000).toISOString(), value: 10, task_id: 1 }));
+  const batch = Array.from({ length: 360 }, (_, index) => ({ time: new Date(end - (index + 1) * 120000).toISOString(), value: 10, task_id: 1, sample_count: 2, success_count: 2, loss_count: 0, avg_latency: 10, max_latency: 12 }));
+  let batchCalls = 0;
+  let batchUrl = null;
   let continuations = 0;
   const ping = productionModule('src/utils/pingChart.ts', {}, {
     fetch: async url => {
-      const path = new URL(url, 'https://synthetic.invalid').pathname;
-      if (path === '/api/task/ping') return new Response(JSON.stringify([{ id: 1, name: 'Synthetic ping', clients: ['node-a'], interval: 120, interval_sec: 120 }]));
-      if (path === '/api/records/ping/batch') return new Response(JSON.stringify({ 1: batch }));
-      if (path === '/api/records/ping') { continuations += 1; return new Response(JSON.stringify({ data: [{ time: new Date(end - 70 * 3600000).toISOString(), value: 25, task_id: 1 }], has_more: false })); }
-      throw new Error(`Unexpected path ${path}`);
+      const parsed = new URL(url, 'https://synthetic.invalid');
+      if (parsed.pathname === '/api/task/ping') return new Response(JSON.stringify([{ id: 1, name: 'Synthetic ping', clients: ['node-a'], interval: 120, interval_sec: 120 }]));
+      if (parsed.pathname === '/api/records/ping/batch') { batchCalls += 1; batchUrl = parsed; return new Response(JSON.stringify({ 1: batch })); }
+      if (parsed.pathname === '/api/records/ping') { continuations += 1; return new Response(JSON.stringify({ data: [], has_more: false })); }
+      throw new Error(`Unexpected path ${parsed.pathname}`);
     },
   });
   const series = await ping.fetchPingTaskSeries('node-a', { rangeHours: 72, cursor: new Date(end).toISOString() });
-  assert.equal(Math.min(...series[0].records.map(record => Date.parse(record.time))), end - 70 * 3600000, 'three-day Ping chart must include its oldest available point');
-  assert.equal(continuations, 1);
+  assert.equal(batchCalls, 1, 'three-day Ping chart must be served by exactly one batch request');
+  assert.equal(batchUrl.searchParams.get('limit'), '1000', 'long-range batch must ask for the full bucketed window at once');
+  assert.ok(batchUrl.searchParams.get('start') && batchUrl.searchParams.get('end'), 'long-range batch must carry an explicit start/end window for server-side bucketing');
+  assert.equal(continuations, 0, 'the bucketed batch already covers the window, so no per-task backfill may run');
+  assert.equal(series[0].records.length, 360, 'single batch rows are returned as-is');
+  assert.equal(Math.min(...series[0].records.map(record => Date.parse(record.time))), end - 360 * 120000);
+});
+
+test('AUD-43 short-range Ping history reads raw with a single cursor batch', async () => {
+  const end = Date.parse('2026-09-06T00:00:00Z');
+  const batch = Array.from({ length: 60 }, (_, index) => ({ time: new Date(end - (index + 1) * 60000).toISOString(), value: 10, task_id: 1 }));
+  let batchCalls = 0;
+  let batchUrl = null;
+  let singleCalls = 0;
+  const ping = productionModule('src/utils/pingChart.ts', {}, {
+    fetch: async url => {
+      const parsed = new URL(url, 'https://synthetic.invalid');
+      if (parsed.pathname === '/api/task/ping') return new Response(JSON.stringify([{ id: 1, name: 'Synthetic ping', clients: ['node-a'], interval: 60, interval_sec: 60 }]));
+      if (parsed.pathname === '/api/records/ping/batch') { batchCalls += 1; batchUrl = parsed; return new Response(JSON.stringify({ 1: batch })); }
+      if (parsed.pathname === '/api/records/ping') { singleCalls += 1; return new Response(JSON.stringify({ data: [], has_more: false })); }
+      throw new Error(`Unexpected path ${parsed.pathname}`);
+    },
+  });
+  const series = await ping.fetchPingTaskSeries('node-a', { rangeHours: 1, cursor: new Date(end).toISOString() });
+  assert.equal(batchCalls, 1, 'one-hour Ping chart must be served by exactly one batch request');
+  assert.ok(batchUrl.searchParams.get('cursor'), 'short-range batch keeps the cursor first-page request for raw reads');
+  assert.equal(singleCalls, 0, 'one raw page covers a 60s-interval hour, so no per-task paging may run');
+  assert.equal(series[0].records.length, 60);
+});
+
+test('AUD-43 short-range Ping with tiny intervals falls back to per-task paging', async () => {
+  const end = Date.parse('2026-09-06T00:00:00Z');
+  const rangeStart = end - 4 * 3600000;
+  const batch = Array.from({ length: 1000 }, (_, index) => ({ time: new Date(end - (index + 1) * 10000).toISOString(), value: 10, task_id: 1 }));
+  let singleCalls = 0;
+  const ping = productionModule('src/utils/pingChart.ts', {}, {
+    fetch: async url => {
+      const parsed = new URL(url, 'https://synthetic.invalid');
+      if (parsed.pathname === '/api/task/ping') return new Response(JSON.stringify([{ id: 1, name: 'Synthetic ping', clients: ['node-a'], interval: 10, interval_sec: 10 }]));
+      if (parsed.pathname === '/api/records/ping/batch') return new Response(JSON.stringify({ 1: batch }));
+      if (parsed.pathname === '/api/records/ping') {
+        singleCalls += 1;
+        const cursorMs = Date.parse(parsed.searchParams.get('cursor'));
+        const rows = [];
+        for (let at = cursorMs - 10000; at > cursorMs - 2 * 3600000 && at >= rangeStart; at -= 10000) {
+          rows.push({ time: new Date(at).toISOString(), value: 10, task_id: 1 });
+        }
+        const oldest = rows.length ? Date.parse(rows[rows.length - 1].time) : cursorMs;
+        return new Response(JSON.stringify({ data: rows, has_more: oldest > rangeStart, next_cursor: new Date(oldest).toISOString() }));
+      }
+      throw new Error(`Unexpected path ${parsed.pathname}`);
+    },
+  });
+  const series = await ping.fetchPingTaskSeries('node-a', { rangeHours: 4, cursor: new Date(end).toISOString() });
+  assert.ok(singleCalls >= 1, 'a truncated raw page must spill over to per-task paging as the tiny-interval safety net');
+  assert.equal(series[0].records.length, 1440, 'paged fallback must cover the full four-hour window');
+  assert.ok(Math.min(...series[0].records.map(record => Date.parse(record.time))) <= rangeStart);
+});
+
+test('AUD-43 short-range Ping trusts an untruncated raw batch instead of re-paging every task', async () => {
+  const end = Date.parse('2026-09-06T00:00:00Z');
+  // 60s 间隔、4h 窗口：最老一条必然晚于 rangeStart（查询是 time >= start），但条数远小于 limit，没有被截断。
+  const batch = Array.from({ length: 239 }, (_, index) => ({ time: new Date(end - (index + 1) * 60000).toISOString(), value: 10, task_id: 1 }));
+  const calls = [];
+  const ping = productionModule('src/utils/pingChart.ts', {}, {
+    fetch: async url => {
+      const parsed = new URL(url, 'https://synthetic.invalid');
+      calls.push(parsed.pathname);
+      if (parsed.pathname === '/api/task/ping') return new Response(JSON.stringify([{ id: 1, name: 'Synthetic ping', clients: ['node-a'], interval: 60, interval_sec: 60 }]));
+      if (parsed.pathname === '/api/records/ping/batch') return new Response(JSON.stringify({ 1: batch }));
+      throw new Error(`Unexpected path ${parsed.pathname}`);
+    },
+  });
+  const series = await ping.fetchPingTaskSeries('node-a', { rangeHours: 4, limit: 360, cursor: new Date(end).toISOString(), start: new Date(end - 4 * 3600000).toISOString(), end: new Date(end).toISOString() });
+  assert.equal(series[0].records.length, 239);
+  assert.ok(!calls.includes('/api/records/ping'), `per-task paging must not run: ${calls.join(',')}`);
+});
+
+test('AUD-43 concurrent Ping task-list requests share one network call and aborting one caller does not cancel it', async () => {
+  const end = Date.parse('2026-09-06T00:00:00Z');
+  let taskListCalls = 0;
+  const ping = productionModule('src/utils/pingChart.ts', {}, {
+    fetch: async url => {
+      const parsed = new URL(url, 'https://synthetic.invalid');
+      if (parsed.pathname === '/api/task/ping') {
+        taskListCalls += 1;
+        return new Response(JSON.stringify([{ id: 1, name: 'Synthetic ping', clients: ['node-a'], interval: 60, interval_sec: 60 }]));
+      }
+      if (parsed.pathname === '/api/records/ping/batch') return new Response(JSON.stringify({ 1: [] }));
+      throw new Error(`Unexpected path ${parsed.pathname}`);
+    },
+  });
+  const first = new AbortController();
+  const options = { rangeHours: 4, limit: 360, cursor: new Date(end).toISOString(), start: new Date(end - 4 * 3600000).toISOString(), end: new Date(end).toISOString() };
+  const aborted = ping.fetchPingTaskSeries('node-a', { ...options, signal: first.signal });
+  const surviving = ping.fetchPingTaskSeries('node-a', options);
+  first.abort();
+  await assert.rejects(() => aborted, { name: 'AbortError' });
+  const series = await surviving;
+  assert.equal(taskListCalls, 1, 'StrictMode double effect must not hit /api/task/ping twice');
+  assert.equal(series.length, 1);
 });
 
 test('AUD-43 cursor traversal rejects repeated cursors and is bounded and abortable', async () => {
@@ -593,7 +696,7 @@ test('AUD-42 late node history cannot replace the current node history', async (
     setRecordsLoading() {}, setRecordsRangeEnd() {}, setRecordsError() {},
     setRecords: value => { current = value; },
   });
-  const a = load('node-a')('1h');
+  const a = load('node-a')('4h');
   const b = load('node-b')('3d');
   pending.get('node-b')([{ time: recordTime, cpu: 22 }]);
   await b;

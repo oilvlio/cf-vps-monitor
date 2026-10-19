@@ -62,6 +62,17 @@ export function formatMetricUptime(value: unknown): string {
   return metric === null ? '—' : formatUptime(metric);
 }
 
+// CPU 负载单值：保留两位小数；null/非法显示破折号（与「不可用」口径一致，不补 0）。
+export function formatLoadValue(value: unknown): string {
+  const metric = metricNumber(value);
+  return metric === null ? '—' : metric.toFixed(2);
+}
+
+// CPU 负载三值（1/5/15 分钟）：详情页负载卡头部与首页 NodeCard tooltip 同口径。
+export function formatLoadTriple(load: unknown, load5: unknown, load15: unknown): string {
+  return `${formatLoadValue(load)} / ${formatLoadValue(load5)} / ${formatLoadValue(load15)}`;
+}
+
 export function formatLastReport(timestamp?: number): string {
   if (typeof timestamp !== 'number' || !Number.isFinite(timestamp) || timestamp <= 0) return '—';
   const date = new Date(timestamp < 1_000_000_000_000 ? timestamp * 1000 : timestamp);

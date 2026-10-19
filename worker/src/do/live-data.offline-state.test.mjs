@@ -26,7 +26,7 @@ function fixture({ initial = [], controls = [node], dbOverrides = {} } = {}) {
     listPublicClientRows: async () => structuredClone(controls || []),
     getSetting: async () => null, setSetting: async () => {},
     updateClient: async (_database, uuid, patch) => patches.push({ uuid, ...patch }),
-    listPingTasks: async () => [], listAgentWebsiteProbeTasks: async () => [],
+    listPingTasks: async () => [],
     insertAuditLog: async () => {}, tryClaimAuditThrottle: async () => true,
     ...dbOverrides,
   } });
@@ -420,7 +420,6 @@ function queuedBatchFixture({ failProbe = false } = {}) {
       return { record_enabled: String(failProbe) };
     },
     listPingTasks: async () => [{ id: 1, name: 'Fixture probe', all_clients: true, clients: [], interval_sec: 120 }],
-    getHistoryStorageRowCounts: async () => ({ records: 0, gpu_records: 0, gpu_snapshots: 0, ping_records: 0, ping_snapshots: 0 }),
     getHistoryStorageBytes: async () => ({ total: 0 }),
     getHistoryStorageUsage: async () => ({ live_rows: 0, estimated_live_storage_bytes: 0 }),
     insertPingSnapshot: async () => { if (failProbe) throw new Error('Synthetic required Ping snapshot failure'); },

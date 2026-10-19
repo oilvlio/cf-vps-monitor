@@ -92,21 +92,21 @@ export const SETTING_SCHEMA = {
   },
   record_preserve_time: {
     type: 'integer',
-    defaultValue: '72',
+    defaultValue: '168',
     public: false,
     min: 1,
-    max: 72,
+    max: 168,
   },
   ping_record_preserve_time: {
     type: 'integer',
-    defaultValue: '72',
+    defaultValue: '168',
     public: false,
     min: 1,
-    max: 72,
+    max: 168,
   },
   record_persist_interval_sec: {
     type: 'integer',
-    // 保持 120。这里的值必须与 1_core_schema.sql 的 seed 一致——seed 写的是真实行，
+    // 保持 120。这里的值必须与 1_schema.sql 的 seed 一致——seed 写的是真实行，
     // buildAdminSettings 取 stored[key] ?? defaultValue，两者不一致时改这里毫无效果。
     // 另：本项目的写入量受 max(上报间隔, 节流间隔) 约束，空闲态 120s 上报才是约束项；
     // 一旦上采样功能落地，调低这个值会直接把写入量推到 2880 行/节点·天而超出免费额度。

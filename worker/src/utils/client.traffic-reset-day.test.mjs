@@ -19,15 +19,15 @@ for (const invalid of [0, 32, -1, 1.5]) {
 // ── 2) RPC 的列清单是写死的，漏一处就「保存成功但毫无效果」 ──
 // 这类坑在本项目出现过两次（hide_url 只改读 RPC、主题枚举漏登记），
 // 共同表现都是：接口 200、前端状态更新、刷新后打回原形。
-const rpc = readFileSync(new URL('../../../supabase/migrations/4_rpc_api.sql', import.meta.url), 'utf8');
-const schema = readFileSync(new URL('../../../supabase/migrations/1_core_schema.sql', import.meta.url), 'utf8');
+const rpc = readFileSync(new URL('../../../supabase/migrations/2_functions.sql', import.meta.url), 'utf8');
+const schema = readFileSync(new URL('../../../supabase/migrations/1_schema.sql', import.meta.url), 'utf8');
 
 assert.ok(
   /traffic_reset_day smallint not null default 1/.test(schema),
   'clients 表必须有 traffic_reset_day 列',
 );
 assert.ok(
-  /alter table clients add column if not exists traffic_reset_day/.test(rpc),
+  /alter table clients add column if not exists traffic_reset_day/.test(schema),
   '存量库必须能幂等补上 traffic_reset_day 列',
 );
 assert.ok(
@@ -49,7 +49,7 @@ assert.ok(
   "traffic_limit_type 列默认值必须是 'sum'",
 );
 assert.ok(
-  /alter table clients alter column traffic_limit_type set default 'sum';/.test(rpc),
+  /alter table clients alter column traffic_limit_type set default 'sum';/.test(schema),
   '存量库的口径默认值也要正规化',
 );
 assert.ok(

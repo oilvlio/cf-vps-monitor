@@ -23,7 +23,9 @@ test('R-D04 provider outcomes propagate through real dispatch, health and SQL de
       for (const successful of [false, true]) {
         await t.test(`${provider.format} explicit ${successful ? 'success' : 'business rejection'}`, async () => {
           const id = nextId++;
-          await sql.query('insert into website_monitors(id,name,url) values ($1,$2,$3)', [id, 'Synthetic', 'https://site.audit.example.com']);
+          const owner = `webhook-node-${id}`;
+          await sql.query('insert into clients(uuid,name) values ($1,$2)', [owner, 'Synthetic']);
+          await sql.query('insert into offline_notifications(client,enable) values ($1,1)', [owner]);
           let requests = 0;
           const loader = createWorkerLoader({ db: null, globals: {
             fetch: async (input, init) => {
@@ -54,7 +56,7 @@ test('R-D04 provider outcomes propagate through real dispatch, health and SQL de
           const { recordHealthEvent } = loader.load('worker/src/utils/observability.ts');
           const { deliverNotification, dispatchNotification } = loader.load('worker/src/utils/notification-dispatch.ts');
           const database = { provider: 'supabase', env: { SUPABASE_URL: 'https://database.audit.example.com', SUPABASE_SECRET_KEY: 'sb_secret_synthetic' } };
-          const key = `website:${id}`;
+          const key = `offline:${owner}`;
           const eventId = `down:${id}`;
           const now = '2026-09-09T10:00:00Z';
           const deliver = () => deliverNotification({

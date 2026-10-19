@@ -22,11 +22,10 @@ async function fixture({ overrides = {} } = {}) {
   const db = {
     getSettingsByKeys: async () => ({ record_enabled: 'false' }),
     listPublicClientRows: async () => structuredClone([publicClient, hiddenClient]),
-    getHistoryStorageRowCounts: async () => ({ records: 0, gpu_records: 0, gpu_snapshots: 0, ping_records: 0, ping_snapshots: 0 }),
     getHistoryStorageBytes: async () => ({ total: 0 }),
     getHistoryStorageUsage: async () => ({ live_rows: 0, live_row_bytes: 0, estimated_live_storage_bytes: 0, allocated_bytes: 0, reusable_bytes: null, measurement: 'live-row-bytes-plus-index-estimate' }),
     insertRecord: async () => {}, updateClient: async () => {},
-    listPingTasks: async () => [], listAgentWebsiteProbeTasks: async () => [],
+    listPingTasks: async () => [],
     ...overrides,
   };
   const loader = createWorkerLoader({ db, expose: {

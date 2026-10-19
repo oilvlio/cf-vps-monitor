@@ -6,7 +6,6 @@ import {
   BACKUP_SCOPE,
   BACKUP_VERSION,
   validateBackup,
-  websiteMonitorConfiguration,
   type BackupData,
 } from './backup';
 
@@ -26,7 +25,6 @@ export async function buildBackupSnapshot(database: db.QueryDatabase): Promise<B
     offline_notifications: snapshot.offline_notifications,
     expiry_notifications: snapshot.expiry_notifications,
     load_notifications: snapshot.load_notifications,
-    website_monitors: snapshot.website_monitors.map(websiteMonitorConfiguration),
   };
   const validated = validateBackup(backup);
   if (!validated.ok) throw new Error(`备份配置校验失败，请修正配置后重试: ${validated.errors.join('；')}`);

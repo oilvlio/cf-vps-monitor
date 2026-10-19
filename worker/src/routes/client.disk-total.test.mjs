@@ -15,7 +15,7 @@ async function reportDiskTotal(path, diskTotal) {
     getClientByToken: async () => structuredClone(row), getClient: async () => structuredClone(row),
     getSettingsByKeys: async () => ({ record_enabled: 'false' }), getSetting: async () => null,
     updateClient: async (_database, _uuid, patch) => { row = { ...row, ...patch }; },
-    markClientTokenUsed: async () => false, listPingTasks: async () => [], listAgentWebsiteProbeTasks: async () => [],
+    markClientTokenUsed: async () => false, listPingTasks: async () => [],
     insertAuditLog: async () => {}, tryClaimAuditThrottle: async () => true, setSetting: async () => {},
   } });
   const { LiveDataDO } = loader.load('worker/src/do/live-data.ts');

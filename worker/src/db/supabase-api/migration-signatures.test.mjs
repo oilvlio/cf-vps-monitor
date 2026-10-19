@@ -4,24 +4,15 @@ import { BUNDLED_SUPABASE_MIGRATIONS } from '../../generated/supabase-migrations
 
 const migrationsUrl = new URL('../../../../supabase/migrations/', import.meta.url);
 const migrationFiles = (await readdir(migrationsUrl)).filter((name) => name.endsWith('.sql')).sort();
-assert.deepEqual(migrationFiles, [
-  '1_core_schema.sql',
-  '2_security_access.sql',
-  '3_feature_schema.sql',
-  '4_rpc_api.sql',
-  '5_runtime_defaults.sql',
-]);
-assert.deepEqual(BUNDLED_SUPABASE_MIGRATIONS.map(({ version }) => version), [
-  '1_core_schema',
-  '2_security_access',
-  '3_feature_schema',
-  '4_rpc_api',
-  '5_runtime_defaults',
-]);
+const expectedMigrations = ['1_schema', '2_functions', '3_legacy_cleanup'];
+assert.deepEqual(migrationFiles, expectedMigrations.map((name) => `${name}.sql`));
+assert.deepEqual(BUNDLED_SUPABASE_MIGRATIONS.map(({ version }) => version), expectedMigrations);
 
-const featureSchemaSql = await readFile(new URL('3_feature_schema.sql', migrationsUrl), 'utf8');
-const migrationSql = await readFile(new URL('../../../../supabase/migrations/4_rpc_api.sql', import.meta.url), 'utf8');
-const runtimeDefaultsSql = await readFile(new URL('5_runtime_defaults.sql', migrationsUrl), 'utf8');
+// 1_schema.sql：表 / 列 / 约束 / 默认数据；2_functions.sql：全部 RPC 与其权限；3_legacy_cleanup.sql：已下线功能的清理。
+const featureSchemaSql = await readFile(new URL('1_schema.sql', migrationsUrl), 'utf8');
+const migrationSql = await readFile(new URL('2_functions.sql', migrationsUrl), 'utf8');
+const runtimeDefaultsSql = featureSchemaSql;
+const legacyCleanupSql = await readFile(new URL('3_legacy_cleanup.sql', migrationsUrl), 'utf8');
 const generatedSql = await readFile(new URL('../../generated/supabase-migrations.ts', import.meta.url), 'utf8');
 const agentRoutesSql = await readFile(new URL('../../routes/client.ts', import.meta.url), 'utf8');
 const allMigrationSql = await Promise.all(migrationFiles.map((name) => readFile(new URL(name, migrationsUrl), 'utf8'))).then((sources) => sources.join('\n'));
@@ -43,12 +34,15 @@ assert.match(migrationSql, /create or replace function public\.cfm_rotate_client
 assert.doesNotMatch(featureSchemaSql, /create or replace function public\.cfm_(?:create_client|rotate_client_token)\(/i);
 assert.doesNotMatch(runtimeDefaultsSql, /create or replace function public\.cfm_(?:create_client|rotate_client_token)\(/i);
 
-for (const source of [migrationSql, generatedSql]) {
-  assert.doesNotMatch(source, /revoke all on function public\.cfm_public_website_monitor\(integer, integer\)/);
-  assert.doesNotMatch(source, /grant execute on function public\.cfm_public_website_monitor\(integer, integer\)/);
-}
-
-assert.match(migrationSql, /drop function if exists public\.cfm_public_website_monitor\(integer, integer\);/);
+// 网站监控已下线：函数文件里不能再有任何 website 对象，旧库里的残留由清理文件负责 drop。
+assert.doesNotMatch(migrationSql, /website/i);
+assert.doesNotMatch(featureSchemaSql, /website/i);
+// README 承诺「原有网站监控数据会保留」：表只能在为空时才删除，绝不能出现无条件的 drop table。
+assert.doesNotMatch(legacyCleanupSql, /^drop table (if exists )?(public\.)?website_/im);
+assert.match(legacyCleanupSql, /if not exists \(select 1 from public\.website_checks\) and not exists \(select 1 from public\.website_monitors\) then/);
+assert.match(legacyCleanupSql, /drop trigger if exists cfm_website_config_revision on public\.website_monitors;/);
+assert.match(legacyCleanupSql, /drop trigger if exists cfm_website_delivery_retirement on public\.website_monitors;/);
+assert.match(legacyCleanupSql, /drop function if exists public\.cfm_public_website_monitor\(/);
 
 const mfaSources = [featureSchemaSql + migrationSql, generatedSql];
 const mfaFunctions = [
@@ -67,9 +61,7 @@ for (const source of mfaSources) {
 
   for (const functionName of mfaFunctions) {
     assert.match(source, new RegExp(`create or replace function public\\.${functionName}\\(`, 'i'));
-    assert.match(source, new RegExp(`revoke all on function public\\.${functionName}\\([^;]+\\) from public;`, 'i'));
-    assert.match(source, new RegExp(`revoke all on function public\\.${functionName}\\([^;]+\\) from anon;`, 'i'));
-    assert.match(source, new RegExp(`revoke all on function public\\.${functionName}\\([^;]+\\) from authenticated;`, 'i'));
+    assert.match(source, new RegExp(`revoke all on function public\\.${functionName}\\([^;]+\\) from public, anon, authenticated;`, 'i'));
     assert.match(source, new RegExp(`grant execute on function public\\.${functionName}\\([^;]+\\) to service_role;`, 'i'));
   }
 }
@@ -87,9 +79,7 @@ assert.match(runtimeDefaultsSql, /\('webhook_url', ''\)/i);
 // 这里锁三件事：函数在（且两份 SQL 一致）、on conflict 分支在、比较方向没被写反。
 for (const source of [migrationSql, generatedSql]) {
   assert.match(source, /create or replace function public\.cfm_try_claim_audit_throttle\(/i);
-  for (const role of ['public', 'anon', 'authenticated']) {
-    assert.match(source, new RegExp(`revoke all on function public\\.cfm_try_claim_audit_throttle\\([^;]+\\) from ${role};`, 'i'));
-  }
+  assert.match(source, /revoke all on function public\.cfm_try_claim_audit_throttle\([^;]+\) from public, anon, authenticated;/i);
   assert.match(source, /grant execute on function public\.cfm_try_claim_audit_throttle\([^;]+\) to service_role;/i);
 }
 const throttleBody = migrationSql.match(

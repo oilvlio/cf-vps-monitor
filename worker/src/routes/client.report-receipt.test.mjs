@@ -41,7 +41,7 @@ test('the authenticated ordinary HTTP route fails an unpersisted report and acce
     getClientByToken: async () => row, getClient: async () => row,
     markClientTokenUsed: async () => false, getSettingsByKeys: async () => ({ record_enabled: 'false' }),
     getSetting: async () => null, setSetting: async () => {}, updateClient: async () => {},
-    listPingTasks: async () => [], listAgentWebsiteProbeTasks: async () => [],
+    listPingTasks: async () => [],
     insertAuditLog: async () => {}, tryClaimAuditThrottle: async () => true,
   } });
   const { LiveDataDO } = production.load('worker/src/do/live-data.ts');

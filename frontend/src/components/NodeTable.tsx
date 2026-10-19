@@ -7,7 +7,6 @@ import { Badge, Box, Flex, IconButton, Popover, Table, Text } from '@radix-ui/th
 import { ArrowDown, ArrowUp, ChevronRight, ChevronsUpDown } from 'lucide-react';
 import UsageBar from './UsageBar';
 import Flag from './Flag';
-import MiniPingChart from './MiniPingChart';
 import PriceTags from './PriceTags';
 import { diskUsagePresentation, formatMetricBytes, formatMetricSpeed, formatMetricUptime, formatLastReport, getNodeDisplayRecord, getNodeLastReportTime, getNodeStatus, metricNumber, resourceTotal, resourceUsage, type NodeStatus } from '../utils/nodeMetrics';
 import { comparePublicClients } from '../utils/publicClients';
@@ -18,7 +17,6 @@ import { formatCpuSpec } from '../utils/cpuFormat';
 interface NodeTableProps {
   nodes: ClientInfo[];
   liveData: LiveDataMap;
-  includeHidden?: boolean;
 }
 
 type SortKey = 'manual' | 'name' | 'os' | 'status' | 'cpu' | 'ram' | 'disk' | 'network' | 'price' | 'traffic';
@@ -107,13 +105,11 @@ function ExpandedNodeDetails({
   live,
   lastReportTime,
   status,
-  includeHidden = false,
 }: {
   node: ClientInfo;
   live?: Partial<LiveRecord>;
   lastReportTime?: number;
   status: NodeStatus;
-  includeHidden?: boolean;
 }) {
   return (
     <Box className="node-table-expanded">
@@ -172,9 +168,6 @@ function ExpandedNodeDetails({
           </DetailSection>
         </div>
 
-        <div className="node-table-ping-section">
-          <MiniPingChart uuid={node.uuid} width="100%" height={210} limit={180} fillContainer includeHidden={includeHidden} />
-        </div>
       </div>
     </Box>
   );
@@ -198,7 +191,7 @@ function SortHeader({ column, children, style, activeKey, direction, onSort }: {
   );
 }
 
-export default function NodeTable({ nodes, liveData, includeHidden = false }: NodeTableProps) {
+export default function NodeTable({ nodes, liveData }: NodeTableProps) {
   const [sortKey, setSortKey] = useState<SortKey>('manual');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
   const [expandedRows, setExpandedRows] = useState<string[]>([]);
@@ -414,7 +407,6 @@ export default function NodeTable({ nodes, liveData, includeHidden = false }: No
                         live={live}
                         lastReportTime={getNodeLastReportTime(node.uuid, liveData)}
                         status={status}
-                        includeHidden={includeHidden}
                       />
                     </Table.Cell>
                   </Table.Row>

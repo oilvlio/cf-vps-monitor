@@ -6,7 +6,7 @@ function fixture(client) {
   const loader = createWorkerLoader({
     db: {
       getSettingsByKeys: async () => ({}), getClient: async () => client,
-      listPingTasks: async () => [], listAgentWebsiteProbeTasks: async () => [],
+      listPingTasks: async () => [],
     },
     expose: { 'worker/src/routes/client.ts': ['fallbackAgentPolicy'] },
   });

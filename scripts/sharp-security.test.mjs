@@ -11,7 +11,7 @@ const { gte } = createRequire(fromMiniflare.resolve('sharp'))('semver');
 
 test('V-S01 Miniflare loads a Sharp release patched for GHSA-rgj7-g3m4-5g8c', t => {
   t.diagnostic(`loaded Sharp ${sharp.versions.sharp}, libheif ${sharp.versions.heif}, libvips ${sharp.versions.vips}`);
-  assert.ok(gte(sharp.versions.sharp, '0.35.4'), 'the loaded Sharp release must include the upstream security patch');
+  assert.ok(gte(sharp.versions.sharp, '0.35.5'), 'the loaded Sharp release must include the upstream security patch');
 });
 
 test('V-S01 the actual loaded native libheif includes the advisory fix', () => {

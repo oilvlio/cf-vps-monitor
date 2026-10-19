@@ -26,7 +26,7 @@ YES="0"
 KEEP_FILES="0"
 INSTALL_GHPROXY=""
 PROXY=""
-CF_MONITOR_REPOSITORY="kadidalax/cf-vps-monitor"
+CF_MONITOR_REPOSITORY="oilvlio/cf-vps-monitor"
 CF_MONITOR_BRANCH="main"
 CF_MONITOR_RELEASE_TAG=""
 CF_MONITOR_RELEASE_BASE="https://github.com/${CF_MONITOR_REPOSITORY}/releases/latest/download"
@@ -39,6 +39,8 @@ DISK_USAGE_FILE_SET="0"
 DISK_USAGE_FILE_PRESENT="0"
 NIC_INCLUDE=""
 NIC_EXCLUDE=""
+ALLOW_HOST_LOAD="0"
+HOST_CPU_CORES="0"
 AGENT_USER="cf-vps-monitor-agent"
 OS_NAME="$(uname -s | tr '[:upper:]' '[:lower:]')"
 
@@ -68,7 +70,7 @@ Options:
   --instance-id ID          Instance id used for default names and paths.
   --install-mode MODE       auto, system, or user. Default: auto.
   --install-dir DIR         Install directory. Default depends on mode.
-  --service-name NAME       system service name, default: cf-vps-monitor-agent-<instance-id>.
+  --service-name NAME       system service name, default: cf-vps-monitor-agent.
   --install-service-name NAME
                             Legacy alias for --service-name.
   --binary PATH             Existing agent binary.
@@ -86,6 +88,8 @@ Options:
   --disk-usage-file PATH    Administrator disk cache; empty disables the companion.
   --nic-include LIST        Comma-separated network interface patterns included in traffic totals.
   --nic-exclude LIST        Comma-separated network interface patterns excluded from traffic totals.
+  --allow-host-load         In containers, report the host load average instead of leaving load unavailable.
+  --host-cpu-cores N        Host CPU core count; scales host load to this container's cores (0 = no scaling).
   --disable-web-ssh         Accepted as a legacy no-op option.
   --disable-auto-update     Accepted as a legacy no-op option.
   --ignore-unsafe-cert      Accepted as a legacy no-op option.
@@ -1010,7 +1014,7 @@ resolve_build_dir() {
 
 apply_defaults() {
   BASE_ID="$(sanitize_instance_id "${INSTANCE_ID:-default}")"
-  [ -n "$SERVICE_NAME" ] || SERVICE_NAME="cf-vps-monitor-agent-${BASE_ID}"
+  [ -n "$SERVICE_NAME" ] || SERVICE_NAME="cf-vps-monitor-agent"
   if ! agent_service_name_is_safe "$SERVICE_NAME"; then
     die "--service-name must be a safe name using A-Z, a-z, 0-9, dot, underscore, dash, or @; it cannot be a dot segment or start with a dash."
   fi
@@ -1066,6 +1070,8 @@ CF_MONITOR_CONTAINER_DISK_TOTAL_BYTES=$($env_quote "$CONTAINER_DISK_TOTAL_BYTES"
 CF_MONITOR_DISK_USAGE_FILE=$($env_quote "$DISK_USAGE_FILE")
 CF_MONITOR_NIC_INCLUDE=$($env_quote "$NIC_INCLUDE")
 CF_MONITOR_NIC_EXCLUDE=$($env_quote "$NIC_EXCLUDE")
+CF_MONITOR_ALLOW_HOST_LOAD=$($env_quote "$ALLOW_HOST_LOAD")
+CF_MONITOR_HOST_CPU_CORES=$($env_quote "$HOST_CPU_CORES")
 CF_MONITOR_TRAFFIC_RESET_DAY=$($env_quote "$TRAFFIC_RESET_DAY")
 CF_MONITOR_TRAFFIC_STATE_FILE=$($env_quote "${STATE_DIR}/traffic-state.json")
 EOF
@@ -1077,6 +1083,9 @@ validate_common() {
   [ "$MODE" = "websocket" ] || [ "$MODE" = "http" ] || die "--mode must be websocket or http."
   if ! printf '%s' "$TRAFFIC_RESET_DAY" | grep -Eq '^[0-9]+$' || [ "$TRAFFIC_RESET_DAY" -lt 1 ] || [ "$TRAFFIC_RESET_DAY" -gt 31 ]; then
     die "--traffic-reset-day must be a number from 1 to 31."
+  fi
+  if ! printf '%s' "$HOST_CPU_CORES" | grep -Eq '^[0-9]+$' || [ "$HOST_CPU_CORES" -gt 65535 ]; then
+    die "--host-cpu-cores must be a number from 0 to 65535."
   fi
   for pair in \
     "server:$SERVER" "token:$TOKEN" "name:$NODE_NAME" "mode:$MODE" \
@@ -1246,7 +1255,7 @@ depend() {
 start_pre() {
   export CF_MONITOR_SERVER CF_MONITOR_TOKEN CF_MONITOR_NAME CF_MONITOR_MODE
   export CF_MONITOR_MOUNT_INCLUDE CF_MONITOR_MOUNT_EXCLUDE CF_MONITOR_NIC_INCLUDE CF_MONITOR_NIC_EXCLUDE
-  export CF_MONITOR_TRAFFIC_RESET_DAY CF_MONITOR_TRAFFIC_STATE_FILE
+  export CF_MONITOR_TRAFFIC_RESET_DAY CF_MONITOR_TRAFFIC_STATE_FILE CF_MONITOR_ALLOW_HOST_LOAD CF_MONITOR_HOST_CPU_CORES
   export CF_MONITOR_CONTAINER_DISK_TOTAL_BYTES CF_MONITOR_DISK_USAGE_FILE
   checkpath -d -m 0755 -o ${AGENT_USER}:${AGENT_USER} $(shell_quote "$STATE_DIR") || return 1
   _cf_log_path="\$output_log"
@@ -1475,7 +1484,7 @@ set -eu
 . $(shell_quote "$ENV_FILE")
 export CF_MONITOR_SERVER CF_MONITOR_TOKEN CF_MONITOR_NAME CF_MONITOR_MODE
 export CF_MONITOR_MOUNT_INCLUDE CF_MONITOR_MOUNT_EXCLUDE CF_MONITOR_NIC_INCLUDE CF_MONITOR_NIC_EXCLUDE
-export CF_MONITOR_TRAFFIC_RESET_DAY CF_MONITOR_TRAFFIC_STATE_FILE
+export CF_MONITOR_TRAFFIC_RESET_DAY CF_MONITOR_TRAFFIC_STATE_FILE CF_MONITOR_ALLOW_HOST_LOAD CF_MONITOR_HOST_CPU_CORES
 export CF_MONITOR_CONTAINER_DISK_TOTAL_BYTES CF_MONITOR_DISK_USAGE_FILE
 exec $(shell_quote "${INSTALL_DIR}/cf-vps-monitor-agent") --interval ${INTERVAL} --ping-interval ${PING_INTERVAL} --traffic-reset-day ${TRAFFIC_RESET_DAY}
 EOF
@@ -1675,6 +1684,8 @@ while [ "$#" -gt 0 ]; do
     --disk-usage-file) DISK_USAGE_FILE="${2:-}"; DISK_USAGE_FILE_SET=1; shift 2 ;;
     --nic-include) NIC_INCLUDE="${2:-}"; shift 2 ;;
     --nic-exclude) NIC_EXCLUDE="${2:-}"; shift 2 ;;
+    --allow-host-load) ALLOW_HOST_LOAD="1"; shift ;;
+    --host-cpu-cores) HOST_CPU_CORES="${2:-}"; shift 2 ;;
     --disable-web-ssh|--disable-auto-update|--ignore-unsafe-cert) shift ;;
     --install-ghproxy) INSTALL_GHPROXY="${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN="1"; shift ;;

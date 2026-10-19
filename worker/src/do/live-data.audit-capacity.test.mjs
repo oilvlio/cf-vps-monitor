@@ -8,7 +8,6 @@ function fixture(initial = []) {
   let calls = 0;
   const state = createDurableState(initial);
   const db = {
-    getHistoryStorageRowCounts: async () => ({ records: 20, gpu_records: 0, gpu_snapshots: 0, ping_records: 0, ping_snapshots: 0 }),
     getHistoryStorageBytes: async () => ({ total: 600 * MiB }),
     getHistoryStorageUsage: async () => {
       calls += 1;

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Outlet, Link, useLocation, useNavigate } from "react-router-dom";
-import { Text, IconButton, SegmentedControl } from "@radix-ui/themes";
+import { Outlet, Link, useNavigate } from "react-router-dom";
+import { Text, IconButton } from "@radix-ui/themes";
 import { Settings, Sun, Moon, Laptop, Palette, Github } from "lucide-react";
 
 import { useTheme } from "../contexts/ThemeContext";
@@ -44,7 +44,6 @@ export default function Layout() {
   const isMobile = useIsMobile();
   const { theme, setTheme } = useTheme();
   const { displayTheme, setDisplayThemeFromSettings, toggleDisplayTheme } = useDisplayTheme();
-  const location = useLocation();
   const navigate = useNavigate();
   const githubUrl = CF_MONITOR_GITHUB_URL;
   const [siteTitle, setSiteTitle] = useState("CF VPS Monitor");
@@ -114,13 +113,6 @@ export default function Layout() {
     theme === "light" ? "切换成深色模式" : theme === "dark" ? "切换成跟随系统" : "切换成浅色模式";
   const bgUrl = isMobile ? (bgUrlMobile || bgUrlDesktop) : (bgUrlDesktop || bgUrlMobile);
   const contentWidth = mainContentWidth >= 100 ? "100%" : `${mainContentWidth}vw`;
-  const monitorMode = new URLSearchParams(location.search).get("view") === "websites" ? "websites" : "servers";
-  const setMonitorMode = (value: string) => {
-    const params = new URLSearchParams(location.search);
-    if (value === "websites") params.set("view", "websites");
-    else params.delete("view");
-    navigate({ pathname: "/", search: params.toString() ? `?${params}` : "" });
-  };
 
   return (
     <div
@@ -144,12 +136,6 @@ export default function Layout() {
                 <div className="nav-brand-divider" />
                 <span>{siteSubtitle}</span>
               </div>
-            )}
-            {location.pathname === "/" && (
-              <SegmentedControl.Root className="nav-monitor-switch" value={monitorMode} onValueChange={setMonitorMode} size="2">
-                <SegmentedControl.Item value="servers">服务器监控</SegmentedControl.Item>
-                <SegmentedControl.Item value="websites">网站监控</SegmentedControl.Item>
-              </SegmentedControl.Root>
             )}
           </div>
 

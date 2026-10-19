@@ -27,7 +27,7 @@ import {
 import { buildBackupSnapshot } from '../utils/backup-snapshot';
 import { measureRestoredClientSnapshot } from '../utils/restore-client-snapshot';
 import { getCloudflareClientIp } from '../utils/request-ip';
-import { validatePingTaskInput } from '../utils/ping-task';
+import { planClientPingAssignment, validatePingTaskInput } from '../utils/ping-task';
 import { generateAgentToken, validateClientCreateInput, validateClientUpdateInput } from '../utils/client';
 import { validateExpiryNotificationInput, validateLoadNotificationInput, validateOfflineNotificationInput } from '../utils/notification';
 import { NOTIFICATION_DISPATCH_SETTING_KEYS, dispatchNotification, pickNotificationSettingOverrides } from '../utils/notification-dispatch';
@@ -36,7 +36,6 @@ import { TELEGRAM_MESSAGE_MAX_CHARS } from '../utils/telegram';
 import { EMAIL_MESSAGE_MAX_CHARS } from '../utils/email';
 import { WEBHOOK_MESSAGE_MAX_CHARS } from '../utils/webhook';
 import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
-import { checkWebsiteMonitorHttp, validateWebsiteMonitorInput } from '../utils/website-monitor';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { readJsonWithLimit, readRequestBytesWithLimit } from '../utils/request-body';
 import { bytesToBase64 } from '../utils/theme-package';
@@ -92,7 +91,7 @@ const ADMIN_PING_TASKS_EDGE_CACHE_SECONDS = 15;
 const ADMIN_SETTINGS_SCOPE_CACHE_MS = 10_000;
 const HEALTH_CACHE_MS = 30_000;
 const ALLOWED_CLIENT_IDS_CACHE_MS = 30_000;
-const OFFICIAL_UPDATE_REPOSITORY = 'kadidalax/cf-vps-monitor';
+const OFFICIAL_UPDATE_REPOSITORY = 'oilvlio/cf-vps-monitor';
 const OFFICIAL_UPDATE_BRANCH = 'main';
 const UPDATE_CHECK_CACHE_MS = 10 * 60 * 1000;
 const updateCheckCache = new Map<string, { expiresAt: number; value: UpdateCheckResult }>();
@@ -599,54 +598,6 @@ async function broadcastLiveMetadataChanged(c: AdminContext, detail: Record<stri
   }
 }
 
-type WebsiteMonitorMetadataDetail = true | {
-  upsert?: unknown[];
-  remove?: number[];
-  reorder?: number[];
-};
-
-/**
- * 网站监控的公开广播载荷。
- *
- * 广播默认投递给**所有**观众（含游客），而管理端写操作推的是完整 monitor 记录，
- * 因此必须在此裁剪，否则「对游客隐藏」只是前端不渲染、数据仍在 WebSocket 帧里。
- * - 勾了「对游客隐藏此监控」：整条不进公开载荷
- * - 勾了「对游客隐藏地址」：url 置为 null
- */
-function publicWebsiteMetadataDetail(detail: WebsiteMonitorMetadataDetail): WebsiteMonitorMetadataDetail {
-  if (detail === true) return true;
-  if (!Array.isArray(detail.upsert)) return detail;
-  const isRecord = (v: unknown): v is Record<string, unknown> =>
-    Boolean(v) && typeof v === 'object' && !Array.isArray(v);
-  const upsert = detail.upsert
-    .filter(item => !(isRecord(item) && item.hidden === true))
-    .map(item => (isRecord(item) && item.hide_url === true ? { ...item, url: null } : item));
-  return { ...detail, upsert };
-}
-const WEBSITE_MONITOR_REQUIRED_EDIT_FIELDS = [
-  'name',
-  'url',
-  'method',
-  'expected_status_min',
-  'expected_status_max',
-  'interval_sec',
-  'timeout_sec',
-  'grace_period_sec',
-  'enabled',
-  'hidden',
-];
-
-function invalidateWebsiteMonitorPublicState(c: AdminContext, websites: WebsiteMonitorMetadataDetail = true): void {
-  invalidateAdminPublicMetadata(c);
-  // 分两份投递：管理员收完整记录，游客收裁剪后的载荷
-  runAdminBackground(c, broadcastLiveMetadataChanged(c, { websites, audience: 'admin' }));
-  runAdminBackground(c, broadcastLiveMetadataChanged(c, {
-    websites: publicWebsiteMetadataDetail(websites),
-    audience: 'public',
-  }));
-  runAdminBackground(c, refreshLiveAgentPolicy(c));
-}
-
 type PingTaskAuditSource = Pick<db.PingTask, 'name' | 'type' | 'target' | 'all_clients' | 'clients' | 'interval_sec'>;
 
 function pingTaskAuditSnapshot(task: PingTaskAuditSource) {
@@ -1044,12 +995,20 @@ function estimatePingSnapshotRowsPerDay(
   return rowsPerDay;
 }
 
+function estimateRollupRowsPerClient(retentionHours: number, rawSamplesPerDay: number): number {
+  const hours = Math.max(0, Math.min(retentionHours, 168));
+  return Math.ceil(Math.min(hours, 24) * rawSamplesPerDay / 24)
+    + Math.ceil(Math.max(0, hours - 24));
+}
+
 function estimateAgentPingTaskPullsPerDay(
   clientCount: number,
   pingTasks: db.PingTaskEstimateRow[],
   pingIntervalSec: number,
 ): number {
-  if (pingTasks.length === 0) {
+  // 未分配任何服务器的任务不会下发给 Agent，不应抬高拉取频率。
+  const hasRunnableTask = pingTasks.some(task => task.all_clients || parseJsonArray(task.clients).length > 0);
+  if (!hasRunnableTask) {
     return Math.ceil(clientCount * 86400 / EMPTY_AGENT_PING_TASK_POLL_SEC);
   }
 
@@ -1085,8 +1044,8 @@ async function getCapacityRowCounts(
   settings: Record<string, string>,
   forceRefresh = false,
 ): Promise<CapacityRowCountSnapshot> {
-  const recordHours = Math.min(72, parsePositiveNumber(settings.record_preserve_time, 72));
-  const pingHours = Math.min(72, parsePositiveNumber(settings.ping_record_preserve_time, recordHours));
+  const recordHours = Math.min(168, parsePositiveNumber(settings.record_preserve_time, 168));
+  const pingHours = Math.min(168, parsePositiveNumber(settings.ping_record_preserve_time, recordHours));
   const auditHours = Math.max(24, parsePositiveNumber(settings.audit_log_preserve_time, 2160));
   const cacheKey = `${recordHours}:${pingHours}:${auditHours}`;
   const nowMs = Date.now();
@@ -1152,8 +1111,8 @@ export async function buildCapacityEstimate(database: db.QueryDatabase, options:
   const gpuClientCount = clientCapacityCounts.gpu_clients;
   const settings = buildAdminSettings(rawSettings);
   const recordEnabled = settings.record_enabled !== 'false';
-  const recordPreserveHours = Math.min(72, parsePositiveNumber(settings.record_preserve_time, 72));
-  const pingPreserveHours = Math.min(72, parsePositiveNumber(settings.ping_record_preserve_time, recordPreserveHours));
+  const recordPreserveHours = Math.min(168, parsePositiveNumber(settings.record_preserve_time, 168));
+  const pingPreserveHours = Math.min(168, parsePositiveNumber(settings.ping_record_preserve_time, recordPreserveHours));
   const sampleIntervalSec = Math.max(3, parsePositiveNumber(settings.live_poll_active_interval_sec, 3));
   const idleIntervalSec = Math.max(60, parsePositiveNumber(settings.live_poll_idle_interval_sec, 120));
   const persistIntervalSec = Math.max(3, parsePositiveNumber(settings.record_persist_interval_sec, 120));
@@ -1213,9 +1172,18 @@ export async function buildCapacityEstimate(database: db.QueryDatabase, options:
   const cronInvocationsPerDay = Math.floor(86400 / WORKER_CRON_INTERVAL_SEC);
   const pingRecordsSavedPerDay = Math.max(0, legacyPingRecordsPerDay - pingRecordsPerDay);
   const totalEstimatedBusinessRowsPerDay = monitorRecordsPerDay + gpuSnapshotsPerDay + pingRecordsPerDay;
-  const estimatedMonitorRecordsRetained = Math.ceil(monitorRecordsPerDay * recordPreserveHours / 24);
-  const estimatedGpuSnapshotsRetained = Math.ceil(gpuSnapshotsPerDay * recordPreserveHours / 24);
-  const estimatedPingRecordsRetained = Math.ceil(pingRecordsPerDay * pingPreserveHours / 24);
+  const monitorRollupRows = estimateRollupRowsPerClient(recordPreserveHours, monitorRecordsPerDay / Math.max(1, clientCount));
+  const pingRollupRows = estimateRollupRowsPerClient(pingPreserveHours, pingRecordsPerDay / Math.max(1, clientCount));
+  const estimatedMonitorRecordsRetained = recordEnabled
+    ? Math.min(Math.ceil(monitorRecordsPerDay * recordPreserveHours / 24), clientCount * monitorRollupRows)
+    : 0;
+  const estimatedGpuSnapshotsRetained = recordEnabled
+    ? Math.min(Math.ceil(gpuSnapshotsPerDay * recordPreserveHours / 24), gpuClientCount * monitorRollupRows)
+    : 0;
+  const estimatedPingRecordsRetained = recordEnabled
+    ? Math.min(Math.ceil(pingRecordsPerDay * pingPreserveHours / 24),
+      (pingRecordsPerDay > 0 ? Math.ceil(pingRecordsPerDay / Math.max(1, Math.ceil(86400 / unifiedPingIntervalSec))) : 0) * pingRollupRows)
+    : 0;
   const estimatedLegacyPingRecordsRetained = Math.ceil(legacyPingRecordsPerDay * pingPreserveHours / 24);
   const estimatedRowsRetained = estimatedMonitorRecordsRetained + estimatedGpuSnapshotsRetained + estimatedPingRecordsRetained;
   const estimatedStorageBytes = estimatedMonitorRecordsRetained * ESTIMATED_MONITOR_RECORD_BYTES
@@ -1311,14 +1279,15 @@ export async function buildCapacityEstimate(database: db.QueryDatabase, options:
 
 async function runMaintenanceCleanup(database: db.QueryDatabase, username: string, now = new Date()) {
   const settings = buildAdminSettings(await db.getSettingsByKeys(database, MAINTENANCE_CLEANUP_SETTING_KEYS));
-  const recordHours = Math.min(72, Math.max(1, Number(settings.record_preserve_time || 72)));
-  const pingHours = Math.min(72, Math.max(1, Number(settings.ping_record_preserve_time || recordHours)));
+  const recordHours = Math.min(168, Math.max(1, Number(settings.record_preserve_time || 168)));
+  const pingHours = Math.min(168, Math.max(1, Number(settings.ping_record_preserve_time || recordHours)));
   const auditHours = Math.max(24, Number(settings.audit_log_preserve_time || 2160));
   const before = {
     records: new Date(now.getTime() - recordHours * 60 * 60 * 1000).toISOString(),
     ping_records: new Date(now.getTime() - pingHours * 60 * 60 * 1000).toISOString(),
     audit_logs: new Date(now.getTime() - auditHours * 60 * 60 * 1000).toISOString(),
   };
+  const rolledUp = await db.buildHistoryRollup(database, new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString());
   const expiredBacklogBefore = await db.getExpiredRowCounts(database, before);
   const maxExpiredBacklog = Math.max(
     expiredBacklogBefore.records,
@@ -1332,9 +1301,8 @@ async function runMaintenanceCleanup(database: db.QueryDatabase, username: strin
   const { has_more: recordsMore, ...recordDeleted } = await db.deleteOldRecords(database, before.records, cleanupOptions);
   const { has_more: pingMore, ...pingDeleted } = await db.deleteOldPingRecords(database, before.ping_records, cleanupOptions);
   const { has_more: auditMore, ...auditDeleted } = await db.deleteOldAuditLogs(database, before.audit_logs, cleanupOptions);
-  const { has_more: websitesMore, ...websiteDeleted } = await db.deleteOldWebsiteChecks(database, before.records, cleanupOptions);
-  const hasMore = recordsMore || pingMore || auditMore || websitesMore;
-  const deleted = { ...recordDeleted, ...pingDeleted, ...auditDeleted, ...websiteDeleted };
+  const hasMore = recordsMore || pingMore || auditMore;
+  const deleted = { ...recordDeleted, ...pingDeleted, ...auditDeleted };
   const orphanCleanup = await db.cleanupOrphanClientData(database);
   const expiredBacklogAfter = await db.getExpiredRowCounts(database, before);
   invalidateCapacityEstimateCache();
@@ -1342,6 +1310,7 @@ async function runMaintenanceCleanup(database: db.QueryDatabase, username: strin
     success: true,
     has_more: hasMore,
     before,
+    rolled_up: rolledUp,
     cleanup_options: cleanupOptions,
     deleted,
     orphan_cleanup: orphanCleanup,
@@ -1591,6 +1560,68 @@ adminRoutes.post('/clients/:uuid/edit', async (c) => {
     return c.json({ success: true, changed: 1, client: safeClient });
   } catch (e) {
     return c.json({ error: '编辑失败' }, 500);
+  }
+});
+
+const HOME_PING_MIGRATION_HINT = '数据库还没有执行最新迁移（首页探测点），请打开 /db-init 页面，输入 Supabase Access Token 更新数据库后再试。';
+
+// 迁移还没跑时，PostgREST 会对不存在的函数返回 404（PGRST202）。
+// 按 status / message 鸭子类型判断，不依赖 instanceof（模块被重复加载时 instanceof 会失效）。
+function isMissingHomePingSchema(e: unknown): boolean {
+  const err = e as { status?: unknown; message?: unknown } | null;
+  const message = typeof err?.message === 'string' ? err.message : '';
+  return Number(err?.status) === 404 || /PGRST20\d|could not find the function/i.test(message);
+}
+
+// 首页探测点：节点 -> ping 任务 id。后台编辑节点时用它回填下拉框。
+adminRoutes.get('/home-ping', async (c) => {
+  try {
+    const assignments = await db.getHomePingAssignments(getDatabase(c.env));
+    return c.json({ assignments: assignments || {} });
+  } catch (e) {
+    if (isMissingHomePingSchema(e)) return c.json({ error: HOME_PING_MIGRATION_HINT, code: 'migration_required' }, 503);
+    return c.json({ error: '读取首页探测点失败' }, 500);
+  }
+});
+
+// 设置 / 取消某个节点的首页探测点。task_id 传 null 表示取消。
+adminRoutes.post('/clients/:uuid/home-ping', async (c) => {
+  try {
+    const uuid = c.req.param('uuid');
+    const parsed = await readAdminJsonObject(c);
+    if (!parsed.ok) return parsed.response;
+    const rawTaskId = parsed.body.task_id;
+    const taskId = rawTaskId === null || rawTaskId === undefined || rawTaskId === '' ? null : Number(rawTaskId);
+    if (taskId !== null && (!Number.isInteger(taskId) || taskId <= 0)) {
+      return c.json({ error: 'task_id 必须是正整数或 null' }, 400);
+    }
+
+    const database = getDatabase(c.env);
+    if (taskId !== null) {
+      const tasks = await db.listPingTasks(database, true);
+      const task = tasks.find(item => Number(item.id) === taskId);
+      if (!task) return c.json({ error: '探测任务不存在' }, 404);
+      if (!task.all_clients && !task.clients.includes(uuid)) {
+        return c.json({ error: '该探测任务没有应用到这个节点，请先在探测任务里选择该节点' }, 400);
+      }
+    }
+
+    await db.setHomePingTask(database, uuid, taskId);
+    // 首页色块接口自带 30 秒缓存，设置后清掉，让首页尽快看到变化。
+    await invalidateAdminPublicMetadata(c).catch(() => undefined);
+    runAdminBackground(c, db.insertAuditLog(
+      database,
+      c.get('username')!,
+      'client_edit',
+      taskId === null ? `取消首页探测点: ${uuid}` : `设置首页探测点: ${uuid} -> 任务 ${taskId}`,
+    ));
+    return c.json({ success: true, client: uuid, task_id: taskId });
+  } catch (e) {
+    if (isMissingHomePingSchema(e)) return c.json({ error: HOME_PING_MIGRATION_HINT, code: 'migration_required' }, 503);
+    const detail = String((e as { detail?: unknown; message?: unknown })?.detail ?? (e as Error)?.message ?? '');
+    if (detail.includes('client_not_found')) return c.json({ error: '客户端不存在' }, 404);
+    if (detail.includes('task_not_applicable')) return c.json({ error: '该探测任务没有应用到这个节点' }, 400);
+    return c.json({ error: '设置首页探测点失败' }, 500);
   }
 });
 
@@ -1955,6 +1986,66 @@ adminRoutes.post('/ping/edit', async (c) => {
   }
 });
 
+// 按服务器勾选 Ping 任务：只应用 base 到 tasks 的差量，与任务侧编辑互不覆盖
+adminRoutes.post('/ping/assign', async (c) => {
+  const metrics: TimingMetric[] = [];
+  try {
+    const parsed = await timed(metrics, 'parse_body', () => readAdminJsonObject(c));
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.body;
+
+    const client = typeof body.client === 'string' ? body.client.trim() : '';
+    if (!client) return c.json({ error: '服务器 ID 无效' }, 400);
+
+    const readIds = (value: unknown): number[] | null => {
+      if (!Array.isArray(value)) return null;
+      const ids: number[] = [];
+      for (const item of value) {
+        const id = Number(item);
+        if (!Number.isInteger(id) || id <= 0) return null;
+        ids.push(id);
+      }
+      return [...new Set(ids)];
+    };
+    const desired = readIds(body.tasks);
+    const base = readIds(body.base);
+    if (!desired || !base) return c.json({ error: '任务列表格式不对' }, 400);
+
+    const database = getDatabase(c.env);
+    const clientIds = await timed(metrics, 'db_client_ids', () => db.listClientIds(database));
+    if (!clientIds.includes(client)) return c.json({ error: '服务器不存在，可能已被删除' }, 404);
+
+    const current = await timed(metrics, 'db_list_ping', () => db.listPingTasks(database, true));
+    const plan = planClientPingAssignment(current, client, desired, base);
+    if (!plan.ok) return c.json({ error: plan.error }, 400);
+
+    const updated: db.PingTask[] = [];
+    for (const update of plan.updates) {
+      const task = await timed(metrics, 'db_update_ping', () => db.updatePingTaskAndReturn(database, update.id, { clients: update.clients }));
+      if (task) updated.push(task);
+    }
+
+    if (updated.length > 0) {
+      invalidateAdminPingTasksCache();
+      purgeAdminPingTasksEdgeCache(c);
+      invalidateAdminPublicMetadata(c);
+      invalidateAgentPingTaskCache();
+      invalidateCapacityEstimateCache();
+      runAdminBackground(c, refreshLivePingTasks(c));
+      runAdminBackground(c, db.insertAuditLog(
+        database,
+        c.get('username')!,
+        'ping_assign',
+        `调整服务器 ${client} 的 Ping 任务: ${updated.map(task => `${task.name}${task.clients.includes(client) ? '(+)' : '(-)'}`).join(', ')}`,
+      ));
+    }
+    setServerTiming(c, metrics);
+    return c.json({ success: true, changed: updated.length, tasks: updated });
+  } catch {
+    return c.json({ error: '保存失败' }, 500);
+  }
+});
+
 adminRoutes.post('/ping/reorder', async (c) => {
   const metrics: TimingMetric[] = [];
   try {
@@ -2014,185 +2105,6 @@ adminRoutes.post('/ping/delete', async (c) => {
     return c.json({ success: true, id });
   } catch {
     return c.json({ error: '删除失败' }, 500);
-  }
-});
-
-// ============ 网站监控 ============
-
-adminRoutes.get('/websites', async (c) => {
-  const database = getDatabase(c.env);
-  return c.json(await db.listWebsiteMonitors(database, true));
-});
-
-adminRoutes.get('/websites/:id/checks', async (c) => {
-  const id = Number(c.req.param('id'));
-  if (!Number.isInteger(id) || id <= 0) {
-    return c.json({ error: '网站监控 ID 无效' }, 400);
-  }
-  const limit = Math.min(500, Math.max(1, Number(c.req.query('limit') || 120)));
-  const database = getDatabase(c.env);
-  return c.json(await db.listWebsiteChecks(database, id, limit));
-});
-
-adminRoutes.post('/websites/add', async (c) => {
-  try {
-    const parsed = await readAdminJsonObject(c);
-    if (!parsed.ok) return parsed.response;
-    const body = parsed.body;
-    const validated = validateWebsiteMonitorInput(body);
-    if (!validated.ok) return c.json({ error: '网站监控校验失败', code: validated.error }, 400);
-
-    const database = getDatabase(c.env);
-    const monitor = await db.createWebsiteMonitor(database, validated.value);
-    invalidateWebsiteMonitorPublicState(c, { upsert: [monitor] });
-    runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'website_add', `添加网站监控: ${monitor.name} ${monitor.url}`));
-    return c.json({ success: true, monitor });
-  } catch (error) {
-    console.error('[admin] website add failed:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '添加失败' }, 500);
-  }
-});
-
-adminRoutes.post('/websites/edit', async (c) => {
-  try {
-    const parsed = await readAdminJsonObject(c);
-    if (!parsed.ok) return parsed.response;
-    const body = parsed.body;
-    const id = Number(body.id);
-    if (!Number.isInteger(id) || id <= 0) {
-      return c.json({ error: '网站监控 ID 无效' }, 400);
-    }
-
-    const database = getDatabase(c.env);
-    const hasFullPayload = WEBSITE_MONITOR_REQUIRED_EDIT_FIELDS.every((field) => Object.prototype.hasOwnProperty.call(body, field));
-    const existing = hasFullPayload ? null : await db.getWebsiteMonitor(database, id);
-    if (!hasFullPayload && !existing) return c.json({ error: '网站监控不存在' }, 404);
-
-    const candidate = hasFullPayload ? body : { ...existing, ...body };
-    const validated = validateWebsiteMonitorInput(candidate);
-    if (!validated.ok) return c.json({ error: '网站监控校验失败', code: validated.error }, 400);
-
-    const monitor = await db.updateWebsiteMonitorAndReturn(database, id, validated.value);
-    if (!monitor) return c.json({ error: '网站监控不存在' }, 404);
-    invalidateWebsiteMonitorPublicState(c, { upsert: [monitor] });
-    runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'website_edit', `编辑网站监控: ${existing?.name || id} -> ${monitor.name}`));
-    return c.json({ success: true, changed: 1, monitor });
-  } catch (error) {
-    console.error('[admin] website edit failed:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '编辑失败' }, 500);
-  }
-});
-
-adminRoutes.post('/websites/visibility', async (c) => {
-  try {
-    const parsed = await readAdminJsonObject(c);
-    if (!parsed.ok) return parsed.response;
-    const body = parsed.body;
-    const id = Number(body.id);
-    const hidden = body.hidden;
-    if (!Number.isInteger(id) || id <= 0 || typeof hidden !== 'boolean') {
-      return c.json({ error: '网站监控显隐参数无效' }, 400);
-    }
-    const database = getDatabase(c.env);
-    const changed = await db.setWebsiteMonitorVisibility(database, id, hidden);
-    const monitor = await db.getWebsiteMonitor(database, id);
-    invalidateWebsiteMonitorPublicState(c, monitor ? {
-      upsert: [monitor],
-      remove: hidden ? [id] : undefined,
-    } : true);
-    runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'website_visibility', `网站监控 ${id} ${hidden ? '隐藏' : '显示'}`));
-    return c.json({ success: true, changed: changed ? 1 : 0 });
-  } catch (error) {
-    console.error('[admin] website visibility failed:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '设置失败' }, 500);
-  }
-});
-
-adminRoutes.post('/websites/enabled', async (c) => {
-  try {
-    const parsed = await readAdminJsonObject(c);
-    if (!parsed.ok) return parsed.response;
-    const body = parsed.body;
-    const id = Number(body.id);
-    const enabled = body.enabled;
-    if (!Number.isInteger(id) || id <= 0 || typeof enabled !== 'boolean') {
-      return c.json({ error: '网站监控启停参数无效' }, 400);
-    }
-    const database = getDatabase(c.env);
-    const changed = await db.setWebsiteMonitorEnabled(database, id, enabled);
-    const monitor = await db.getWebsiteMonitor(database, id);
-    invalidateWebsiteMonitorPublicState(c, monitor ? { upsert: [monitor] } : true);
-    runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'website_enabled', `网站监控 ${id} ${enabled ? '启用' : '停用'}`));
-    return c.json({ success: true, changed: changed ? 1 : 0 });
-  } catch (error) {
-    console.error('[admin] website enabled failed:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '设置失败' }, 500);
-  }
-});
-
-adminRoutes.post('/websites/reorder', async (c) => {
-  try {
-    const parsed = await readAdminJsonObject(c);
-    if (!parsed.ok) return parsed.response;
-    const body = parsed.body;
-    const ids = Array.isArray(body.ids)
-      ? body.ids.map((id: unknown) => Number(id)).filter((id: number) => Number.isInteger(id) && id > 0)
-      : [];
-    if (ids.length === 0) return c.json({ error: '网站监控排序列表不能为空' }, 400);
-    if (new Set(ids).size !== ids.length) return c.json({ error: '网站监控排序列表不能包含重复 ID' }, 400);
-
-    const database = getDatabase(c.env);
-    const updated = await db.reorderWebsiteMonitors(database, ids);
-    invalidateWebsiteMonitorPublicState(c, { reorder: ids });
-    runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'website_reorder', `调整网站监控排序: ${ids.join(',')}`));
-    return c.json({ success: true, updated });
-  } catch (error) {
-    console.error('[admin] website reorder failed:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '排序失败' }, 400);
-  }
-});
-
-adminRoutes.post('/websites/delete', async (c) => {
-  try {
-    const parsed = await readAdminJsonObject(c);
-    if (!parsed.ok) return parsed.response;
-    const body = parsed.body;
-    const database = getDatabase(c.env);
-    const id = Number(body.id);
-    if (!Number.isInteger(id) || id <= 0) {
-      return c.json({ error: '网站监控 ID 无效' }, 400);
-    }
-    const existing = await db.getWebsiteMonitor(database, id);
-    if (!existing) return c.json({ error: '网站监控不存在' }, 404);
-    await db.deleteWebsiteMonitor(database, id);
-    invalidateWebsiteMonitorPublicState(c, { remove: [id] });
-    runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'website_delete', `删除网站监控: ${existing.name} ${existing.url}`));
-    return c.json({ success: true });
-  } catch (error) {
-    console.error('[admin] website delete failed:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '删除失败' }, 500);
-  }
-});
-
-adminRoutes.post('/websites/:id/check', async (c) => {
-  try {
-    const parsed = await readAdminJsonObject(c);
-    if (!parsed.ok) return parsed.response;
-    const id = Number(c.req.param('id'));
-    if (!Number.isInteger(id) || id <= 0) {
-      return c.json({ error: '网站监控 ID 无效' }, 400);
-    }
-    const database = getDatabase(c.env);
-    const monitor = await db.getWebsiteMonitor(database, id);
-    if (!monitor) return c.json({ error: '网站监控不存在' }, 404);
-    const check = await checkWebsiteMonitorHttp(monitor);
-    const updated = await db.recordWebsiteCheck(database, check);
-    invalidateWebsiteMonitorPublicState(c, updated ? { upsert: [updated] } : true);
-    runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'website_check', `手动检测网站监控: ${monitor.name}`));
-    return c.json({ success: true, monitor: updated, check });
-  } catch (error) {
-    console.error('[admin] website check failed:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '检测失败' }, 500);
   }
 });
 
@@ -3133,7 +3045,7 @@ adminRoutes.post('/upload/backup', async (c) => {
     invalidateAgentPingTaskCache();
     invalidateAllowedClientIdsCache();
     invalidateCapacityEstimateCache();
-    invalidateWebsiteMonitorPublicState(c);
+    runAdminBackground(c, refreshLiveAgentPolicy(c));
     if (validated.backup.clients !== undefined) {
       const authoritativeClients = await db.listClients(database, true);
       const synchronization = await liveDataStub(c).fetch(new Request('https://do/clients-restore', {

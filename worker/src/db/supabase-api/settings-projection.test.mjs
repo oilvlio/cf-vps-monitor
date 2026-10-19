@@ -22,14 +22,13 @@ test('AUD-17 narrow settings readers transfer only the requested keys from the d
       return Response.json(value);
     };
     const queries = await loadTypeScriptFunctions(new URL('../queries.ts', import.meta.url), [
-      'filterSettings', 'getSetting', 'getSettingsByKeys', 'getRawSettingsByKeys', 'getAllSettings',
+      'filterSettings', 'getSetting', 'getSettingsByKeys', 'getAllSettings',
     ], { sba });
     const connection = { provider: 'supabase-api', env: { SUPABASE_URL: 'https://synthetic.invalid', SUPABASE_SECRET_KEY: 'sb_secret_synthetic' } };
     assert.equal(await queries.getSetting(connection, 'record_enabled'), 'true');
     assert.deepEqual(Object.keys(payloads.at(-1)).sort(), ['record_enabled'], 'logo and unrelated secrets must not cross the RPC response boundary');
     assert.deepEqual(await queries.getSettingsByKeys(connection, ['record_enabled', 'missing']), { record_enabled: 'true' });
     assert.deepEqual(payloads.at(-1), { record_enabled: 'true' });
-    assert.deepEqual(await queries.getRawSettingsByKeys(connection, ['record_enabled']), { record_enabled: 'true' });
     const calls = payloads.length;
     assert.deepEqual(await queries.getSettingsByKeys(connection, []), {});
     assert.equal(payloads.length, calls, 'empty key list does not need a database request');

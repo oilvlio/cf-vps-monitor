@@ -50,34 +50,6 @@ test('R-A11 node-card fallback has no fabricated host temperature', () => {
   assert.equal(fallback.temp, null, 'an absent live record is not a measured zero');
 });
 
-test('R-F01 website mutation events do not expose administrator rows', () => {
-  const sent = [];
-  const events = productionModule('src/utils/websiteMonitorEvents.ts', {
-    './crossTabEvents': { broadcastCrossTab: (_name, detail) => sent.push(detail), subscribeCrossTab() {} },
-  });
-  const monitor = { id: 1, name: 'private name', url: 'https://private.invalid/path', hide_url: true, hidden: false, agent_probe_clients: ['private-node'] };
-  for (const detail of [
-    { upsert: [monitor] },
-    { upsert: [{ ...monitor, enabled: false }] },
-    { upsert: [{ ...monitor, hidden: true }] },
-    { upsert: [monitor], reorder: [1] },
-  ]) {
-    events.notifyWebsiteMonitorsUpdated(detail);
-    assert.equal(JSON.stringify(sent.at(-1)).includes('https://private.invalid/path'), false, 'private URL cannot enter public transport');
-    assert.equal(JSON.stringify(sent.at(-1)).includes('private-node'), false, 'private probe selection cannot enter public transport');
-  }
-});
-
-test('R-F01 public website normalization defends against an older full administrator event', () => {
-  const file = 'src/pages/Index.tsx';
-  const readWebsiteHidden = productionDeclaration(file, 'readWebsiteHidden');
-  const normalize = productionDeclaration(file, 'normalizeWebsiteSummary', { readWebsiteHidden });
-  const monitor = { id: 1, name: 'Synthetic', url: 'https://private.invalid/path', hidden: false, hide_url: true };
-  assert.equal(normalize(monitor).url, null, 'anonymous consumer independently respects hide_url');
-  assert.equal(normalize(monitor, { includeHidden: true }).url, monitor.url, 'explicit administrator view may retain the address');
-  assert.equal(normalize({ ...monitor, hide_url: false, url: null }).url, null, 'null public API addresses stay null');
-});
-
 test('R-F02 invalid settings responses never become a confirmed cache baseline', async () => {
   for (const payload of [null, [], 'invalid', { record_preserve_time: null }]) {
     const settingsCacheRef = { current: {} };
@@ -130,34 +102,30 @@ test('R-F03 a slow title save preserves a logo confirmed while the request was p
   assert.equal(settingsCacheRef.current.site.site_title, 'Confirmed title');
 });
 
-for (const domain of ['clients', 'websites']) {
-  test(`R-F04 a failed ${domain} reorder cannot undo another confirmed edit`, async () => {
-    const response = Promise.withResolvers();
-    const initial = domain === 'clients'
-      ? [{ uuid: 'a', name: 'Alpha', sort_order: 0 }, { uuid: 'b', name: 'Beta', sort_order: 1 }]
-      : [{ id: 1, name: 'Alpha', sort_order: 1 }, { id: 2, name: 'Beta', sort_order: 2 }];
-    let current = structuredClone(initial);
-    const update = value => { current = typeof value === 'function' ? value(current) : value; };
-    const reorder = productionDeclaration(`src/pages/admin/${domain === 'clients' ? 'Dashboard' : 'Websites'}.tsx`, 'handleDragEnd', {
-      clients: initial, monitors: initial, filtered: initial, dragDisabled: false,
-      setClients: update, setMonitors: update, updateClients: update, updateMonitors: update,
-      clientOrderRef: { current: 0 }, monitorOrderRef: { current: 0 },
-      apiFetch: () => response.promise,
-      loadClients: async () => {}, loadMonitors: async () => {},
-      moveAdminNodeInVisibleOrder: productionModule('src/utils/adminNodeOrder.ts').moveAdminNodeInVisibleOrder,
-      arrayMove: (items, from, to) => { const list = [...items]; list.splice(to, 0, list.splice(from, 1)[0]); return list; },
-      assertSuccess: result => { if (!result.success) throw new Error('Rejected reorder'); },
-      notifyPublicDataUpdated() {}, notifyWebsiteMonitorsUpdated() {},
-      toast: { error() {}, success() {} },
-    });
-    const pending = reorder({ active: { id: domain === 'clients' ? 'a' : 1 }, over: { id: domain === 'clients' ? 'b' : 2 } });
-    current = current.map(item => item.name === 'Alpha' ? { ...item, name: 'Newest persisted name' } : item);
-    response.resolve({ success: false });
-    await pending;
-    assert.ok(current.some(item => item.name === 'Newest persisted name'), 'rollback changes order only, preserving newer fields');
-    assert.equal(current[0].name, 'Newest persisted name', 'the original order is restored');
+test('R-F04 a failed clients reorder cannot undo another confirmed edit', async () => {
+  const response = Promise.withResolvers();
+  const initial = [{ uuid: 'a', name: 'Alpha', sort_order: 0 }, { uuid: 'b', name: 'Beta', sort_order: 1 }];
+  let current = structuredClone(initial);
+  const update = value => { current = typeof value === 'function' ? value(current) : value; };
+  const reorder = productionDeclaration('src/pages/admin/Dashboard.tsx', 'handleDragEnd', {
+    clients: initial, filtered: initial, dragDisabled: false,
+    setClients: update, updateClients: update,
+    clientOrderRef: { current: 0 },
+    apiFetch: () => response.promise,
+    loadClients: async () => {},
+    moveAdminNodeInVisibleOrder: productionModule('src/utils/adminNodeOrder.ts').moveAdminNodeInVisibleOrder,
+    arrayMove: (items, from, to) => { const list = [...items]; list.splice(to, 0, list.splice(from, 1)[0]); return list; },
+    assertSuccess: result => { if (!result.success) throw new Error('Rejected reorder'); },
+    notifyPublicDataUpdated() {},
+    toast: { error() {}, success() {} },
   });
-}
+  const pending = reorder({ active: { id: 'a' }, over: { id: 'b' } });
+  current = current.map(item => item.name === 'Alpha' ? { ...item, name: 'Newest persisted name' } : item);
+  response.resolve({ success: false });
+  await pending;
+  assert.ok(current.some(item => item.name === 'Newest persisted name'), 'rollback changes order only, preserving newer fields');
+  assert.equal(current[0].name, 'Newest persisted name', 'the original order is restored');
+});
 
 test('R-F06 logout waits for confirmation, deduplicates and preserves authentication on failure', async () => {
   const response = Promise.withResolvers();

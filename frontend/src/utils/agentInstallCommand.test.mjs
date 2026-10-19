@@ -11,7 +11,8 @@ await writeFile(join(tmp, 'projectLinks.ts'), projectLinksSource);
 await writeFile(join(tmp, 'agentInstallCommand.ts'), commandSource.replace("from './projectLinks'", "from './projectLinks.ts'"));
 
 const { buildAgentInstallCommand, buildAgentUninstallAllCommand, defaultAgentInstallOptions } = await import(pathToFileURL(join(tmp, 'agentInstallCommand.ts')).href);
-const { CF_MONITOR_REPOSITORY } = await import(pathToFileURL(join(tmp, 'projectLinks.ts')).href);
+const { CF_MONITOR_AGENT_REPOSITORY } = await import(pathToFileURL(join(tmp, 'projectLinks.ts')).href);
+const CF_MONITOR_REPOSITORY = CF_MONITOR_AGENT_REPOSITORY;
 
 const base = {
   serverUrl: 'https://panel.example',
@@ -48,5 +49,19 @@ assert.equal(
   buildAgentUninstallAllCommand({ platform: 'unix' }),
   `wget -qO- 'https://raw.githubusercontent.com/${CF_MONITOR_REPOSITORY}/refs/heads/main/agent/install.sh' | sh -s -- '--uninstall-all' '--yes'`,
 );
+
+const hostLoadCommand = buildAgentInstallCommand({
+  platform: 'unix',
+  ...base,
+  options: { ...defaultAgentInstallOptions, allowHostLoad: true, hostCpuCores: '64' },
+});
+assert.ok(hostLoadCommand.endsWith("'--allow-host-load' '--host-cpu-cores' '64'"), hostLoadCommand);
+assert.ok(!buildAgentInstallCommand({ platform: 'unix', ...base, options: { ...defaultAgentInstallOptions, allowHostLoad: true } }).includes('host-cpu-cores'));
+assert.ok(!buildAgentInstallCommand({ platform: 'unix', ...base, options: { ...defaultAgentInstallOptions, hostCpuCores: '64' } }).includes('host-cpu-cores'), 'cores without allowHostLoad must not leak into the command');
+assert.ok(!/allow-host-load|host-cpu-cores/i.test(buildAgentInstallCommand({
+  platform: 'windows',
+  ...base,
+  options: { ...defaultAgentInstallOptions, allowHostLoad: true, hostCpuCores: '64' },
+})), 'Windows installer has no host-load option');
 
 await rm(tmp, { recursive: true, force: true });

@@ -497,6 +497,23 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: Command
             <FieldInput label="网卡包含" value={installOptions.nicInclude} onChange={(v) => setOption('nicInclude', v)} placeholder="例如 eth*,ens*" />
             <FieldInput label="网卡排除" value={installOptions.nicExclude} onChange={(v) => setOption('nicExclude', v)} placeholder="例如 lo,docker*,veth*" />
             <FieldInput label="流量重置日期" value={installOptions.trafficResetDay} onChange={(v) => setOption('trafficResetDay', v)} type="number" min={1} step={1} placeholder="1" />
+            {platform === 'unix' && (
+              <>
+                <label>
+                  <Text size="2" weight="bold" style={{ display: 'block', marginBottom: 4 }}>容器宿主机负载</Text>
+                  <Select.Root value={installOptions.allowHostLoad ? 'on' : 'off'} onValueChange={(v) => setOption('allowHostLoad', v === 'on')}>
+                    <Select.Trigger style={{ width: '100%' }} />
+                    <Select.Content>
+                      <Select.Item value="off">不上报（LXC/Incus 等容器无法获得本机负载时留空）</Select.Item>
+                      <Select.Item value="on">上报宿主机负载</Select.Item>
+                    </Select.Content>
+                  </Select.Root>
+                </label>
+                {installOptions.allowHostLoad && (
+                  <FieldInput label="宿主机核数" value={installOptions.hostCpuCores} onChange={(v) => setOption('hostCpuCores', v)} type="number" min={1} step={1} placeholder="填写后按容器核数折算，使负载色点反映宿主机利用率" />
+                )}
+              </>
+            )}
           </div>
         </Flex>
 
@@ -603,6 +620,49 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
   const apiFetch = useApi();
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState<Record<string, unknown>>({});
+  // 首页探测点：下拉框只列出已应用到这个节点的 ping 任务，'' 表示不显示。
+  const [homePingTasks, setHomePingTasks] = useState<{ id: number; name: string; type: string; target: string }[]>([]);
+  const [homeTaskId, setHomeTaskId] = useState('');
+  const [initialHomeTaskId, setInitialHomeTaskId] = useState('');
+  const [homePingError, setHomePingError] = useState('');
+
+  useEffect(() => {
+    if (!client || !open) return undefined;
+    let cancelled = false;
+    (async () => {
+      // 任务列表和「当前选中的首页探测点」分开读取：后者失败（比如数据库还没执行迁移）
+      // 不能把前者一起清空，否则下拉框里就只剩「不显示」。
+      const [tasksResult, homeResult] = await Promise.allSettled([
+        apiFetch('/task/ping?include_hidden=1'),
+        apiFetch('/admin/home-ping'),
+      ]);
+      if (cancelled) return;
+
+      const rawTasks = tasksResult.status === 'fulfilled' && Array.isArray(tasksResult.value) ? tasksResult.value : [];
+      const applicable = rawTasks
+        .filter((task: { all_clients?: unknown; clients?: unknown }) => Boolean(task.all_clients) || (Array.isArray(task.clients) && task.clients.includes(client.uuid)))
+        .map((task: { id: number | string; name?: string; type?: string; target?: string }) => ({
+          id: Number(task.id), name: String(task.name || ''), type: String(task.type || ''), target: String(task.target || ''),
+        }))
+        .filter((task: { id: number }) => Number.isInteger(task.id) && task.id > 0);
+      setHomePingTasks(applicable);
+
+      if (homeResult.status === 'fulfilled') {
+        const current = homeResult.value?.assignments?.[client.uuid];
+        const currentId = Number.isInteger(Number(current)) && Number(current) > 0 ? String(Number(current)) : '';
+        setHomeTaskId(currentId);
+        setInitialHomeTaskId(currentId);
+        setHomePingError(tasksResult.status === 'rejected' ? '探测任务列表读取失败，请刷新页面重试。' : '');
+      } else {
+        // 保持 initial 与当前一致，保存时就不会去改首页探测点。
+        setHomeTaskId('');
+        setInitialHomeTaskId('');
+        const reason = homeResult.reason;
+        setHomePingError(reason instanceof Error && reason.message ? reason.message : '读取首页探测点失败');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [apiFetch, client, open]);
 
   useEffect(() => {
     if (client) setForm({
@@ -648,6 +708,16 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
         const saved = result.client && typeof result.client === 'object' && typeof result.client.uuid === 'string'
           ? result.client as Partial<AdminClient> & { uuid: string }
           : undefined;
+        if (homeTaskId !== initialHomeTaskId) {
+          try {
+            await apiFetch('/admin/clients/' + client.uuid + '/home-ping', {
+              method: 'POST',
+              body: JSON.stringify({ task_id: homeTaskId === '' ? null : Number(homeTaskId) }),
+            });
+          } catch (e: unknown) {
+            toast.error(e instanceof Error ? `服务器已保存，但首页探测点设置失败：${e.message}` : '服务器已保存，但首页探测点设置失败');
+          }
+        }
         toast.success('保存成功');
         onOpenChange(false);
         onSaved(client.uuid, payload as Partial<AdminClient>, saved);
@@ -671,6 +741,26 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
             <FieldInput label="公开备注" value={String(form.public_remark || '')} onChange={v => update('public_remark', v)} textarea />
             <FieldInput label="分组" value={String(form.group || '')} onChange={v => update('group', v)} />
             <FieldInput label="标签 (分号分隔)" value={String(form.tags || '')} onChange={v => update('tags', v)} />
+            <Box>
+              <Text size="2" weight="bold" style={{ display: 'block', marginBottom: 4 }}>首页探测点</Text>
+              <Select.Root value={homeTaskId === '' ? '__none__' : homeTaskId} onValueChange={v => setHomeTaskId(v === '__none__' ? '' : v)}>
+                <Select.Trigger style={{ width: '100%' }} />
+                <Select.Content>
+                  <Select.Item value="__none__">不显示</Select.Item>
+                  {homePingTasks.map(task => (
+                    <Select.Item key={task.id} value={String(task.id)}>
+                      {task.name || `#${task.id}`}{task.target ? `（${task.type ? `${task.type.toUpperCase()} ` : ''}${task.target}）` : ''}
+                    </Select.Item>
+                  ))}
+                </Select.Content>
+              </Select.Root>
+              {homePingError && (
+                <Text size="1" color="red" style={{ display: 'block', marginTop: 4 }}>{homePingError}</Text>
+              )}
+              <Text size="1" color="gray" style={{ display: 'block', marginTop: 4 }}>
+                首页节点卡片上的延迟 / 丢包色块只读这一个探测任务。列表里是已应用到该节点的探测任务，没有可选项时请先到「探测任务」里把这个节点加进去。
+              </Text>
+            </Box>
             <Separator size="4" />
             <Text size="2" weight="bold">计费信息</Text>
             <div className="billing-price-grid">

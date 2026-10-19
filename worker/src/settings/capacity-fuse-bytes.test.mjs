@@ -20,8 +20,8 @@ assert.ok(entry.min >= 16_777_216, '下界不能低到让熔断永远处于触�
 assert.ok(SETTING_SCHEMA.record_high_watermark_rows, '行数熔断线仍应保留');
 
 const live = readFileSync(new URL('../do/live-data.ts', import.meta.url), 'utf8');
-const rpc = readFileSync(new URL('../../../supabase/migrations/4_rpc_api.sql', import.meta.url), 'utf8');
-const schemaSql = readFileSync(new URL('../../../supabase/migrations/1_core_schema.sql', import.meta.url), 'utf8');
+const rpc = readFileSync(new URL('../../../supabase/migrations/2_functions.sql', import.meta.url), 'utf8');
+const schemaSql = readFileSync(new URL('../../../supabase/migrations/1_schema.sql', import.meta.url), 'utf8');
 const admin = readFileSync(new URL('../routes/admin.ts', import.meta.url), 'utf8');
 
 // 1) 度量必须来自 pg_total_relation_size（含索引与 TOAST），不能是 pg_relation_size

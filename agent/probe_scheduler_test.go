@@ -372,11 +372,11 @@ func TestAUD23SlowProbesDoNotBlockReportsAndUseBoundedConcurrency(t *testing.T) 
 			closer.close()
 		}
 	})
-	tasks := make([]WebsiteProbeTask, 20)
+	tasks := make([]PingTask, 20)
 	for index := range tasks {
-		tasks[index] = WebsiteProbeTask{ID: index + 1, URL: "tcp://fixture.invalid:443", Method: "TCP", TimeoutSec: 30, IntervalSec: 120}
+		tasks[index] = PingTask{ID: index + 1, Type: "tcp", Target: "fixture.invalid:443", IntervalSec: 120}
 	}
-	state.applyPolicy(agentPolicy{WebsiteProbeTasks: tasks})
+	state.applyPolicy(agentPolicy{PingTasks: tasks})
 	first := Report{}
 	started := time.Now()
 	state.appendDueResults(&first, time.Now())
@@ -386,7 +386,7 @@ func TestAUD23SlowProbesDoNotBlockReportsAndUseBoundedConcurrency(t *testing.T) 
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		state.mu.Lock()
-		count := len(state.pendingWebsites)
+		count := len(state.pendingPing)
 		state.mu.Unlock()
 		if count == 20 {
 			break
@@ -401,71 +401,8 @@ func TestAUD23SlowProbesDoNotBlockReportsAndUseBoundedConcurrency(t *testing.T) 
 	}
 	last := Report{}
 	state.appendDueResults(&last, time.Now())
-	if len(first.WebsiteProbeResults)+len(last.WebsiteProbeResults) != 20 {
-		t.Fatal("completed website results were lost")
-	}
-}
-
-func TestAUD23TCPWebsiteBudgetIncludesDNS(t *testing.T) {
-	previous := resolvePublicIPsForPing
-	t.Cleanup(func() { resolvePublicIPsForPing = previous })
-	for _, timeout := range []int{1, 30} {
-		t.Run(fmt.Sprint(timeout), func(t *testing.T) {
-			var budget time.Duration
-			hasDeadline := false
-			resolvePublicIPsForPing = func(ctx context.Context, _ string) ([]net.IP, error) {
-				deadline, ok := ctx.Deadline()
-				hasDeadline = ok
-				budget = time.Until(deadline)
-				return nil, context.DeadlineExceeded
-			}
-			executeWebsiteTCPProbe(WebsiteProbeTask{ID: 1, URL: "tcp://fixture.invalid:443", Method: "TCP", TimeoutSec: timeout})
-			want := time.Duration(timeout) * time.Second
-			if !hasDeadline || budget <= want-150*time.Millisecond || budget > want {
-				t.Fatalf("DNS deadline budget = %s (present=%v), want %s", budget, hasDeadline, want)
-			}
-		})
-	}
-}
-
-func TestAUD23HTTPBodyTimeoutIsAProbeFailure(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		w.Header().Set("Content-Length", "10")
-		w.WriteHeader(200)
-		w.(http.Flusher).Flush()
-		select {
-		case <-request.Context().Done():
-		case <-time.After(time.Second):
-			_, _ = io.WriteString(w, "0123456789")
-		}
-	}))
-	defer server.Close()
-	client := server.Client()
-	client.Timeout = 150 * time.Millisecond
-	result := executeWebsiteHTTPProbeWithClient(WebsiteProbeTask{ID: 1, URL: server.URL, Method: "GET", TimeoutSec: 1}, client)
-	if result.OK || result.EffectiveReason != "timeout" {
-		t.Fatalf("timed-out body reported as successful/reachable: %+v", result)
-	}
-}
-
-func TestAUD23DNSActuallyStopsAtWebsiteTimeout(t *testing.T) {
-	previous := resolvePublicIPsForPing
-	t.Cleanup(func() { resolvePublicIPsForPing = previous })
-	resolvePublicIPsForPing = func(ctx context.Context, _ string) ([]net.IP, error) {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(1500 * time.Millisecond):
-			return nil, errors.New("resolver remained unbounded")
-		}
-	}
-	started := time.Now()
-	result := executeWebsiteTCPProbe(WebsiteProbeTask{ID: 1, URL: "tcp://fixture.invalid:443", Method: "TCP", TimeoutSec: 1})
-	if elapsed := time.Since(started); elapsed > 1300*time.Millisecond {
-		t.Fatalf("one-second total probe budget took %s", elapsed)
-	}
-	if result.OK || result.EffectiveReason != "timeout" {
-		t.Fatalf("unexpected timeout result: %+v", result)
+	if len(first.PingResults)+len(last.PingResults) != 20 {
+		t.Fatal("completed ping results were lost")
 	}
 }
 
@@ -552,11 +489,11 @@ func TestAUD23BasicReportsContinueWhileTwentyProbesTimeOut(t *testing.T) {
 	t.Cleanup(func() { resolvePublicIPsForPing = previous })
 	state := newPingReportState()
 	t.Cleanup(state.close)
-	tasks := make([]WebsiteProbeTask, 20)
+	tasks := make([]PingTask, 20)
 	for index := range tasks {
-		tasks[index] = WebsiteProbeTask{ID: index + 1, URL: "tcp://fixture.invalid:443", Method: "TCP", TimeoutSec: 1, IntervalSec: 120}
+		tasks[index] = PingTask{ID: index + 1, Type: "tcp", Target: "fixture.invalid:443", IntervalSec: 120}
 	}
-	state.applyPolicy(agentPolicy{WebsiteProbeTasks: tasks})
+	state.applyPolicy(agentPolicy{PingTasks: tasks})
 	reportsSeen := make(chan int64, 8)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		peer, err := (&websocket.Upgrader{}).Upgrade(w, request, nil)

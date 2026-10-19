@@ -53,7 +53,7 @@ test('AUD-09 installation preserves unrelated shared-schema access and defaults'
         (select count(*)::integer from pg_class c join pg_namespace n on n.oid=c.relnamespace
           where n.nspname='public' and c.relname in ('clients','records','gpu_records','gpu_snapshots',
           'users','login_rate_limits','settings','themes','theme_assets','ping_tasks','ping_records',
-          'ping_snapshots','website_monitors','website_checks','offline_notifications',
+          'ping_snapshots','offline_notifications',
           'expiry_notifications','load_notifications','audit_logs') and c.relrowsecurity and c.relforcerowsecurity) as protected_tables,
         (select count(*)::integer from pg_proc p join pg_namespace n on n.oid=p.pronamespace
           where n.nspname='public' and p.proname like 'cfm_%' and
@@ -61,7 +61,7 @@ test('AUD-09 installation preserves unrelated shared-schema access and defaults'
     `)).rows[0];
     assert.deepEqual(appAccess, {
       unrelated_select: false, unrelated_sequence: false, public_settings: false,
-      protected_tables: 18, public_rpcs: 0,
+      protected_tables: 16, public_rpcs: 0,
     });
     await applyApplicationMigrations(database);
     assert.deepEqual(await unrelatedPrivileges(database), after, 'repeat install preserves the same ACLs');
@@ -81,20 +81,17 @@ test('AUD-09 restore has the sequence privileges it needs without broad platform
       await applyApplicationMigrations(database);
       await database.exec('set role service_role');
       await assert.doesNotReject(rpc(database, 'cfm_restore_backup_data', { input_backup: {
-        website_monitors: [{ id: 11, name: 'Restored website', url: 'https://example.com/' }],
         ping_tasks: [{ id: 11, name: 'Restored ping', target: 'example.com', type: 'icmp' }],
         load_notifications: [{ id: 11, name: 'Restored load rule', metric: 'cpu', threshold: 80 }],
       } }), 'application migrations must explicitly grant the privileges used by restore');
-      const website = await rpc(database, 'cfm_create_website_monitor', { input_monitor: { name: 'Next website', url: 'https://example.org/' } });
       const ping = await rpc(database, 'cfm_create_ping_task', { input_task: { name: 'Next ping', target: 'example.org' } });
       await rpc(database, 'cfm_create_load_notification', { input_item: { name: 'Next load rule', metric: 'cpu' } });
-      assert.ok(website.id > 11);
       assert.ok(ping.id > 11);
       assert.ok((await database.query("select id from load_notifications where name = 'Next load rule'")).rows[0].id > 11);
       await database.exec('reset role');
       const unrelated = (await database.query(`select
         has_sequence_privilege('service_role', 'public.unrelated_restore_sequence', 'update') as unrelated_update,
-        has_sequence_privilege('service_role', pg_get_serial_sequence('website_checks', 'id'), 'update') as unused_update
+        has_sequence_privilege('service_role', pg_get_serial_sequence('records', 'id'), 'update') as unused_update
       `)).rows[0];
       assert.deepEqual(unrelated, { unrelated_update: false, unused_update: false }, 'restore privileges stay scoped to the identities it advances');
     }

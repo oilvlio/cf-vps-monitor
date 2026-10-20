@@ -347,18 +347,19 @@ export function getPingYAxisDomain(series: PingTaskSeries[]): [number, number] {
   if (values.length === 0) return [0, 100];
 
   const min = Math.min(...values);
-  const max = Math.max(...values);
-  const range = max - min;
-  const padding = range > 0 ? Math.max(5, range * 0.35) : Math.max(8, max * 0.25);
-  const lower = Math.max(0, min - padding);
-  const upper = max + padding;
-
-  if (upper - lower < 12) {
-    const extra = (12 - (upper - lower)) / 2;
-    return [Math.max(0, lower - extra), upper + extra];
-  }
+  // 封顶用 P97 而不是最大值：孤立尖峰不再撑大坐标系（超出部分由
+  // YAxis allowDataOverflow 裁掉），数据本体零改动，统计卡与悬停仍能看到真实峰值。
+  const p97 = percentileOf(values, 0.97);
+  const lower = Math.max(0, min - Math.max(5, (p97 - min) * 0.3));
+  const upper = Math.max(p97 + Math.max(5, p97 * 0.2), min + 12);
 
   return [lower, upper];
+}
+
+function percentileOf(values: number[], ratio: number): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * ratio) - 1));
+  return sorted[index];
 }
 
 export function getPingSeriesAverage(records: PingRecord[]): number | null {

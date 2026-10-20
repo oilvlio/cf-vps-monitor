@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 
-const { clampPingSpikes, pingRecordLossPercent, latencyHeatColor, lossHeatColor } = await import('./pingChartView.ts');
+const { pingRecordLossPercent, latencyHeatColor, lossHeatColor } = await import('./pingChartView.ts');
 const { buildPingChartRows } = await import('./pingChart.ts');
 
 // 丢包率：分桶数据按 loss/sample，原始数据负值即 100%。
@@ -16,42 +16,6 @@ const series = [{ task, records: [
 ] }];
 assert.deepEqual(buildPingChartRows(series).map((r) => r.a), [20, null]);
 assert.deepEqual(buildPingChartRows(series, pingRecordLossPercent).map((r) => r.a), [0, 100]);
-
-// 削峰：只压尖峰点，丢包空缺保持 null，其余点原样保留（不做平滑）。
-{
-  const rows = Array.from({ length: 20 }, (_, i) => ({ time: i, a: i === 10 ? 900 : i === 5 ? null : 50 }));
-  const cut = clampPingSpikes(rows, ['a']);
-  assert.equal(cut[5].a, null, '丢包空缺保持 null');
-  assert.equal(cut[10].a, 50, '尖峰被压回邻近中位数');
-  rows.forEach((row, i) => { if (i !== 10) assert.equal(cut[i].a, row.a, `非尖峰点 ${i} 必须原样保留`); });
-  assert.equal(rows[10].a, 900, '不修改入参');
-}
-
-// 3ms 基线上 ±1ms 的整数抖动不是尖峰；真正的尖峰（>=10ms）才被压掉，基线点一个不动。
-{
-  const jitter = [3, 2, 4, 3, 3, 2, 3, 4, 3, 2, 3, 4, 3, 3, 2, 3, 4, 3, 2, 3];
-  const rows = jitter.map((a, i) => ({ time: i, a }));
-  rows[8].a = 42; rows[9].a = 38; // 连续两个尖峰
-  const cut = clampPingSpikes(rows, ['a']);
-  assert.ok(cut[8].a <= 4 && cut[9].a <= 4, '连续尖峰也被压住');
-  jitter.forEach((a, i) => { if (i !== 8 && i !== 9) assert.equal(cut[i].a, a, `基线抖动点 ${i} 不应被当成尖峰`); });
-}
-
-// 相对阈值：100ms 的线要高出 50% 才算尖峰。
-{
-  const rows = Array.from({ length: 20 }, (_, i) => ({ time: i, a: 100 }));
-  rows[6].a = 140; rows[12].a = 190;
-  const cut = clampPingSpikes(rows, ['a']);
-  assert.equal(cut[6].a, 140, '+40% 不算尖峰');
-  assert.equal(cut[12].a, 100, '+90% 压回');
-}
-
-// 邻居不足（序列太短）时不动；向下的凹陷不算尖峰。
-assert.deepEqual(clampPingSpikes([{ time: 0, a: 5 }, { time: 1, a: 900 }], ['a']), [{ time: 0, a: 5 }, { time: 1, a: 900 }]);
-{
-  const rows = Array.from({ length: 20 }, (_, i) => ({ time: i, a: i === 7 ? 1 : 60 }));
-  assert.equal(clampPingSpikes(rows, ['a'])[7].a, 1);
-}
 
 assert.equal(latencyHeatColor(30), 'var(--lp-lat-excellent)');
 assert.equal(latencyHeatColor(250), 'var(--lp-lat-critical)');

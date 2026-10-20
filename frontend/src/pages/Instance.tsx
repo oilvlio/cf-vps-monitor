@@ -47,7 +47,7 @@ import {
   type PingTaskStats,
 } from '../utils/pingChart';
 import { buildMonitorChartData, getMonitorChartRenderData } from '../utils/monitorChartData';
-import { buildPingYAxis, clampPingSpikes, latencyHeatColor, lossHeatColor } from '../utils/pingChartView';
+import { buildPingYAxis, latencyHeatColor, lossHeatColor } from '../utils/pingChartView';
 import { readFreshCache, writeCache, type HistoryCache } from '../utils/historyCache';
 import { metricNumber } from '../utils/nodeMetrics';
 import { parseTrafficLimitType, formatTrafficLimitLabel } from '../utils/traffic';
@@ -143,7 +143,6 @@ export default function Instance() {
   const [shouldLoadPing, setShouldLoadPing] = useState(false);
   // 选中的测速点：空 = 全部显示；点图例选中谁就只显示谁（与参考主题一致），再点一次取消选中。
   const [selectedPingKeys, setSelectedPingKeys] = useState<string[]>([]);
-  const [pingCutPeak, setPingCutPeak] = useState(false);
   // 极值带：分桶数据每个桶的最小~最大值画成浅色区间，默认关闭，免得盖过曲线本身。
   const [pingBand, setPingBand] = useState(false);
   // 断点连线默认关闭：关闭时缺口直接断开（如实显示没有数据），勾选后跨过所有空缺连成完整曲线。
@@ -415,9 +414,8 @@ export default function Instance() {
   const pingHasBand = useMemo(() => pingSeriesHasBand(pingSeriesWithRecords), [pingSeriesWithRecords]);
   const showPingBand = pingBand && pingHasBand;
   const pingChartRows = useMemo(() => {
-    const rows = buildPingChartRows(visiblePingSeries, undefined, showPingBand ? pingBandPicks : []);
-    return pingCutPeak ? clampPingSpikes(rows, visiblePingSeries.map((item) => item.task.key)) : rows;
-  }, [visiblePingSeries, pingCutPeak, showPingBand]);
+    return buildPingChartRows(visiblePingSeries, undefined, showPingBand ? pingBandPicks : []);
+  }, [visiblePingSeries, showPingBand]);
   const pingYAxis = useMemo(() => buildPingYAxis(getPingYAxisDomain(visiblePingSeries)), [visiblePingSeries]);
   const pingXAxisDomain = useMemo(
     () => getPingTimeDomain(visiblePingSeries, timeRangeHours[timeRange]),
@@ -716,7 +714,6 @@ export default function Instance() {
                   </p>
                 </div>
                 <div className="lp-head-meta">
-                  <LpSwitch label="削峰" title="只把明显高出邻近中位数的尖峰点压回去，其余点保持原样" active={pingCutPeak} onToggle={() => setPingCutPeak((v) => !v)} />
                   {pingHasBand && (
                     <LpSwitch label="极值带" title="曲线是每个时间段的中位数；开启后用浅色区间显示该段内的最小～最大延迟，尖峰不会被藏起来" active={pingBand} onToggle={() => setPingBand((v) => !v)} />
                   )}

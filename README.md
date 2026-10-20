@@ -143,11 +143,7 @@ wget -qO- 'https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/refs/heads
 
 只有执行 `--uninstall-all --yes` 或 `-UninstallAll -Yes` 才会清理本机全部 Agent 实例。
 
-## 后台一键同步更新
-
-后台固定检测 [kadidalax/cf-vps-monitor](https://github.com/kadidalax/cf-vps-monitor) `main` 分支的最新推送编码。进入后台 `关于 -> 版本更新`，保存“你的部署仓库地址”，以后检测到推送编码不一致时会显示同步入口。
-
-### 数据库迁移精简说明
+## 数据库迁移精简说明
 
 `supabase/migrations` 由原来的 11 个文件合并为 3 个，部署后同样需要打开本站 `/db-init` 执行一次数据库升级：
 

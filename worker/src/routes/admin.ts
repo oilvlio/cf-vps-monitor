@@ -39,14 +39,6 @@ import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { readJsonWithLimit, readRequestBytesWithLimit } from '../utils/request-body';
 import { bytesToBase64 } from '../utils/theme-package';
-import { APP_VERSION } from '../utils/app-version';
-import {
-  formatAppVersion,
-  repositoryUrlFromRepositoryUrl,
-  normalizeGitSha,
-  shortGitSha,
-  type UpdateCheckResult,
-} from '../utils/update-check';
 import {
   auditLoginFailure,
   clearLoginFailures,
@@ -91,10 +83,6 @@ const ADMIN_PING_TASKS_EDGE_CACHE_SECONDS = 15;
 const ADMIN_SETTINGS_SCOPE_CACHE_MS = 10_000;
 const HEALTH_CACHE_MS = 30_000;
 const ALLOWED_CLIENT_IDS_CACHE_MS = 30_000;
-const OFFICIAL_UPDATE_REPOSITORY = 'kadidalax/cf-vps-monitor';
-const OFFICIAL_UPDATE_BRANCH = 'main';
-const UPDATE_CHECK_CACHE_MS = 10 * 60 * 1000;
-const updateCheckCache = new Map<string, { expiresAt: number; value: UpdateCheckResult }>();
 const LIVE_POLICY_SETTING_KEYS = new Set([
   'live_poll_active_interval_sec',
   'live_poll_idle_interval_sec',
@@ -169,9 +157,6 @@ const SETTINGS_SCOPE_KEYS = {
     'webhook_retry_count',
     'enable_ip_change_notification',
     'offline_notify_never_reported',
-  ],
-  update: [
-    'update_repository_url',
   ],
 } as const satisfies Record<string, readonly (keyof typeof SETTING_SCHEMA)[]>;
 const MAINTENANCE_CLEANUP_SETTING_KEYS = [
@@ -1320,107 +1305,6 @@ async function runMaintenanceCleanup(database: db.QueryDatabase, username: strin
   await db.insertAuditLog(database, username, 'maintenance_cleanup', `手动维护清理${hasMore ? '已处理一批，仍有过期记录' : '完成'}: ${JSON.stringify(result)}`);
   return result;
 }
-
-type GitHubCommitInfo = {
-  sha?: unknown;
-  html_url?: unknown;
-  commit?: {
-    message?: unknown;
-    committer?: { date?: unknown };
-    author?: { date?: unknown };
-  };
-};
-
-function updateString(value: unknown): string {
-  return typeof value === 'string' ? value : '';
-}
-
-async function fetchGitHubJson<T>(path: string): Promise<T> {
-  const response = await fetch(`https://api.github.com/${path}`, {
-    headers: {
-      'Accept': 'application/vnd.github+json',
-      'User-Agent': 'cf-vps-monitor-update-check',
-    },
-  });
-  if (!response.ok) {
-    throw new Error(`GitHub API returned ${response.status}`);
-  }
-  return await response.json();
-}
-
-function fetchLatestCommit(repository: string): Promise<GitHubCommitInfo> {
-  return fetchGitHubJson<GitHubCommitInfo>(`repos/${repository}/commits/${OFFICIAL_UPDATE_BRANCH}`);
-}
-
-async function fetchLatestWorkerVersion(repository: string, commitSha: string): Promise<string> {
-  const response = await fetch(`https://raw.githubusercontent.com/${repository}/${commitSha}/worker/package.json`, {
-    headers: { 'User-Agent': 'cf-vps-monitor-update-check' },
-  });
-  if (!response.ok) return 'dev';
-  const body = await response.json().catch(() => null);
-  return body && typeof body === 'object' && typeof (body as { version?: unknown }).version === 'string'
-    ? (body as { version: string }).version
-    : 'dev';
-}
-
-async function getUpdateSettings(c: AdminContext): Promise<{ repositoryUrl: string }> {
-  const database = getDatabase(c.env);
-  const stored = await db.getSettingsByKeys(database, ['update_repository_url'], true);
-  const settings = buildAdminSettings(stored);
-  return {
-    repositoryUrl: settings.update_repository_url,
-  };
-}
-
-async function buildCommitUpdateResult(
-  repository: string,
-  deploymentRepositoryUrl: string,
-  currentCommitRaw: string | undefined,
-): Promise<UpdateCheckResult> {
-  const commit = await fetchLatestCommit(repository);
-  const latestCommit = normalizeGitSha(updateString(commit.sha));
-  const latestVersion = await fetchLatestWorkerVersion(repository, latestCommit);
-  const currentCommit = normalizeGitSha(currentCommitRaw);
-  const repositoryUrl = repositoryUrlFromRepositoryUrl(deploymentRepositoryUrl);
-  const message = updateString(commit.commit?.message);
-  return {
-    current_version: formatAppVersion(APP_VERSION),
-    latest_version: formatAppVersion(latestVersion),
-    current_commit: shortGitSha(currentCommit),
-    latest_commit: shortGitSha(latestCommit),
-    has_update: Boolean(latestCommit) && currentCommit !== latestCommit,
-    source_url: updateString(commit.html_url) || `https://github.com/${repository}/commits/${OFFICIAL_UPDATE_BRANCH}`,
-    upgrade_url: repositoryUrl,
-    repository_url: repositoryUrl,
-    title: message.split('\n')[0] || latestCommit,
-    body: message,
-    published_at: updateString(commit.commit?.committer?.date) || updateString(commit.commit?.author?.date),
-  };
-}
-
-
-adminRoutes.get('/update-check', async (c) => {
-  const now = Date.now();
-  try {
-    const { repositoryUrl } = await getUpdateSettings(c);
-    const repository = OFFICIAL_UPDATE_REPOSITORY;
-    const currentCommit = normalizeGitSha(c.env.CURRENT_GIT_COMMIT);
-    const cacheKey = `${repository}:${OFFICIAL_UPDATE_BRANCH}:commit:${repositoryUrl}:${currentCommit}`;
-    const cached = updateCheckCache.get(cacheKey);
-    if (c.req.query('refresh') !== '1' && cached && cached.expiresAt > now) {
-      return c.json(cached.value);
-    }
-
-    const result = await buildCommitUpdateResult(repository, repositoryUrl, currentCommit);
-    updateCheckCache.set(cacheKey, { expiresAt: now + UPDATE_CHECK_CACHE_MS, value: result });
-    return c.json(result);
-  } catch (error) {
-    return c.json({
-      error: 'Update check failed',
-      detail: errorDetail(error),
-    }, 502);
-  }
-});
 
 // ============ 客户端管理 ============
 

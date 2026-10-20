@@ -98,4 +98,7 @@ begin
 end;
 $$;
 
+-- 版本更新 / update-check 功能已移除（上游仓库已归档），清理对应设置行。
+delete from settings where key = 'update_repository_url';
+
 notify pgrst, 'reload schema';

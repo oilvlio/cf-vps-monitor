@@ -135,7 +135,6 @@ export async function createHarness({ selection = 'ALL', playwrightModule } = {}
       if (path === '/api/login' || path === '/api/login/mfa') { data.authenticated = true; return json({ user: { uuid: 'synthetic-admin', username: 'synthetic-owner' } }); }
       if (path === '/api/logout') { data.authenticated = false; return json({ success: true }); }
       if (path === '/api/version') return json({ version: 'dev', hash: 'dev' });
-      if (path === '/api/admin/update-check') return json({ current_version: 'dev', latest_version: 'dev', has_update: false, source_url: 'https://github.com/example/synthetic', upgrade_url: null });
       if (path === '/api/admin/recovery/status') return json({ admin_present: true, recoverable: true });
       if (path === '/api/public') return json(data.settings);
       if (path === '/api/theme/active.css') return route.fulfill({ contentType: 'text/css', body: '' });

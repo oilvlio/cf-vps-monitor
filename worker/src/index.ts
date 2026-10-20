@@ -6,7 +6,7 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { APP_VERSION } from './utils/app-version';
-import { shortGitSha } from './utils/update-check';
+import { shortGitSha } from './utils/git-sha';
 
 // 路由模块
 import { publicRoutes } from './routes/public';

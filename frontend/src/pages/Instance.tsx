@@ -25,22 +25,30 @@ import { diskUsagePresentation, formatLastReport, formatLoadTriple, formatMetric
 import { formatCpuSpec } from '../utils/cpuFormat';
 import { filterMonitorNodes } from '../utils/monitorView';
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
+  Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Area, ComposedChart
 } from 'recharts';
 import {
   buildPingChartRows,
   fetchPingTaskSeries,
+  fetchPingTaskStats,
   formatPingLossRate,
-  formatPingMs,
+  formatPingMsDetail,
   getPingSeriesWithRecords,
   getPingTaskSummary,
   getPingTimeDomain,
   getPingYAxisDomain,
-  PingTaskSeries,
+  pingBandPicks,
+  pingSeriesHasBand,
+  PING_BAND_HIGH_SUFFIX,
+  PING_BAND_LOW_SUFFIX,
+  type PingChartRow,
+  type PingTaskSeries,
+  type PingTaskStats,
 } from '../utils/pingChart';
 import { buildMonitorChartData, getMonitorChartRenderData } from '../utils/monitorChartData';
-import { buildPingYAxis, cutPeakRows, latencyHeatColor, lossHeatColor } from '../utils/pingChartView';
+import { buildPingYAxis, clampPingSpikes, latencyHeatColor, lossHeatColor } from '../utils/pingChartView';
+import { readFreshCache, writeCache, type HistoryCache } from '../utils/historyCache';
 import { metricNumber } from '../utils/nodeMetrics';
 import { parseTrafficLimitType, formatTrafficLimitLabel } from '../utils/traffic';
 import { chartTooltipProps } from '../utils/chartTooltip';
@@ -120,28 +128,32 @@ export default function Instance() {
   const [gpuRefresh, setGpuRefresh] = useState(0);
   const clientRequestRef = useRef(0);
   const recordsRequestRef = useRef(0);
-  // 已加载好的历史数据按 (节点，时间档，鉴权态，刷新档) 缓存：来回切换直接复用
-  // 已有数据，点「刷新」（档位 +1）才会发新请求并刷新缓存。
-  const recordsCacheRef = useRef(new Map<string, { records: PublicMonitorRecord[]; endTs: number }>());
+  // 已加载好的历史数据按 (节点，时间档，鉴权态，刷新档) 缓存：来回切换直接复用已有数据，
+  // 点「刷新」（档位 +1）会发新请求；缓存 5 分钟后失效，下次切回时自动重新拉取。
+  const recordsCacheRef = useRef<HistoryCache<{ records: PublicMonitorRecord[]; endTs: number }>>(new Map());
   const [error, setError] = useState<string | null>(null);
   const [viewTab, setViewTab] = useState<ViewTab>('load');
   const [timeRange, setTimeRange] = useState<TimeRange>('4h');
   const [recordsRangeEnd, setRecordsRangeEnd] = useState(() => Date.now());
   const [pingSeries, setPingSeries] = useState<PingTaskSeries[]>([]);
+  // 任务卡片的统计由服务端对整个窗口的原始样本计算；取不到时卡片退回用前端的点估算。
+  const [pingStats, setPingStats] = useState<Record<string, PingTaskStats>>({});
   const [pingLoading, setPingLoading] = useState(false);
   const [pingError, setPingError] = useState<string | null>(null);
   const [shouldLoadPing, setShouldLoadPing] = useState(false);
   // 选中的测速点：空 = 全部显示；点图例选中谁就只显示谁（与参考主题一致），再点一次取消选中。
   const [selectedPingKeys, setSelectedPingKeys] = useState<string[]>([]);
   const [pingCutPeak, setPingCutPeak] = useState(false);
+  // 极值带：分桶数据每个桶的最小~最大值画成浅色区间，默认关闭，免得盖过曲线本身。
+  const [pingBand, setPingBand] = useState(false);
   // 断点连线默认关闭：关闭时缺口直接断开（如实显示没有数据），勾选后跨过所有空缺连成完整曲线。
   const [pingConnectGaps, setPingConnectGaps] = useState(false);
   const [pingRefresh, setPingRefresh] = useState(0);
   // 手动刷新档位：切换时间档/页签时命中缓存直接展示，只有点刷新才会真正重新请求。
   const [recordsRefresh, setRecordsRefresh] = useState(0);
   const [gpuRecords, setGpuRecords] = useState<PublicGpuRecord[]>([]);
-  const gpuCacheRef = useRef(new Map<string, PublicGpuRecord[]>());
-  const pingCacheRef = useRef(new Map<string, PingTaskSeries[]>());
+  const gpuCacheRef = useRef<HistoryCache<PublicGpuRecord[]>>(new Map());
+  const pingCacheRef = useRef<HistoryCache<{ series: PingTaskSeries[]; stats: Record<string, PingTaskStats> }>>(new Map());
   const pingSectionRef = useRef<HTMLDivElement | null>(null);
   const { liveData, snapshotReady } = useLiveData();
   const liveView: LiveDataMap = useMemo(() => ({ online: liveData?.online || [], data: liveData?.data || {},
@@ -243,7 +255,7 @@ export default function Instance() {
     // 只有「负载」页可见时才拉监控历史：停在 Ping 页不发 /records/load（GPU 同理）。
     if (viewTab !== 'load') return;
     const key = [uuid ?? '', timeRange, authLoading, isAuthenticated, `刷${recordsRefresh}`].join('|');
-    const cached = recordsCacheRef.current.get(key);
+    const cached = readFreshCache(recordsCacheRef.current, key);
     if (cached) {
       // 来回切换直接复用已有数据；点「刷新」按钮（recordsRefresh +1）才重新拉取。
       setRecords(cached.records);
@@ -255,7 +267,7 @@ export default function Instance() {
     const controller = new AbortController();
     void loadRecords(timeRange, controller.signal).then((loaded) => {
       if (loaded && !controller.signal.aborted) {
-        recordsCacheRef.current.set(key, { records: loaded.records, endTs: loaded.endTs });
+        writeCache(recordsCacheRef.current, key, { records: loaded.records, endTs: loaded.endTs });
       }
     });
     return () => {
@@ -267,6 +279,7 @@ export default function Instance() {
   useEffect(() => {
     setShouldLoadPing(false);
     setPingSeries([]);
+    setPingStats({});
     setSelectedPingKeys([]);
     setPingError(null);
     setPingLoading(false);
@@ -293,29 +306,53 @@ export default function Instance() {
   useEffect(() => {
     if (!uuid || authLoading || !shouldLoadPing) return;
     const cacheKey = [uuid, timeRange, authLoading, isAuthenticated, `刷${pingRefresh}`].join('|');
-    const cached = pingCacheRef.current.get(cacheKey);
+    const cached = readFreshCache(pingCacheRef.current, cacheKey);
     if (cached) {
-      setPingSeries(cached);
+      setPingSeries(cached.series);
+      setPingStats(cached.stats);
       setPingError(null);
       setPingLoading(false);
       return;
     }
     const controller = new AbortController();
     setPingSeries([]);
+    setPingStats({});
     setPingError(null);
     setPingLoading(true);
 
-    fetchPingTaskSeries(uuid, { limit: timeRangePointLimit[timeRange], maxTasks: 8, rangeHours: timeRangeHours[timeRange], cursor: new Date().toISOString(), start: new Date(Date.now() - timeRangeMs[timeRange]).toISOString(), end: new Date().toISOString(), includeHidden: isAuthenticated, signal: controller.signal })
-      .then((series) => {
+    // 起止时间只取一次：曲线、统计共用同一个窗口，也不会因为多次取时间让区间比名义值多几毫秒。
+    const endTs = Date.now();
+    const end = new Date(endTs).toISOString();
+    const start = new Date(endTs - timeRangeMs[timeRange]).toISOString();
+    // 任务列表一解析出来就并行发起统计请求，不必等曲线数据回来。
+    let statsRequest: Promise<Record<string, PingTaskStats>> = Promise.resolve({});
+
+    fetchPingTaskSeries(uuid, {
+      limit: timeRangePointLimit[timeRange],
+      maxTasks: 8,
+      rangeHours: timeRangeHours[timeRange],
+      cursor: end,
+      start,
+      end,
+      includeHidden: isAuthenticated,
+      signal: controller.signal,
+      onTasks: (tasks) => {
+        statsRequest = fetchPingTaskStats(uuid, tasks.map((task) => task.id), { start, end, includeHidden: isAuthenticated, signal: controller.signal });
+      },
+    })
+      .then(async (series) => {
+        const stats = await statsRequest;
         if (!controller.signal.aborted) {
-          pingCacheRef.current.set(cacheKey, series);
+          writeCache(pingCacheRef.current, cacheKey, { series, stats });
           setPingSeries(series);
+          setPingStats(stats);
         }
       })
       .catch(() => {
         if (!controller.signal.aborted) {
           setPingError('加载 Ping 数据失败');
           setPingSeries([]);
+          setPingStats({});
         }
       })
       .finally(() => {
@@ -333,7 +370,7 @@ export default function Instance() {
     // GPU 卡片只在「负载」页出现：停在 Ping 页不拉 /records/gpu。
     if (!uuid || authLoading || viewTab !== 'load' || !client?.gpu_name || client.uuid !== uuid) return;
     const cacheKey = [uuid, timeRange, authLoading, isAuthenticated, `刷${gpuRefresh}`].join('|');
-    const cached = gpuCacheRef.current.get(cacheKey);
+    const cached = readFreshCache(gpuCacheRef.current, cacheKey);
     if (cached) {
       setGpuRecords(cached);
       return;
@@ -351,7 +388,7 @@ export default function Instance() {
     )
       .then((data) => {
         if (!controller.signal.aborted) {
-          gpuCacheRef.current.set(cacheKey, data);
+          writeCache(gpuCacheRef.current, cacheKey, data);
           setGpuRecords(data);
         }
       })
@@ -375,10 +412,12 @@ export default function Instance() {
     const selected = new Set(selectedPingKeys);
     return pingSeriesWithRecords.filter((item) => selected.has(item.task.key));
   }, [pingSeriesWithRecords, selectedPingKeys]);
+  const pingHasBand = useMemo(() => pingSeriesHasBand(pingSeriesWithRecords), [pingSeriesWithRecords]);
+  const showPingBand = pingBand && pingHasBand;
   const pingChartRows = useMemo(() => {
-    const rows = buildPingChartRows(visiblePingSeries);
-    return pingCutPeak ? cutPeakRows(rows, visiblePingSeries.map((item) => item.task.key)) : rows;
-  }, [visiblePingSeries, pingCutPeak]);
+    const rows = buildPingChartRows(visiblePingSeries, undefined, showPingBand ? pingBandPicks : []);
+    return pingCutPeak ? clampPingSpikes(rows, visiblePingSeries.map((item) => item.task.key)) : rows;
+  }, [visiblePingSeries, pingCutPeak, showPingBand]);
   const pingYAxis = useMemo(() => buildPingYAxis(getPingYAxisDomain(visiblePingSeries)), [visiblePingSeries]);
   const pingXAxisDomain = useMemo(
     () => getPingTimeDomain(visiblePingSeries, timeRangeHours[timeRange]),
@@ -677,7 +716,10 @@ export default function Instance() {
                   </p>
                 </div>
                 <div className="lp-head-meta">
-                  <LpSwitch label="削峰平滑" title="剔除与邻近点相差过大的尖峰，再做平滑" active={pingCutPeak} onToggle={() => setPingCutPeak((v) => !v)} />
+                  <LpSwitch label="削峰" title="只把明显高出邻近中位数的尖峰点压回去，其余点保持原样" active={pingCutPeak} onToggle={() => setPingCutPeak((v) => !v)} />
+                  {pingHasBand && (
+                    <LpSwitch label="极值带" title="曲线是每个时间段的中位数；开启后用浅色区间显示该段内的最小～最大延迟，尖峰不会被藏起来" active={pingBand} onToggle={() => setPingBand((v) => !v)} />
+                  )}
                   <LpSwitch label="断点连线" title="关闭：缺口直接断开，如实显示哪里没有数据；开启：缺口一律用实线连成完整曲线（更好看，但看不出掉线中断）" active={pingConnectGaps} onToggle={() => setPingConnectGaps((v) => !v)} />
                   {selectedPingKeys.length > 0 && (
                     <button type="button" className="lp-tool-btn" onClick={() => setSelectedPingKeys([])}>
@@ -704,7 +746,7 @@ export default function Instance() {
                     {pingSeriesWithRecords.map((item) => {
                       const selected = selectedPingKeys.includes(item.task.key);
                       const filtered = selectedPingKeys.length > 0;
-                      const stats = getPingTaskSummary(item.records);
+                      const stats = getPingTaskSummary(item.records, pingStats[String(item.task.id)]);
                       return (
                         <button
                           key={item.task.key}
@@ -731,8 +773,8 @@ export default function Instance() {
                             <span style={{ color: lossHeatColor(stats.loss) }}>丢包 {formatPingLossRate(stats.loss)}</span>
                           </span>
                           <span className="lp-pt-meta">
-                            <span>P75 {stats.p75 === null ? '-' : formatPingMs(stats.p75)}</span>
-                            <span>样本 {stats.samples}</span>
+                            <span>P75 {stats.p75 === null ? '-' : formatPingMsDetail(stats.p75)}</span>
+                            <span title="延迟标准差：越小说明越稳定">抖动 {stats.jitter === null ? '-' : formatPingMsDetail(stats.jitter)}</span>
                           </span>
                         </button>
                       );
@@ -741,7 +783,7 @@ export default function Instance() {
 
                   <div className="lp-ping-chart">
                     <ResponsiveContainer width="100%" height={pingH}>
-                      <LineChart data={pingChartRows} margin={pingChartMargin}>
+                      <ComposedChart data={pingChartRows} margin={pingChartMargin}>
                         <CartesianGrid strokeDasharray="3 3" opacity={0.22} />
                         <XAxis
                           dataKey="time"
@@ -760,14 +802,40 @@ export default function Instance() {
                           ticks={pingYAxis.ticks}
                           interval={0}
                           allowDecimals={false}
+                          // 极值带的最大值可能远高于曲线：按 Y 轴范围裁掉，别把基线压扁。
+                          allowDataOverflow
                           tick={<PingYAxisTick />}
                         />
                         <Tooltip
                           {...chartTooltipProps}
                           labelFormatter={chartTimeFormatter}
                           itemSorter={(item) => Number(item.value ?? 0)}
-                          formatter={(value, name) => [formatPingMs(Number(value)), name]}
+                          formatter={(value, name) => [formatPingMsDetail(Number(value)), name]}
                         />
+                        {showPingBand && visiblePingSeries.map((item) => {
+                          const { key, color } = item.task;
+                          const lowKey = `${key}${PING_BAND_LOW_SUFFIX}`;
+                          const highKey = `${key}${PING_BAND_HIGH_SUFFIX}`;
+                          return (
+                            <Area
+                              key={`${key}-band`}
+                              type="monotone"
+                              dataKey={(row: PingChartRow) => {
+                                const low = row[lowKey];
+                                const high = row[highKey];
+                                return typeof low === 'number' && typeof high === 'number' ? [low, high] : null;
+                              }}
+                              stroke="none"
+                              fill={color}
+                              fillOpacity={0.14}
+                              connectNulls={pingConnectGaps}
+                              isAnimationActive={false}
+                              legendType="none"
+                              tooltipType="none"
+                              activeDot={false}
+                            />
+                          );
+                        })}
                         {visiblePingSeries.map((item) => {
                           const { key, color, label } = item.task;
                           return (
@@ -786,7 +854,7 @@ export default function Instance() {
                             />
                           );
                         })}
-                      </LineChart>
+                      </ComposedChart>
                     </ResponsiveContainer>
                   </div>
                 </>

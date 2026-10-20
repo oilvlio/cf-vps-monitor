@@ -478,6 +478,16 @@ export async function getPingRecordsForTasksRangeBucketed(
   );
 }
 
+export async function getPingStatsForTasksRange(
+  database: QueryDatabase,
+  client: string,
+  taskIds: number[],
+  start: string | undefined,
+  end: string | undefined,
+): Promise<Record<string, t.PingTaskStats>> {
+  return sba.getSupabasePingStatsForTasksRange(database.env, client, taskIds, start, end);
+}
+
 export async function getHomePingAssignments(database: QueryDatabase): Promise<Record<string, number>> {
   return sba.getSupabaseHomePingAssignments(database.env);
 }

@@ -3149,13 +3149,16 @@ begin
           select
             to_timestamp(bucket_start) as time,
             tid as task_id,
-            coalesce(round(avg(nullif(raw_value, -1)) filter (where raw_value >= 0))::integer, -1) as value,
+            -- 代表值 value 是桶内中位数（不取整）：单个重传/抖动尖峰不会拉高整个桶，
+            -- 平均值另给 avg_latency。桶内没有成功样本时 value 为 -1（丢包）。
+            coalesce(percentile_cont(0.5) within group (order by raw_value) filter (where raw_value >= 0), -1) as value,
             count(*)::integer as sample_count,
             count(*) filter (where raw_value >= 0)::integer as success_count,
             count(*) filter (where raw_value < 0)::integer as loss_count,
             avg(nullif(raw_value, -1)) filter (where raw_value >= 0) as avg_latency,
             min(nullif(raw_value, -1)) filter (where raw_value >= 0) as min_latency,
             max(nullif(raw_value, -1)) filter (where raw_value >= 0) as max_latency,
+            percentile_cont(0.5) within group (order by raw_value) filter (where raw_value >= 0) as p50_latency,
             percentile_cont(0.75) within group (order by raw_value) filter (where raw_value >= 0) as p75_latency
           from (
             select
@@ -3176,6 +3179,73 @@ begin
   end loop;
   return result;
 end;
+$$;
+
+-- 整个时间窗口的 Ping 统计（任务卡片用）：一次扫描、对原始样本直接计算，
+-- 不依赖前端拿到的分桶/截断后的点，所以任何时间档下数字都一致。
+-- jitter 是成功样本延迟的样本标准差（ms）；不足 2 个成功样本时为 null。
+create or replace function public.cfm_ping_stats_for_tasks_range(
+  input_client text,
+  input_task_ids jsonb,
+  input_start text default null,
+  input_end text default null
+)
+returns jsonb
+language sql
+stable
+set search_path = public
+as $$
+  with ids as (
+    select distinct value::integer as tid
+    from jsonb_array_elements_text(
+      case when jsonb_typeof(input_task_ids) = 'array' then input_task_ids else '[]'::jsonb end
+    ) as item(value)
+    where value ~ '^[0-9]{1,9}$' and value::integer > 0
+    limit 50
+  ),
+  raw as (
+    select i.tid, (s.values_json ->> i.tid::text)::integer as v
+    from ids i
+    join ping_snapshots s
+      on s.client = input_client
+     and s.values_json ? i.tid::text
+     and (input_start is null or s.time >= input_start::timestamptz)
+     and (input_end is null or s.time <= input_end::timestamptz)
+  ),
+  agg as (
+    select
+      tid,
+      count(*)::integer as samples,
+      count(*) filter (where v >= 0)::integer as success_count,
+      count(*) filter (where v < 0)::integer as loss_count,
+      avg(v) filter (where v >= 0) as avg_latency,
+      min(v) filter (where v >= 0) as min_latency,
+      max(v) filter (where v >= 0) as max_latency,
+      percentile_cont(0.5) within group (order by v) filter (where v >= 0) as p50_latency,
+      percentile_cont(0.75) within group (order by v) filter (where v >= 0) as p75_latency,
+      stddev_samp(v) filter (where v >= 0) as jitter
+    from raw
+    group by tid
+  )
+  select coalesce(
+    jsonb_object_agg(
+      tid::text,
+      jsonb_build_object(
+        'samples', samples,
+        'success_count', success_count,
+        'loss_count', loss_count,
+        'loss_rate', case when samples > 0 then loss_count::double precision * 100 / samples else null end,
+        'avg_latency', avg_latency,
+        'min_latency', min_latency,
+        'max_latency', max_latency,
+        'p50_latency', p50_latency,
+        'p75_latency', p75_latency,
+        'jitter', jitter
+      )
+    ),
+    '{}'::jsonb
+  )
+  from agg;
 $$;
 
 -- 节点 -> 任务 id。任务已不再作用于该节点（被移出 clients 列表）时不返回，
@@ -3700,6 +3770,8 @@ grant execute on function public.cfm_gpu_rollup_range(text, text, text) to servi
 grant execute on function public.cfm_gpu_rollup_range(text, text, text) to cf_monitor_app;
 revoke all on function public.cfm_ping_records_for_tasks_range_bucketed(text, jsonb, text, text, integer, integer) from public, anon, authenticated;
 grant execute on function public.cfm_ping_records_for_tasks_range_bucketed(text, jsonb, text, text, integer, integer) to service_role;
+revoke all on function public.cfm_ping_stats_for_tasks_range(text, jsonb, text, text) from public, anon, authenticated;
+grant execute on function public.cfm_ping_stats_for_tasks_range(text, jsonb, text, text) to service_role;
 revoke all on function public.cfm_home_ping_assignments() from public, anon, authenticated;
 grant execute on function public.cfm_home_ping_assignments() to service_role;
 grant execute on function public.cfm_home_ping_assignments() to cf_monitor_app;

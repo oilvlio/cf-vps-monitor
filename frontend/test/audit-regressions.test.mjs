@@ -227,6 +227,8 @@ test('AUD-43 monitoring and GPU history include the oldest and newest available 
       uuid: 'node-a', client: { uuid: 'node-a', gpu_name: 'Synthetic GPU' }, authLoading: false, isAuthenticated: false, timeRange: '3d', AbortController,
       viewTab: 'load',
       gpuRefresh: 0, gpuCacheRef: { current: new Map() },
+      readFreshCache: (...args) => productionModule('src/utils/historyCache.ts').readFreshCache(...args),
+      writeCache: (...args) => productionModule('src/utils/historyCache.ts').writeCache(...args),
       recordsRequestRef: { current: 0 },
       timeRangeMs: productionDeclaration('src/pages/Instance.tsx', 'timeRangeMs'),
       timeRangePointLimit: productionDeclaration('src/pages/Instance.tsx', 'timeRangePointLimit'),

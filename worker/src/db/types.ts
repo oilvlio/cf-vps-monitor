@@ -220,7 +220,32 @@ export interface PingHistoryRecord {
   client: string;
   task_id: number;
   time: string;
+  /** 原始点为整数 ms；分桶点为桶内中位数（不取整），桶内全部丢包时为 -1。 */
   value: number;
+  /** 以下仅分桶结果带有。 */
+  sample_count?: number;
+  success_count?: number;
+  loss_count?: number;
+  avg_latency?: number | null;
+  min_latency?: number | null;
+  max_latency?: number | null;
+  p50_latency?: number | null;
+  p75_latency?: number | null;
+}
+
+/** 整个时间窗口的 Ping 统计（cfm_ping_stats_for_tasks_range）；没有成功样本时延迟类字段为 null。 */
+export interface PingTaskStats {
+  samples: number;
+  success_count: number;
+  loss_count: number;
+  loss_rate: number | null;
+  avg_latency: number | null;
+  min_latency: number | null;
+  max_latency: number | null;
+  p50_latency: number | null;
+  p75_latency: number | null;
+  /** 成功样本延迟的样本标准差（ms），不足 2 个样本时为 null。 */
+  jitter: number | null;
 }
 
 export interface PingSnapshotInput {

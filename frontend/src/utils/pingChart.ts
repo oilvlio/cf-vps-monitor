@@ -22,7 +22,24 @@ export interface PingRecord {
   avg_latency?: number;
   min_latency?: number;
   max_latency?: number;
+  p50_latency?: number;
   p75_latency?: number;
+}
+
+/** 整个时间窗口的统计（服务端对原始样本计算）。延迟类字段在没有成功样本时为 null。 */
+export interface PingTaskStats {
+  samples: number;
+  successCount: number;
+  lossCount: number;
+  /** 丢包率（0-100）。 */
+  lossRate: number | null;
+  avg: number | null;
+  min: number | null;
+  max: number | null;
+  p50: number | null;
+  p75: number | null;
+  /** 成功样本延迟的样本标准差（ms），不足 2 个样本时为 null。 */
+  jitter: number | null;
 }
 
 export interface NormalizedPingTask {
@@ -173,8 +190,37 @@ export function normalizePingRecord(payload: unknown): PingRecord | null {
     ...(typeof record.avg_latency === 'number' ? { avg_latency: record.avg_latency } : {}),
     ...(typeof record.min_latency === 'number' ? { min_latency: record.min_latency } : {}),
     ...(typeof record.max_latency === 'number' ? { max_latency: record.max_latency } : {}),
+    ...(typeof record.p50_latency === 'number' ? { p50_latency: record.p50_latency } : {}),
     ...(typeof record.p75_latency === 'number' ? { p75_latency: record.p75_latency } : {}),
   };
+}
+
+const finiteOrNull = (value: unknown): number | null =>
+  typeof value === 'number' && Number.isFinite(value) ? value : null;
+
+export function normalizePingTaskStats(payload: unknown): Record<string, PingTaskStats> {
+  const source = asRecord(payload);
+  const result: Record<string, PingTaskStats> = {};
+  if (!source) return result;
+  for (const [taskId, raw] of Object.entries(source)) {
+    const item = asRecord(raw);
+    if (!item) continue;
+    const samples = finiteOrNull(item.samples);
+    if (samples === null) continue;
+    result[taskId] = {
+      samples,
+      successCount: finiteOrNull(item.success_count) ?? 0,
+      lossCount: finiteOrNull(item.loss_count) ?? 0,
+      lossRate: finiteOrNull(item.loss_rate),
+      avg: finiteOrNull(item.avg_latency),
+      min: finiteOrNull(item.min_latency),
+      max: finiteOrNull(item.max_latency),
+      p50: finiteOrNull(item.p50_latency),
+      p75: finiteOrNull(item.p75_latency),
+      jitter: finiteOrNull(item.jitter),
+    };
+  }
+  return result;
 }
 
 export function normalizePingRecords(payload: unknown): PingRecord[] {
@@ -201,6 +247,8 @@ function findAnchor(anchors: number[], timestamp: number, toleranceMs: number) {
 export function buildPingChartRows(
   series: PingTaskSeries[],
   pick: (record: PingRecord) => number | null = (record) => (record.value < 0 ? null : Number(record.value)),
+  // 在同一行里再带上若干派生列（键为「任务 key + 后缀」），例如分桶的最小/最大值。
+  extraPicks: Array<{ suffix: string; pick: (record: PingRecord) => number | null }> = [],
 ) {
   const validIntervals = series
     .map((item) => item.task.intervalSec)
@@ -222,11 +270,34 @@ export function buildPingChartRows(
         if (anchor === null) anchors.push(useTimestamp);
       }
       grouped[useTimestamp][item.task.key] = pick(record);
+      for (const extra of extraPicks) {
+        grouped[useTimestamp][`${item.task.key}${extra.suffix}`] = extra.pick(record);
+      }
     }
   }
 
   return Object.values(grouped).sort((a, b) => Number(a.time) - Number(b.time));
 }
+
+// 极值带：分桶数据每个桶带 min/max，画成浅色区间；原始点没有区间。
+export const PING_BAND_LOW_SUFFIX = '__lo';
+export const PING_BAND_HIGH_SUFFIX = '__hi';
+
+export function pingSeriesHasBand(series: PingTaskSeries[]): boolean {
+  return series.some((item) => item.records.some((record) =>
+    Number.isFinite(record.min_latency) && Number.isFinite(record.max_latency)));
+}
+
+export const pingBandPicks = [
+  {
+    suffix: PING_BAND_LOW_SUFFIX,
+    pick: (record: PingRecord) => (Number.isFinite(record.min_latency) && (record.min_latency as number) >= 0 ? (record.min_latency as number) : null),
+  },
+  {
+    suffix: PING_BAND_HIGH_SUFFIX,
+    pick: (record: PingRecord) => (Number.isFinite(record.max_latency) && (record.max_latency as number) >= 0 ? (record.max_latency as number) : null),
+  },
+];
 
 function getLatestPingTimestamp(series: PingTaskSeries[]) {
   const timestamps = series.flatMap((item) =>
@@ -389,6 +460,15 @@ export function formatPingMs(value: number | null | undefined): string {
   return `${Math.round(numberValue)} ms`;
 }
 
+// 带一位小数的延迟文案（整数不带小数点）：分桶后的中位数、p75、抖动都是不取整的，
+// 用 formatPingMs 的四舍五入会把它们又压回阶梯。
+export function formatPingMsDetail(value: number | null | undefined): string {
+  if (value === null || value === undefined) return '-';
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue) || numberValue < 0) return '-';
+  return Number.isInteger(numberValue) ? `${numberValue} ms` : `${numberValue.toFixed(1)} ms`;
+}
+
 export interface PingTaskSummary {
   /** 最后一条有效延迟（>=0），对任务卡片「最新」值。 */
   latest: number | null;
@@ -397,14 +477,21 @@ export interface PingTaskSummary {
   max: number | null;
   p75: number | null;
   loss: number | null;
-  /** 分桶数据为 sample_count 总和；原始数据为记录条数（含丢包记录）。 */
-  samples: number;
+  /** 延迟标准差（ms）：越大越不稳定。分桶数据且没有服务端统计时无法还原，为 null。 */
+  jitter: number | null;
 }
 
-// 任务卡片统计：分桶聚合数据直接用 avg/min/max_latency 列（avg 按样本量加权，
-// 各桶的 min/max 分别取最小/最大——对桶再求均会低估峰值）；原始数据退化为对
-// 24h 内的 value 做全量统计。
-export function getPingTaskSummary(records: PingRecord[]): PingTaskSummary {
+function sampleStdDev(values: number[]): number | null {
+  if (values.length < 2) return null;
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1);
+  return Math.sqrt(variance);
+}
+
+// 任务卡片统计。有服务端统计（整个窗口、对原始样本计算）时直接用它，数字与图上
+// 画的点（分桶/截断）无关；没有时（统计请求失败）退回用前端手上的点估算：
+// 分桶数据用 avg/min/max_latency 列（avg 按样本量加权），原始数据对 value 全量统计。
+export function getPingTaskSummary(records: PingRecord[], stats?: PingTaskStats | null): PingTaskSummary {
   const isPositive = (value: unknown): value is number =>
     typeof value === 'number' && Number.isFinite(value) && value >= 0;
 
@@ -417,10 +504,22 @@ export function getPingTaskSummary(records: PingRecord[]): PingTaskSummary {
     }
   }
 
+  if (stats) {
+    return {
+      latest,
+      avg: stats.avg,
+      min: stats.min,
+      max: stats.max,
+      p75: stats.p75,
+      loss: stats.lossRate,
+      jitter: stats.jitter,
+    };
+  }
+
   let avg: number | null = null;
   let min: number | null = null;
   let max: number | null = null;
-  let samples = 0;
+  let jitter: number | null = null;
 
   const bucketRows = records.filter((record) => isPositive(record.avg_latency));
   if (bucketRows.length > 0) {
@@ -431,7 +530,6 @@ export function getPingTaskSummary(records: PingRecord[]): PingTaskSummary {
       const w = Number.isFinite(count) && count > 0 ? count : 1;
       weighted += (record.avg_latency as number) * w;
       weight += w;
-      samples += w;
     }
     if (weight > 0) avg = weighted / weight;
     const mins = records.map((record) => record.min_latency).filter(isPositive);
@@ -441,10 +539,10 @@ export function getPingTaskSummary(records: PingRecord[]): PingTaskSummary {
   } else {
     const values = records.map((record) => Number(record.value)).filter(isPositive);
     if (values.length > 0) {
-      samples = records.length;
       avg = values.reduce((sum, value) => sum + value, 0) / values.length;
       min = Math.min(...values);
       max = Math.max(...values);
+      jitter = sampleStdDev(values);
     }
   }
 
@@ -455,7 +553,7 @@ export function getPingTaskSummary(records: PingRecord[]): PingTaskSummary {
     max,
     p75: getPingSeriesP75(records),
     loss: getPingLossRate(records),
-    samples,
+    jitter,
   };
 }
 
@@ -502,6 +600,7 @@ export async function fetchPingTaskSeries(
     end,
     includeHidden = false,
     signal,
+    onTasks,
   }: {
     limit?: number;
     maxTasks?: number;
@@ -511,6 +610,8 @@ export async function fetchPingTaskSeries(
     end?: string;
     includeHidden?: boolean;
     signal?: AbortSignal;
+    /** 任务列表解析完、记录请求发出之前调用：调用方可借此并行发起依赖任务 id 的其它请求（如统计）。 */
+    onTasks?: (tasks: NormalizedPingTask[]) => void;
   } = {},
 ): Promise<PingTaskSeries[]> {
   const hiddenQuery = includeHidden ? '&include_hidden=1' : '';
@@ -522,6 +623,7 @@ export async function fetchPingTaskSeries(
   const tasks = Number.isFinite(maxTasks) && (maxTasks as number) >= 0
     ? applicableTasks.slice(0, maxTasks as number)
     : applicableTasks;
+  onTasks?.(tasks);
 
   const requestLimitForTask = (task: NormalizedPingTask) => {
     if (rangeHours && rangeHours > 0) {
@@ -546,9 +648,11 @@ export async function fetchPingTaskSeries(
     return response.json();
   };
 
-  // 按窗口分流：>4h 走服务端分桶，单次 batch 必然拿齐（24h=720 / 3d=864 / 7d=672 桶 < 1000），无需回填；
-  // <=4h 读原始，60s 间隔下单页包圆（4h=240 行），极小间隔任务靠下方逐任务分页兜底。
-  const LONG_RANGE_MS = 4 * 60 * 60 * 1000;
+  // 按窗口分流：>12h 走服务端分桶，单次 batch 必然拿齐（24h=240 / 3d=720 / 7d=720 桶 < 1000），无需回填；
+  // <=12h 读原始，60s 间隔下单页包圆（12h=720 行），极小间隔任务靠下方逐任务分页兜底。
+  // 边界与 worker 的 RAW_HISTORY_MAX_RANGE_MS 一致：start/end 是两次独立取时间得到的，
+  // 会比名义区间多几毫秒，留 10 分钟余量，免得 12h 档被偶然判成长窗口。
+  const LONG_RANGE_MS = 12 * 60 * 60 * 1000 + 10 * 60 * 1000;
   const rangeStartMs = rangeStart ? Date.parse(rangeStart) : NaN;
   const effectiveEndMs = Date.parse(effectiveEnd);
   const measuredRangeMs = Number.isFinite(rangeStartMs) && Number.isFinite(effectiveEndMs)
@@ -624,4 +728,31 @@ export async function fetchPingTaskSeries(
   );
 
   return limitPingSeriesToRecentRange(series, rangeHours);
+}
+
+// 整个窗口的任务统计（服务端算好的均值/最小/最大/p50/p75/丢包/抖动）。失败时返回空对象，
+// 任务卡片会退回用前端手上的点估算，不影响曲线。
+export async function fetchPingTaskStats(
+  uuid: string,
+  taskIds: number[],
+  { start, end, includeHidden = false, signal }: {
+    start: string;
+    end: string;
+    includeHidden?: boolean;
+    signal?: AbortSignal;
+  },
+): Promise<Record<string, PingTaskStats>> {
+  if (taskIds.length === 0) return {};
+  const hiddenQuery = includeHidden ? '&include_hidden=1' : '';
+  try {
+    const response = await fetch(
+      `/api/records/ping/stats?uuid=${encodeURIComponent(uuid)}&task_ids=${taskIds.join(',')}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}${hiddenQuery}`,
+      { signal },
+    );
+    if (!response.ok) return {};
+    return normalizePingTaskStats(await response.json());
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    return {};
+  }
 }

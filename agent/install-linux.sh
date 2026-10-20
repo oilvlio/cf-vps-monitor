@@ -39,6 +39,7 @@ DISK_USAGE_FILE_PRESENT="0"
 NIC_INCLUDE=""
 NIC_EXCLUDE=""
 ALLOW_HOST_LOAD="0"
+DISABLE_GPU="0"
 HOST_CPU_CORES="0"
 DISABLE_WEB_SSH="0"
 DISABLE_AUTO_UPDATE="0"
@@ -80,6 +81,7 @@ Options:
   --nic-include LIST        Comma-separated network interface patterns included in traffic totals.
   --nic-exclude LIST        Comma-separated network interface patterns excluded from traffic totals.
   --allow-host-load         In containers, report the host load average instead of leaving load unavailable.
+  --disable-gpu             Skip GPU detection and reporting entirely (no nvidia-smi / rocm-smi probes).
   --host-cpu-cores N        Host CPU core count; scales host load to this container's cores (0 = no scaling).
   --disable-web-ssh         Accepted as a legacy no-op option.
   --disable-auto-update     Accepted as a legacy no-op option.
@@ -999,6 +1001,7 @@ while [[ $# -gt 0 ]]; do
     --nic-include) NIC_INCLUDE="${2:-}"; shift 2 ;;
     --nic-exclude) NIC_EXCLUDE="${2:-}"; shift 2 ;;
     --allow-host-load) ALLOW_HOST_LOAD="1"; shift ;;
+    --disable-gpu) DISABLE_GPU="1"; shift ;;
     --host-cpu-cores) HOST_CPU_CORES="${2:-}"; shift 2 ;;
     --disable-web-ssh) DISABLE_WEB_SSH="1"; shift ;;
     --disable-auto-update) DISABLE_AUTO_UPDATE="1"; shift ;;
@@ -1229,6 +1232,7 @@ export CF_MONITOR_DISK_USAGE_FILE=$(shell_quote "$DISK_USAGE_FILE")
 export CF_MONITOR_NIC_INCLUDE=$(shell_quote "$NIC_INCLUDE")
 export CF_MONITOR_NIC_EXCLUDE=$(shell_quote "$NIC_EXCLUDE")
 export CF_MONITOR_ALLOW_HOST_LOAD=$(shell_quote "$ALLOW_HOST_LOAD")
+export CF_MONITOR_DISABLE_GPU=$(shell_quote "$DISABLE_GPU")
 export CF_MONITOR_HOST_CPU_CORES=$(shell_quote "$HOST_CPU_CORES")
 export CF_MONITOR_TRAFFIC_RESET_DAY=$(shell_quote "$TRAFFIC_RESET_DAY")
 export CF_MONITOR_TRAFFIC_STATE_FILE=$(shell_quote "${STATE_DIR}/traffic-state.json")
@@ -1284,6 +1288,7 @@ CF_MONITOR_DISK_USAGE_FILE=$(systemd_env_quote "$DISK_USAGE_FILE")
 CF_MONITOR_NIC_INCLUDE=$(systemd_env_quote "$NIC_INCLUDE")
 CF_MONITOR_NIC_EXCLUDE=$(systemd_env_quote "$NIC_EXCLUDE")
 CF_MONITOR_ALLOW_HOST_LOAD=$(systemd_env_quote "$ALLOW_HOST_LOAD")
+CF_MONITOR_DISABLE_GPU=$(systemd_env_quote "$DISABLE_GPU")
 CF_MONITOR_HOST_CPU_CORES=$(systemd_env_quote "$HOST_CPU_CORES")
 CF_MONITOR_TRAFFIC_RESET_DAY=$(systemd_env_quote "$TRAFFIC_RESET_DAY")
 CF_MONITOR_TRAFFIC_STATE_FILE=$(systemd_env_quote "$STATE_DIR/traffic-state.json")

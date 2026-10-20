@@ -111,6 +111,7 @@ var (
 	nicExclude              string
 	allowHostLoad           bool
 	hostCPUCores            int
+	disableGPU              bool
 	trafficTracker          *trafficResetTracker
 	publicIPv4ProbeURLs     = []string{
 		"https://api.ipify.org",
@@ -427,6 +428,7 @@ func init() {
 	flag.BoolVar(&allowHostLoad, "allow-host-load", false, "In containers whose /proc/loadavg is the host's (no lxcfs loadavg), report the host load average instead of leaving load unavailable")
 	flag.IntVar(&hostCPUCores, "host-cpu-cores", 0, "Host CPU core count; with --allow-host-load, host load is scaled to this container's core count so load/cores reflects host utilization (0 = report the raw host load)")
 	flag.StringVar(&nicExclude, "nic-exclude", "", "Comma-separated network interface patterns to exclude from traffic totals, for example lo,docker*,veth*")
+	flag.BoolVar(&disableGPU, "disable-gpu", false, "Skip GPU detection and reporting entirely (no nvidia-smi / rocm-smi subprocesses)")
 }
 
 func main() {
@@ -473,6 +475,9 @@ func main() {
 	}
 	logFilter("network include", nicInclude)
 	logFilter("network exclude", nicExclude)
+	if disableGPU {
+		log.Printf("GPU collection disabled (--disable-gpu); no nvidia-smi / rocm-smi probes")
+	}
 
 	switch reportMode {
 	case "websocket", "ws":
@@ -523,6 +528,12 @@ func applyEnvDefaults() {
 		switch strings.ToLower(strings.TrimSpace(os.Getenv("CF_MONITOR_ALLOW_HOST_LOAD"))) {
 		case "1", "true", "yes", "on":
 			allowHostLoad = true
+		}
+	}
+	if !flagWasSet("disable-gpu") {
+		switch strings.ToLower(strings.TrimSpace(os.Getenv("CF_MONITOR_DISABLE_GPU"))) {
+		case "1", "true", "yes", "on":
+			disableGPU = true
 		}
 	}
 	if !flagWasSet("host-cpu-cores") {
@@ -1585,8 +1596,12 @@ func getBasicInfo() BasicInfo {
 		info.DiskTotal = *diskTotal
 	}
 
-	// GPU detection
-	gpuName, gpuDetails := detectGPU()
+	// GPU detection（--disable-gpu 时完全跳过：不出子进程，也不上报 GPU 字段）
+	var gpuName string
+	var gpuDetails []GPUInfo
+	if !disableGPU {
+		gpuName, gpuDetails = detectGPU()
+	}
 	info.GPUName = gpuName
 
 	// Store detailed GPU info globally for reports
@@ -2949,7 +2964,7 @@ func collectReportWithInterval(intervalSec int) Report {
 
 	// GPU details
 	gpuDetailsMu.Lock()
-	if len(globalGPUDetails) > 0 {
+	if !disableGPU && len(globalGPUDetails) > 0 {
 		// Refresh GPU data for each report
 		_, gpuDetails := detectGPU()
 		r.GPUs = gpuDetails

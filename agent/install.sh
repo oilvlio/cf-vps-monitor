@@ -41,6 +41,7 @@ NIC_INCLUDE=""
 NIC_EXCLUDE=""
 ALLOW_HOST_LOAD="0"
 HOST_CPU_CORES="0"
+DISABLE_GPU="0"
 AGENT_USER="cf-vps-monitor-agent"
 OS_NAME="$(uname -s | tr '[:upper:]' '[:lower:]')"
 
@@ -90,6 +91,7 @@ Options:
   --nic-exclude LIST        Comma-separated network interface patterns excluded from traffic totals.
   --allow-host-load         In containers, report the host load average instead of leaving load unavailable.
   --host-cpu-cores N        Host CPU core count; scales host load to this container's cores (0 = no scaling).
+  --disable-gpu             Skip GPU detection and reporting entirely (no nvidia-smi / rocm-smi probes).
   --disable-web-ssh         Accepted as a legacy no-op option.
   --disable-auto-update     Accepted as a legacy no-op option.
   --ignore-unsafe-cert      Accepted as a legacy no-op option.
@@ -1071,6 +1073,7 @@ CF_MONITOR_DISK_USAGE_FILE=$($env_quote "$DISK_USAGE_FILE")
 CF_MONITOR_NIC_INCLUDE=$($env_quote "$NIC_INCLUDE")
 CF_MONITOR_NIC_EXCLUDE=$($env_quote "$NIC_EXCLUDE")
 CF_MONITOR_ALLOW_HOST_LOAD=$($env_quote "$ALLOW_HOST_LOAD")
+CF_MONITOR_DISABLE_GPU=$($env_quote "$DISABLE_GPU")
 CF_MONITOR_HOST_CPU_CORES=$($env_quote "$HOST_CPU_CORES")
 CF_MONITOR_TRAFFIC_RESET_DAY=$($env_quote "$TRAFFIC_RESET_DAY")
 CF_MONITOR_TRAFFIC_STATE_FILE=$($env_quote "${STATE_DIR}/traffic-state.json")
@@ -1255,7 +1258,7 @@ depend() {
 start_pre() {
   export CF_MONITOR_SERVER CF_MONITOR_TOKEN CF_MONITOR_NAME CF_MONITOR_MODE
   export CF_MONITOR_MOUNT_INCLUDE CF_MONITOR_MOUNT_EXCLUDE CF_MONITOR_NIC_INCLUDE CF_MONITOR_NIC_EXCLUDE
-  export CF_MONITOR_TRAFFIC_RESET_DAY CF_MONITOR_TRAFFIC_STATE_FILE CF_MONITOR_ALLOW_HOST_LOAD CF_MONITOR_HOST_CPU_CORES
+  export CF_MONITOR_TRAFFIC_RESET_DAY CF_MONITOR_TRAFFIC_STATE_FILE CF_MONITOR_ALLOW_HOST_LOAD CF_MONITOR_DISABLE_GPU CF_MONITOR_HOST_CPU_CORES
   export CF_MONITOR_CONTAINER_DISK_TOTAL_BYTES CF_MONITOR_DISK_USAGE_FILE
   checkpath -d -m 0755 -o ${AGENT_USER}:${AGENT_USER} $(shell_quote "$STATE_DIR") || return 1
   _cf_log_path="\$output_log"
@@ -1484,7 +1487,7 @@ set -eu
 . $(shell_quote "$ENV_FILE")
 export CF_MONITOR_SERVER CF_MONITOR_TOKEN CF_MONITOR_NAME CF_MONITOR_MODE
 export CF_MONITOR_MOUNT_INCLUDE CF_MONITOR_MOUNT_EXCLUDE CF_MONITOR_NIC_INCLUDE CF_MONITOR_NIC_EXCLUDE
-export CF_MONITOR_TRAFFIC_RESET_DAY CF_MONITOR_TRAFFIC_STATE_FILE CF_MONITOR_ALLOW_HOST_LOAD CF_MONITOR_HOST_CPU_CORES
+export CF_MONITOR_TRAFFIC_RESET_DAY CF_MONITOR_TRAFFIC_STATE_FILE CF_MONITOR_ALLOW_HOST_LOAD CF_MONITOR_DISABLE_GPU CF_MONITOR_HOST_CPU_CORES
 export CF_MONITOR_CONTAINER_DISK_TOTAL_BYTES CF_MONITOR_DISK_USAGE_FILE
 exec $(shell_quote "${INSTALL_DIR}/cf-vps-monitor-agent") --interval ${INTERVAL} --ping-interval ${PING_INTERVAL} --traffic-reset-day ${TRAFFIC_RESET_DAY}
 EOF
@@ -1685,6 +1688,7 @@ while [ "$#" -gt 0 ]; do
     --nic-include) NIC_INCLUDE="${2:-}"; shift 2 ;;
     --nic-exclude) NIC_EXCLUDE="${2:-}"; shift 2 ;;
     --allow-host-load) ALLOW_HOST_LOAD="1"; shift ;;
+    --disable-gpu) DISABLE_GPU="1"; shift ;;
     --host-cpu-cores) HOST_CPU_CORES="${2:-}"; shift 2 ;;
     --disable-web-ssh|--disable-auto-update|--ignore-unsafe-cert) shift ;;
     --install-ghproxy) INSTALL_GHPROXY="${2:-}"; shift 2 ;;

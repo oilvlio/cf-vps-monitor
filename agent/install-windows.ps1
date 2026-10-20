@@ -35,6 +35,7 @@ param(
   [switch]$DisableWebSsh,
   [switch]$DisableAutoUpdate,
   [switch]$IgnoreUnsafeCert,
+  [switch]$DisableGpu,
   [string]$InstallGhproxy = "",
   [switch]$DryRun,
   [switch]$Uninstall,
@@ -803,6 +804,7 @@ $runnerContent = @"
 `$env:CF_MONITOR_NIC_INCLUDE = $(ConvertTo-PowerShellLiteral $NicInclude)
 `$env:CF_MONITOR_NIC_EXCLUDE = $(ConvertTo-PowerShellLiteral $NicExclude)
 `$env:CF_MONITOR_TRAFFIC_RESET_DAY = $(ConvertTo-PowerShellLiteral ([string]$TrafficResetDay))
+`$env:CF_MONITOR_DISABLE_GPU = $(ConvertTo-PowerShellLiteral $(if ($DisableGpu) { 'true' } else { 'false' }))
 `$env:CF_MONITOR_TRAFFIC_STATE_FILE = Join-Path `$PSScriptRoot "state\traffic-state.json"
 `$logPath = Join-Path `$PSScriptRoot "state\agent.log"
 `$runnerLogPath = Join-Path `$PSScriptRoot "state\runner.log"

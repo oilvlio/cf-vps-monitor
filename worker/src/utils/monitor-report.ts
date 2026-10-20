@@ -15,8 +15,6 @@ export type MonitorReportPayload = JsonObject & {
   temp: number | null;
   disk: number | null;
   disk_total: number | null;
-  disk_source?: 'directory';
-  disk_sampled_at?: number;
   net_in: number;
   net_out: number;
   net_total_up: number;
@@ -149,22 +147,11 @@ export function normalizeMonitorReport(input: unknown): MonitorReportPayload {
     version: boundedString(report.version, 64),
     gpus,
   };
-  // Cached measurements carry their own sampling clock, independent of the
-  // Agent report/Worker receipt clocks. An invalid pair must not look native.
+  // Older Agents could attach directory-scan estimate metadata. The main
+  // service now reports statfs only, so drop the legacy fields while keeping
+  // the measured disk bytes unchanged.
   delete normalized.disk_source;
   delete normalized.disk_sampled_at;
-  if (report.disk_source !== undefined || report.disk_sampled_at !== undefined) {
-    const sampledAt = report.disk_sampled_at;
-    const measuredUsed = numberFrom(report.disk) ?? numberFrom(disk.used);
-    if (report.disk_source === 'directory' && normalized.disk !== null && measuredUsed !== undefined
-        && measuredUsed >= 0 && measuredUsed <= MAX_COUNTER_VALUE && typeof sampledAt === 'number'
-        && Number.isSafeInteger(sampledAt) && sampledAt > 0 && sampledAt <= 8_640_000_000_000_000) {
-      normalized.disk_source = 'directory';
-      normalized.disk_sampled_at = sampledAt;
-    } else {
-      normalized.disk = null;
-    }
-  }
   return normalized;
 }
 

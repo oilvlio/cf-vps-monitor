@@ -70,7 +70,7 @@ async function wsReport(f, socket, report = {}) {
 }
 
 for (const transport of ['http', 'websocket']) {
-  test(`${transport} directory disk source and sampling time survive offline state and cold restart`, async () => {
+  test(`${transport} legacy disk metadata is stripped while measured bytes survive offline state and cold restart`, async () => {
     const f = fixture();
     const receivedAt = f.now;
     const measuredAt = receivedAt - 300_000;
@@ -90,8 +90,9 @@ for (const transport of ['http', 'websocket']) {
       const live = await snapshot(object);
       assert.deepEqual(live.online, []);
       assert.equal(live.last_known.node.disk, 8_388_608);
-      assert.equal(live.last_known.node.disk_source, 'directory');
-      assert.equal(live.last_known.node.disk_sampled_at, measuredAt);
+      assert.equal(live.last_known.node.disk_total, 5_024_000_000);
+      assert.equal(live.last_known.node.disk_source, undefined);
+      assert.equal(live.last_known.node.disk_sampled_at, undefined);
       assert.equal(live.last_known.node.lastReportTime, receivedAt);
     }
   });

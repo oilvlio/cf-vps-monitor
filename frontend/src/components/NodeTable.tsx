@@ -130,7 +130,6 @@ function ExpandedNodeDetails({
             <DetailRow label="内存" value={formatMetricBytes(resourceTotal(live?.ram_total, node.mem_total))} />
             <DetailRow label="交换" value={formatMetricBytes(live?.swap_total ?? node.swap_total)} />
             <DetailRow label="磁盘" value={diskUsagePresentation(live, node.disk_total).detail} />
-            {diskUsagePresentation(live).estimated && <DetailRow label="文件占用估算" value={diskUsagePresentation(live).sampleLabel} />}
           </DetailSection>
 
           <DetailSection title="系统环境">
@@ -371,7 +370,7 @@ export default function NodeTable({ nodes, liveData }: NodeTableProps) {
                   <Table.Cell>
                     <Box className="node-table-resource-cell">
                       {diskPct !== null && <UsageBar value={diskPct} showLabel={false} />}
-                      <Text size="1" color="gray" title={disk.estimated ? `${disk.detail}；${disk.description} ${disk.sampleLabel}` : diskPct === null ? '磁盘使用量或容量未提供' : undefined}>{diskPct === null ? '—' : `${disk.estimated ? '≈ ' : ''}${diskPct.toFixed(1)}%`}</Text>
+                      <Text size="1" color="gray" title={diskPct === null ? '磁盘使用量或容量未提供' : `${disk.detail}`}>{diskPct === null ? '—' : `${diskPct.toFixed(1)}%`}</Text>
                     </Box>
                   </Table.Cell>
                   <Table.Cell>

@@ -32,11 +32,6 @@ CF_MONITOR_RELEASE_TAG=""
 CF_MONITOR_RELEASE_BASE="https://github.com/${CF_MONITOR_REPOSITORY}/releases/latest/download"
 MOUNT_INCLUDE=""
 MOUNT_EXCLUDE=""
-CONTAINER_DISK_TOTAL_BYTES="0"
-CONTAINER_DISK_TOTAL_SET="0"
-DISK_USAGE_FILE=""
-DISK_USAGE_FILE_SET="0"
-DISK_USAGE_FILE_PRESENT="0"
 NIC_INCLUDE=""
 NIC_EXCLUDE=""
 ALLOW_HOST_LOAD="0"
@@ -84,9 +79,6 @@ Options:
   --proxy URL               Proxy used for binary downloads, for example http://127.0.0.1:10808.
   --mount-include LIST      Comma-separated mountpoint/device patterns included in disk totals.
   --mount-exclude LIST      Comma-separated mountpoint/device patterns excluded from disk totals.
-  --container-disk-total-bytes BYTES
-                            Container root allocation, 0 for automatic detection.
-  --disk-usage-file PATH    Administrator disk cache; empty disables the companion.
   --nic-include LIST        Comma-separated network interface patterns included in traffic totals.
   --nic-exclude LIST        Comma-separated network interface patterns excluded from traffic totals.
   --allow-host-load         In containers, report the host load average instead of leaving load unavailable.
@@ -517,68 +509,6 @@ agent_write_marker() {
   write_file "$INSTALL_DIR/.cf-vps-monitor-owned" 600 "$(printf '%s\n' 'cf-vps-monitor-agent:1' "$BASE_ID" "$SERVICE_MODE" "$SERVICE_NAME" "$INSTALL_DIR" "$ENV_FILE" "$STATE_DIR")"
 }
 
-agent_disk_total_valid() {
-  case "$1" in ''|*[!0-9]*) return 1 ;; esac
-  [ "${#1}" -le 16 ] && awk -v value="$1" 'BEGIN { exit !(value + 0 <= 1000000000000000) }'
-}
-
-agent_disk_file_valid() {
-  [ "${#1}" -le 4096 ] || return 1
-  case "$1" in
-    *'
-'*|*"$(printf '\r')"*) return 1 ;;
-    ''|/*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-agent_disk_config_value() (
-  # Read only these nonsecret assignments as data. Never execute the old file.
-  encoded="$(awk -v key="$2" '
-    { line = $0; sub(/^[ \t]*export[ \t]+/, "", line);
-      if (index(line, key "=") == 1) { value = substr(line, length(key) + 2); found = 1; }
-    }
-    END { if (!found || length(value) > 8192) exit 1; print value }' "$1")" || exit 1
-  case "$encoded" in
-    \'*) agent_shell_unquote "$encoded" ;;
-    \"*) printf '%s\n' "$encoded" | awk '
-      { if (length($0) < 2 || substr($0, length($0), 1) != "\"") exit 1;
-        value = "";
-        for (i = 2; i < length($0); i++) {
-          c = substr($0, i, 1);
-          if (c == "\\") {
-            c = substr($0, ++i, 1);
-            if (i >= length($0) || (c != "\\" && c != "\"" && c != "$" && c != "`")) exit 1;
-          } else if (c == "\"" || c == "$" || c == "`") exit 1;
-          value = value c;
-        }
-        print value;
-      }' ;;
-    *)
-      printf '%s\n' "$encoded" | LC_ALL=C grep -Eq '^([0-9]+|/[A-Za-z0-9_./@%+,=-]*)$' || exit 1
-      printf '%s\n' "$encoded" ;;
-  esac
-)
-
-agent_load_disk_options() {
-  disk_old_config="${ENV_FILE:-$RUNNER_FILE}"
-  if [ -f "$disk_old_config" ] && [ ! -L "$disk_old_config" ]; then
-    if [ "${CONTAINER_DISK_TOTAL_SET:-0}" = 0 ]; then
-      if disk_old_value="$(agent_disk_config_value "$disk_old_config" CF_MONITOR_CONTAINER_DISK_TOTAL_BYTES)" && agent_disk_total_valid "$disk_old_value"; then
-        CONTAINER_DISK_TOTAL_BYTES="$disk_old_value"
-      fi
-    fi
-    if [ "${DISK_USAGE_FILE_SET:-0}" = 0 ]; then
-      if disk_old_value="$(agent_disk_config_value "$disk_old_config" CF_MONITOR_DISK_USAGE_FILE)" && agent_disk_file_valid "$disk_old_value"; then
-        DISK_USAGE_FILE="$disk_old_value"
-        DISK_USAGE_FILE_PRESENT=1
-      fi
-    fi
-  fi
-  agent_disk_total_valid "${CONTAINER_DISK_TOTAL_BYTES:-0}" || { printf '%s\n' '--container-disk-total-bytes must be an integer from 0 to 1000000000000000.' >&2; return 1; }
-  agent_disk_file_valid "${DISK_USAGE_FILE:-}" || { printf '%s\n' '--disk-usage-file must be empty or an absolute path without line breaks.' >&2; return 1; }
-}
-
 agent_root_path_safe() (
   disk_path="$1"
   while :; do
@@ -631,119 +561,6 @@ agent_stop_disk_collector() {
         fi ;;
     esac
   fi
-}
-
-agent_disk_openrc_content() {
-  cat <<EOF
-#!/sbin/openrc-run
-# cf-vps-monitor-disk-usage:1
-# service: $SERVICE_NAME
-# install: $INSTALL_DIR
-name="CF VPS Monitor Disk Usage"
-description="Local container file allocation collector"
-command=$(shell_quote "$INSTALL_DIR/cf-vps-monitor-agent")
-command_args=$(shell_quote "--disk-usage-collector $(shell_quote "$SERVICE_NAME") --mount-include $(shell_quote "$MOUNT_INCLUDE") --mount-exclude $(shell_quote "$MOUNT_EXCLUDE") --container-disk-total-bytes $CONTAINER_DISK_TOTAL_BYTES")
-command_user="root:root"
-command_background=true
-start_stop_daemon_args="--wait 1000"
-pidfile="/run/\${RC_SVCNAME}.pid"
-directory="/"
-output_log="/var/log/\${RC_SVCNAME}.log"
-error_log="/var/log/\${RC_SVCNAME}.log"
-
-start_pre() {
-  _cf_disk_log="\$output_log"
-  while :; do
-    [ ! -L "\$_cf_disk_log" ] || { eerror "Refusing linked disk collector log"; return 1; }
-    _cf_disk_parent="\$(dirname "\$_cf_disk_log")" || return 1
-    [ "\$_cf_disk_parent" != "\$_cf_disk_log" ] || break
-    _cf_disk_log="\$_cf_disk_parent"
-  done
-  if [ -e "\$output_log" ] && { [ ! -f "\$output_log" ] || [ "\$(stat -c %h "\$output_log")" != 1 ]; }; then
-    eerror "Refusing non-regular disk collector log"
-    return 1
-  fi
-  checkpath -f -m 0600 -o root:root "\$output_log" || return 1
-}
-EOF
-}
-
-agent_prepare_disk_collector() {
-  DISK_COLLECTOR_ENABLED=0
-  agent_disk_service_paths
-  [ -n "$DISK_SERVICE_FILE" ] && [ "${OS_NAME:-${PLATFORM_OS:-}}" = linux ] && [ "$(id -u)" = 0 ] || return 0
-  [ "${DISK_COLLECTOR_BLOCKED:-0}" = 0 ] || return 0
-  if [ "$DRY_RUN" = 1 ]; then
-    printf '%s\n' '[dry-run] check whether a protected container disk collector is needed'
-    return 0
-  fi
-  case "$SERVICE_MODE" in
-    systemd) [ -d /run/systemd/system ] && [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ] || return 0 ;;
-    openrc) [ -x /sbin/openrc-run ] && [ -f /run/openrc/softlevel ] || return 0 ;;
-  esac
-  if [ "${DISK_USAGE_FILE_SET:-0}" = 1 ] || [ "${DISK_USAGE_FILE_PRESENT:-0}" = 1 ]; then
-    [ "$DISK_USAGE_FILE" = "$DISK_CACHE_DIR/usage.json" ] || return 0
-  fi
-  if ! agent_root_path_safe "$INSTALL_DIR/cf-vps-monitor-agent" ||
-    [ ! -f "$INSTALL_DIR/cf-vps-monitor-agent" ] || [ "$(stat -c %h "$INSTALL_DIR/cf-vps-monitor-agent")" != 1 ]; then
-    printf '%s\n' 'Disk collector disabled: binary and every parent directory must be root-owned and not writable by ordinary users.' >&2
-    return 0
-  fi
-  if ! agent_root_path_safe "$(dirname "$DISK_SERVICE_FILE")"; then
-    printf '%s\n' 'Disk collector disabled: unsafe service directory.' >&2
-    return 0
-  fi
-  if env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin "$INSTALL_DIR/cf-vps-monitor-agent" --disk-usage-check --mount-include "$MOUNT_INCLUDE" --mount-exclude "$MOUNT_EXCLUDE" --container-disk-total-bytes "$CONTAINER_DISK_TOTAL_BYTES"; then
-    :
-  else
-    disk_check_status=$?
-    [ "$disk_check_status" = 3 ] || printf '%s\n' "Disk collector unavailable: scope check failed (exit $disk_check_status)." >&2
-    return 0
-  fi
-  case "$SERVICE_MODE" in
-    systemd)
-      write_file "$DISK_SERVICE_FILE" 644 "$(cat <<EOF
-# cf-vps-monitor-disk-usage:1
-# service: $SERVICE_NAME
-# install: $INSTALL_DIR
-[Unit]
-Description=CF VPS Monitor Disk Usage
-
-[Service]
-Type=exec
-User=root
-Group=root
-ExecStart=$(systemd_exec "$INSTALL_DIR/cf-vps-monitor-agent") --disk-usage-collector $(systemd_word "$SERVICE_NAME") --mount-include $(systemd_word "$MOUNT_INCLUDE") --mount-exclude $(systemd_word "$MOUNT_EXCLUDE") --container-disk-total-bytes $CONTAINER_DISK_TOTAL_BYTES
-Restart=on-failure
-RestartSec=30
-Nice=19
-IOSchedulingClass=best-effort
-IOSchedulingPriority=7
-NoNewPrivileges=true
-
-[Install]
-WantedBy=multi-user.target
-EOF
-)" || return 1 ;;
-    openrc) write_file "$DISK_SERVICE_FILE" 755 "$(agent_disk_openrc_content)" || return 1 ;;
-  esac
-  # The needed probe selected only root. The main systemd namespace can add
-  # state bind mounts, so make its otherwise-default selection explicit.
-  [ -n "$MOUNT_INCLUDE" ] || MOUNT_INCLUDE='/'
-  DISK_USAGE_FILE="$DISK_CACHE_DIR/usage.json"
-  DISK_COLLECTOR_ENABLED=1
-}
-
-agent_start_disk_collector() {
-  [ "${DISK_COLLECTOR_ENABLED:-0}" = 1 ] || return 0
-  case "$SERVICE_MODE" in
-    systemd)
-      if run systemctl enable "$DISK_SERVICE_NAME" && run systemctl restart "$DISK_SERVICE_NAME" && run systemctl is-active --quiet "$DISK_SERVICE_NAME"; then return 0; fi ;;
-    openrc)
-      if run rc-update add "$DISK_SERVICE_NAME" default && run rc-service "$DISK_SERVICE_NAME" restart; then return 0; fi ;;
-  esac
-  printf '%s\n' "Disk collector failed to start: $DISK_SERVICE_NAME. The Agent remains installed; disk usage is unavailable without a valid cache." >&2
-  agent_stop_disk_collector || return 1
 }
 
 agent_remove_disk_collector() {
@@ -1068,8 +885,6 @@ CF_MONITOR_NAME=$($env_quote "$NODE_NAME")
 CF_MONITOR_MODE=$($env_quote "$MODE")
 CF_MONITOR_MOUNT_INCLUDE=$($env_quote "$MOUNT_INCLUDE")
 CF_MONITOR_MOUNT_EXCLUDE=$($env_quote "$MOUNT_EXCLUDE")
-CF_MONITOR_CONTAINER_DISK_TOTAL_BYTES=$($env_quote "$CONTAINER_DISK_TOTAL_BYTES")
-CF_MONITOR_DISK_USAGE_FILE=$($env_quote "$DISK_USAGE_FILE")
 CF_MONITOR_NIC_INCLUDE=$($env_quote "$NIC_INCLUDE")
 CF_MONITOR_NIC_EXCLUDE=$($env_quote "$NIC_EXCLUDE")
 CF_MONITOR_ALLOW_HOST_LOAD=$($env_quote "$ALLOW_HOST_LOAD")
@@ -1081,7 +896,6 @@ EOF
 }
 
 validate_common() {
-  agent_load_disk_options || return 1
   [ -n "$SERVICE_NAME" ] || die "--service-name cannot be empty."
   [ "$MODE" = "websocket" ] || [ "$MODE" = "http" ] || die "--mode must be websocket or http."
   if ! printf '%s' "$TRAFFIC_RESET_DAY" | grep -Eq '^[0-9]+$' || [ "$TRAFFIC_RESET_DAY" -lt 1 ] || [ "$TRAFFIC_RESET_DAY" -gt 31 ]; then
@@ -1170,15 +984,13 @@ prepare_binary() {
 
 install_systemd() {
   agent_assert_instance 0 || return 1
-  agent_load_disk_options || return 1
-  agent_stop_disk_collector || return 1
+  agent_remove_disk_collector || return 1
   ensure_agent_user
   (
     umask 022
     run mkdir -p "$INSTALL_DIR" "$STATE_DIR"
   ) || return 1
   copy_binary_to "$WORK_BIN" "$INSTALL_DIR/cf-vps-monitor-agent"
-  agent_prepare_disk_collector || return 1
   run chown -R "$AGENT_USER:$AGENT_USER" "$STATE_DIR"
   write_file "$ENV_FILE" "600" "$(env_content)"
   UNIT_CONTENT=$(cat <<EOF
@@ -1218,7 +1030,6 @@ EOF
   run systemctl daemon-reload
   run systemctl enable "$SERVICE_NAME"
   run systemctl restart "$SERVICE_NAME"
-  agent_start_disk_collector || return 1
   echo "Installed ${SERVICE_NAME}."
   echo "Status: systemctl status ${SERVICE_NAME}"
   echo "Logs:   journalctl -u ${SERVICE_NAME} -f"
@@ -1226,15 +1037,13 @@ EOF
 
 install_openrc() {
   agent_assert_instance 0 || return 1
-  agent_load_disk_options || return 1
-  agent_stop_disk_collector || return 1
+  agent_remove_disk_collector || return 1
   ensure_agent_user
   (
     umask 022
     run mkdir -p "$INSTALL_DIR" "$STATE_DIR" /etc/conf.d /etc/init.d
   ) || return 1
   copy_binary_to "$WORK_BIN" "$INSTALL_DIR/cf-vps-monitor-agent"
-  agent_prepare_disk_collector || return 1
   run chown -R "$AGENT_USER:$AGENT_USER" "$STATE_DIR"
   write_file "$ENV_FILE" "600" "$(env_content)"
   INIT_CONTENT=$(cat <<EOF
@@ -1259,7 +1068,6 @@ start_pre() {
   export CF_MONITOR_SERVER CF_MONITOR_TOKEN CF_MONITOR_NAME CF_MONITOR_MODE
   export CF_MONITOR_MOUNT_INCLUDE CF_MONITOR_MOUNT_EXCLUDE CF_MONITOR_NIC_INCLUDE CF_MONITOR_NIC_EXCLUDE
   export CF_MONITOR_TRAFFIC_RESET_DAY CF_MONITOR_TRAFFIC_STATE_FILE CF_MONITOR_ALLOW_HOST_LOAD CF_MONITOR_DISABLE_GPU CF_MONITOR_HOST_CPU_CORES
-  export CF_MONITOR_CONTAINER_DISK_TOTAL_BYTES CF_MONITOR_DISK_USAGE_FILE
   checkpath -d -m 0755 -o ${AGENT_USER}:${AGENT_USER} $(shell_quote "$STATE_DIR") || return 1
   _cf_log_path="\$output_log"
   while [ -n "\$_cf_log_path" ]; do
@@ -1283,7 +1091,6 @@ EOF
   agent_write_marker
   run rc-update add "$SERVICE_NAME" default || die "Failed to enable ${SERVICE_NAME}."
   run rc-service "$SERVICE_NAME" restart || die "Failed to start ${SERVICE_NAME}; inspect /var/log/${SERVICE_NAME}.log and rc-service ${SERVICE_NAME} status."
-  agent_start_disk_collector || return 1
   echo "Installed ${SERVICE_NAME}."
   echo "Status: rc-service ${SERVICE_NAME} status"
   echo "Logs:   tail -f /var/log/${SERVICE_NAME}.log"
@@ -1292,7 +1099,6 @@ EOF
 
 install_launchctl() {
   agent_assert_instance 0 || return 1
-  agent_load_disk_options || return 1
   run mkdir -p "$INSTALL_DIR" "$STATE_DIR"
   copy_binary_to "$WORK_BIN" "$INSTALL_DIR/cf-vps-monitor-agent"
   RUNNER_CONTENT=$(cat <<EOF
@@ -1420,7 +1226,6 @@ install_user_mode() {
  (
   set -eu
   agent_assert_instance 0 || exit 1
-  agent_load_disk_options || exit 1
   run mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$STATE_DIR"
   eval "$(user_process_helpers)"
   _cf_user_backup=''
@@ -1488,7 +1293,6 @@ set -eu
 export CF_MONITOR_SERVER CF_MONITOR_TOKEN CF_MONITOR_NAME CF_MONITOR_MODE
 export CF_MONITOR_MOUNT_INCLUDE CF_MONITOR_MOUNT_EXCLUDE CF_MONITOR_NIC_INCLUDE CF_MONITOR_NIC_EXCLUDE
 export CF_MONITOR_TRAFFIC_RESET_DAY CF_MONITOR_TRAFFIC_STATE_FILE CF_MONITOR_ALLOW_HOST_LOAD CF_MONITOR_DISABLE_GPU CF_MONITOR_HOST_CPU_CORES
-export CF_MONITOR_CONTAINER_DISK_TOTAL_BYTES CF_MONITOR_DISK_USAGE_FILE
 exec $(shell_quote "${INSTALL_DIR}/cf-vps-monitor-agent") --interval ${INTERVAL} --ping-interval ${PING_INTERVAL} --traffic-reset-day ${TRAFFIC_RESET_DAY}
 EOF
 )
@@ -1683,8 +1487,6 @@ while [ "$#" -gt 0 ]; do
     --proxy) PROXY="${2:-}"; shift 2 ;;
     --mount-include) MOUNT_INCLUDE="${2:-}"; shift 2 ;;
     --mount-exclude) MOUNT_EXCLUDE="${2:-}"; shift 2 ;;
-    --container-disk-total-bytes) CONTAINER_DISK_TOTAL_BYTES="${2:-}"; CONTAINER_DISK_TOTAL_SET=1; shift 2 ;;
-    --disk-usage-file) DISK_USAGE_FILE="${2:-}"; DISK_USAGE_FILE_SET=1; shift 2 ;;
     --nic-include) NIC_INCLUDE="${2:-}"; shift 2 ;;
     --nic-exclude) NIC_EXCLUDE="${2:-}"; shift 2 ;;
     --allow-host-load) ALLOW_HOST_LOAD="1"; shift ;;

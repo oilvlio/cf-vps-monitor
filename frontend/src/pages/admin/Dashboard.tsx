@@ -496,6 +496,16 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: Command
             <FieldInput label="磁盘排除" value={installOptions.mountExclude} onChange={(v) => setOption('mountExclude', v)} placeholder="例如 /boot,tmpfs,/run" />
             <FieldInput label="网卡包含" value={installOptions.nicInclude} onChange={(v) => setOption('nicInclude', v)} placeholder="例如 eth*,ens*" />
             <FieldInput label="网卡排除" value={installOptions.nicExclude} onChange={(v) => setOption('nicExclude', v)} placeholder="例如 lo,docker*,veth*" />
+            <label>
+              <Text size="2" weight="bold" style={{ display: 'block', marginBottom: 4 }}>GPU 采集</Text>
+              <Select.Root value={installOptions.disableGpu ? 'off' : 'on'} onValueChange={(v) => setOption('disableGpu', v === 'off')}>
+                <Select.Trigger style={{ width: '100%' }} />
+                <Select.Content>
+                  <Select.Item value="on">开启（自动探测 nvidia-smi / rocm-smi）</Select.Item>
+                  <Select.Item value="off">关闭（不探测、不上报 GPU）</Select.Item>
+                </Select.Content>
+              </Select.Root>
+            </label>
             <FieldInput label="流量重置日期" value={installOptions.trafficResetDay} onChange={(v) => setOption('trafficResetDay', v)} type="number" min={1} step={1} placeholder="1" />
             {platform === 'unix' && (
               <>

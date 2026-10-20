@@ -1,5 +1,4 @@
 import type { LastKnownRecord, LiveDataResponse } from '../contexts/LiveDataContext';
-import { diskMeasurementMetadata } from './diskMeasurement.ts';
 
 export type ViewerTokenResponse = {
   token: string;
@@ -35,13 +34,6 @@ export function normalizeLastKnownRecord(payload: unknown, uuid: string): LastKn
     if ((value === null && nullableMetrics.has(key)) || asFiniteNumber(value) !== null) {
       (result as Record<string, unknown>)[key] = value;
     }
-  }
-  const diskSource = diskMeasurementMetadata(record);
-  if (diskSource.valid) {
-    result.disk_source = 'directory';
-    result.disk_sampled_at = diskSource.sampledAt;
-  } else if (diskSource.attempted) {
-    result.disk = null;
   }
   if (typeof record.message === 'string') result.message = record.message;
   const order = asFiniteNumber(record.sort_order);

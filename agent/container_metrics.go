@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"math"
 	"os"
 	"path"
@@ -10,34 +9,10 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/host"
 )
-
-// Match the Worker's counter limit so an accepted configuration is not
-// silently truncated when its JSON report reaches the server.
-const maxConfiguredContainerDiskTotalBytes = int64(1_000_000_000_000_000)
-
-type containerDiskTotalValue int64
-
-func (v *containerDiskTotalValue) String() string {
-	if v == nil {
-		return "0"
-	}
-	return strconv.FormatInt(int64(*v), 10)
-}
-
-func (v *containerDiskTotalValue) Set(raw string) error {
-	value := strings.TrimSpace(raw)
-	parsed, err := strconv.ParseInt(value, 10, 64)
-	if value == "" || strings.Trim(value, "0123456789") != "" || err != nil || parsed < 0 || parsed > maxConfiguredContainerDiskTotalBytes {
-		return fmt.Errorf("container disk total must be a decimal integer from 0 to %d bytes", maxConfiguredContainerDiskTotalBytes)
-	}
-	*v = containerDiskTotalValue(parsed)
-	return nil
-}
 
 // Keep OS reads at this boundary so metric scope can be checked before a
 // filesystem or a physical sensor is sampled.
@@ -46,7 +21,6 @@ type nodeMetricSource struct {
 	root       string
 	partitions func(bool) ([]disk.PartitionStat, error)
 	diskUsage  func(string) (*disk.UsageStat, error)
-	diskCache  func(string, string, time.Time) (diskUsageSnapshot, error)
 	hostUptime func() (uint64, error)
 }
 
@@ -55,7 +29,6 @@ var nodeMetrics = nodeMetricSource{
 	root:       "/",
 	partitions: disk.Partitions,
 	diskUsage:  disk.Usage,
-	diskCache:  readDirectoryDiskCache,
 	hostUptime: func() (uint64, error) {
 		info, err := host.Info()
 		if err != nil {
@@ -153,87 +126,16 @@ func (s nodeMetricSource) mounts() ([]nodeMetricMount, bool) {
 	return mounts, len(mounts) > 0
 }
 
-// statfs describes a filesystem, not a container's configured storage quota.
-// A full, supported block filesystem can be measured. A directory bind,
-// overlay, or unverified subvolume can expose its host backing filesystem.
-func containerDiskMountReportable(partition disk.PartitionStat, mounts []nodeMetricMount) bool {
-	found := false
-	for _, mount := range mounts {
-		if mount.point != partition.Mountpoint {
-			continue
-		}
-		// Conflicting stacked mounts do not prove which filesystem statfs
-		// will observe. Require every matching entry to satisfy the scope.
-		if mount.root != "/" || mount.fstype != partition.Fstype {
-			return false
-		}
-		switch mount.fstype {
-		case "ext2", "ext3", "ext4", "xfs":
-			if !strings.HasPrefix(mount.source, "/dev/") {
-				return false
-			}
-			found = true
-		case "zfs":
-			// ZFS 的 statfs 按 dataset 的 quota/refquota 折算 Size/Avail，
-			// 容器根是独立 dataset（pool/.../name）时 df 的结果就是容器自己的配额。
-			// 只接受"非绝对路径且带层级"的 dataset 名，排除直接挂存储池根（pool）的情况。
-			if strings.HasPrefix(mount.source, "/") || !strings.Contains(mount.source, "/") {
-				return false
-			}
-			found = true
-		default:
-			return false
-		}
-	}
-	return found
-}
-
+// Report the selected filesystems exactly as statfs sees them. Virtualized
+// roots often show the host filesystem; that is the same value ordinary
+// probes report, and it is intentionally not replaced by a directory scan.
 func (s nodeMetricSource) diskUsageTotals(include, exclude string) (*int64, *int64) {
-	snapshot := s.diskSnapshot(include, exclude)
-	return snapshot.used, snapshot.total
-}
-
-func (s nodeMetricSource) diskSnapshot(include, exclude string) diskUsageSnapshot {
-	container := s.containerized()
 	partitions, err := s.partitions(true)
 	if err != nil {
-		if container {
-			return diskUsageSnapshot{}
-		}
 		used, total := int64(0), int64(0)
-		return diskUsageSnapshot{used: &used, total: &total}
+		return &used, &total
 	}
 	selected := selectDiskPartitions(partitions, include, exclude)
-	unavailable := func() diskUsageSnapshot {
-		// The optional allocation belongs to the container root disk. It
-		// cannot replace another selected mount, a partial multi-disk total,
-		// or real filesystem usage. Never combine it with host statfs Used.
-		if container && containerDiskTotalBytes > 0 && len(selected) == 1 && selected[0].Mountpoint == "/" {
-			total := int64(containerDiskTotalBytes)
-			return diskUsageSnapshot{total: &total}
-		}
-		return diskUsageSnapshot{}
-	}
-	if container {
-		mounts, ok := s.mounts()
-		if !ok || len(selected) == 0 {
-			return unavailable()
-		}
-		for _, partition := range selected {
-			if !containerDiskMountReportable(partition, mounts) {
-				if rootDiskNeedsDirectoryCache(selected, mounts) && diskUsageFile != "" && s.diskCache != nil {
-					if cached, err := s.diskCache(s.root, diskUsageFile, time.Now()); err == nil && cached.used != nil {
-						if containerDiskTotalBytes > 0 {
-							total := int64(containerDiskTotalBytes)
-							cached.total = &total
-						}
-						return cached
-					}
-				}
-				return unavailable()
-			}
-		}
-	}
 
 	explicitInclude := strings.TrimSpace(include) != ""
 	var samples []*disk.UsageStat
@@ -241,13 +143,11 @@ func (s nodeMetricSource) diskSnapshot(include, exclude string) diskUsageSnapsho
 	for _, partition := range selected {
 		usage, err := s.diskUsage(partition.Mountpoint)
 		if err != nil || usage == nil {
-			if container {
-				return unavailable()
-			}
 			continue
 		}
-		if container && (usage.Total == 0 || usage.Total > math.MaxInt64 || usage.Used > usage.Total) {
-			return unavailable()
+		if usage.Used > math.MaxInt64 || usage.Total > math.MaxInt64 {
+			used, total := int64(0), int64(0)
+			return &used, &total
 		}
 		if explicitInclude {
 			samples = append(samples, usage)
@@ -265,25 +165,14 @@ func (s nodeMetricSource) diskSnapshot(include, exclude string) diskUsageSnapsho
 
 	var usedDisk, totalDisk int64
 	for _, usage := range samples {
-		if container && (int64(usage.Used) > math.MaxInt64-usedDisk || int64(usage.Total) > math.MaxInt64-totalDisk) {
-			return unavailable()
+		if int64(usage.Used) > math.MaxInt64-usedDisk || int64(usage.Total) > math.MaxInt64-totalDisk {
+			used, total := int64(0), int64(0)
+			return &used, &total
 		}
 		usedDisk += int64(usage.Used)
 		totalDisk += int64(usage.Total)
 	}
-	return diskUsageSnapshot{used: &usedDisk, total: &totalDisk}
-}
-
-func rootDiskNeedsDirectoryCache(selected []disk.PartitionStat, mounts []nodeMetricMount) bool {
-	if len(selected) != 1 || selected[0].Mountpoint != "/" || containerDiskMountReportable(selected[0], mounts) {
-		return false
-	}
-	for _, mount := range mounts {
-		if mount.point == "/" {
-			return true
-		}
-	}
-	return false
+	return &usedDisk, &totalDisk
 }
 
 func (s nodeMetricSource) uptime() *int64 {

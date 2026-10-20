@@ -1,6 +1,5 @@
 import type { LiveDataMap, LiveRecord } from '../types';
 import { formatBytes, formatSpeed, formatUptime } from './format';
-import { diskMeasurementMetadata } from './diskMeasurement';
 
 export type NodeStatus = 'online' | 'offline' | 'unknown';
 
@@ -20,16 +19,10 @@ export function resourceUsage(usedValue: unknown, reportedTotal: unknown, metada
 }
 
 export function diskUsagePresentation(record: Partial<LiveRecord> = {}, metadataTotal?: number) {
-  const source = diskMeasurementMetadata(record);
-  const usage = resourceUsage(source.attempted && !source.valid ? null : record.disk, record.disk_total, metadataTotal);
-  const estimated = source.valid;
-  const sampleLabel = estimated ? `采样 ${formatLastReport(source.sampledAt)}` : '';
-  const description = estimated
-    ? '文件占用估算；不含快照、被挂载遮挡及已删除但仍打开的文件。'
-    : '';
+  const usage = resourceUsage(record.disk, record.disk_total, metadataTotal);
   return {
-    ...usage, estimated, sampledAt: source.sampledAt, sampleLabel, description,
-    detail: `${estimated ? '≈ ' : ''}${formatMetricBytes(usage.used)} / ${formatMetricBytes(usage.total)}`,
+    ...usage,
+    detail: `${formatMetricBytes(usage.used)} / ${formatMetricBytes(usage.total)}`,
   };
 }
 

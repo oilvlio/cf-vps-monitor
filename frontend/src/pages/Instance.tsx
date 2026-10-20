@@ -21,7 +21,7 @@ import {
   type PublicMonitorRecord,
 } from '../utils/publicHistory';
 import type { ClientInfo, LiveDataMap } from '../types';
-import { diskUsagePresentation, formatLastReport, formatLoadTriple, formatMetricBytes, formatMetricSpeed, formatMetricUptime, getNodeDisplayRecord, getNodeLastReportTime, getNodeStatus, resourceTotal } from '../utils/nodeMetrics';
+import { formatLastReport, formatLoadTriple, formatMetricBytes, formatMetricSpeed, formatMetricUptime, getNodeDisplayRecord, getNodeLastReportTime, getNodeStatus, resourceTotal } from '../utils/nodeMetrics';
 import { formatCpuSpec } from '../utils/cpuFormat';
 import { filterMonitorNodes } from '../utils/monitorView';
 import {
@@ -462,7 +462,6 @@ export default function Instance() {
   };
 
   // 与 DetailsGrid 同口径的展示数据：字段一个不少，只是按系统 / 资源 / 网络分组横排。
-  const infoDisk = diskUsagePresentation(latest || undefined, client.disk_total);
   const infoIpValue = `IPv4 ${formatIpSupport(client.has_ipv4, client.ipv4)} / IPv6 ${formatIpSupport(client.has_ipv6, client.ipv6)}`;
   const normalizedRemark = client.public_remark?.trim();
 
@@ -554,11 +553,10 @@ export default function Instance() {
               <div className="lp-info-group-title">资源</div>
               <LpInfoRow label="内存" value={memUsedText} />
               <LpInfoRow label="交换空间" value={swapTotal ? swapUsedText : '无'} />
-              <LpInfoRow label="磁盘" value={infoDisk.estimated ? infoDisk.detail : formatMetricBytes(resourceTotal(latest?.disk_total, client.disk_total))} />
+              <LpInfoRow label="磁盘" value={formatMetricBytes(resourceTotal(latest?.disk_total, client.disk_total))} />
               <LpInfoRow label="负载" value={loadText} />
               <LpInfoRow label="运行时长" value={formatMetricUptime(latest?.uptime)} />
               <LpInfoRow label="Agent" value={client.version || '-'} />
-              {infoDisk.estimated && <p className="lp-info-note">{infoDisk.description} {infoDisk.sampleLabel}</p>}
             </div>
 
             <div className="lp-info-group">
@@ -633,8 +631,7 @@ export default function Instance() {
               <LpMetricCard loading={recordsLoading} height={miniH}
                 icon={<HardDrive size={14} />} accent="var(--lp-disk)" title="磁盘"
                 value={lastPoint?.disk !== null && lastPoint?.disk !== undefined ? pct(lastPoint.disk) : '—'}
-                sub={infoDisk.estimated ? infoDisk.detail : '已用空间'}
-                note="按上报时间记录，可能包含容器文件占用估算；同一次磁盘采样可出现在多次上报中。"
+                sub="已用空间"
               >
                 {!recordsLoading && !recordsError && !hasDiskData ? (
                   <Flex align="center" justify="center" style={{ height: miniH }}><Text role="status" color="gray">磁盘使用量数据不可用</Text></Flex>

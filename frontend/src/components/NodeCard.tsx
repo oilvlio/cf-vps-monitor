@@ -296,7 +296,7 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
               <LpMetric icon={<MemoryStick size={14} />} label="内存" value={formatPercent(memPct)} percent={memPct} />
             </div>
             <div className="lp-grid" data-cols="2">
-              <LpMetric icon={<HardDrive size={14} />} label={disk.estimated ? '磁盘·估' : '磁盘'} value={`${disk.estimated && diskPct !== null ? '≈ ' : ''}${formatPercent(diskPct)}`} title={disk.estimated ? `${disk.description} ${disk.sampleLabel}` : undefined} percent={diskPct} />
+              <LpMetric icon={<HardDrive size={14} />} label="磁盘" value={formatPercent(diskPct)} percent={diskPct} />
               <LpMetric icon={<Activity size={14} />} label="负载" value={formatLoadValue(load1)} title={loadTitle} percent={loadPct} />
             </div>
 

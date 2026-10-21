@@ -243,12 +243,30 @@ function findAnchor(anchors: number[], timestamp: number, toleranceMs: number) {
   return null;
 }
 
-// pick 缺省时取延迟值（丢包记为 null）；丢包率视图传入自己的取值函数，复用同一套时间锚点对齐。
+/**
+ * 曲线上实际画的延迟值。
+ * - 原始点：就是 value。
+ * - 分桶点（带 sample_count，24h 以上窗口）：取桶内 P75。中位数会把短促的劣化抹平，
+ *   P75 对偶发尖峰仍不敏感，却能让持续的变差体现在曲线上。
+ * - 丢包（value < 0，整桶都没有成功样本）原样返回，由调用方当作缺口处理。
+ */
+export function pingPlotValue(record: PingRecord): number {
+  const value = Number(record.value);
+  if (!(value >= 0)) return value;
+  if (Number(record.sample_count) > 0) {
+    const p75 = Number(record.p75_latency);
+    if (Number.isFinite(p75) && p75 >= 0) return p75;
+  }
+  return value;
+}
+
+// pick 缺省时取曲线值（丢包记为 null）；丢包率视图传入自己的取值函数，复用同一套时间锚点对齐。
 export function buildPingChartRows(
   series: PingTaskSeries[],
-  pick: (record: PingRecord) => number | null = (record) => (record.value < 0 ? null : Number(record.value)),
-  // 在同一行里再带上若干派生列（键为「任务 key + 后缀」），例如分桶的最小/最大值。
-  extraPicks: Array<{ suffix: string; pick: (record: PingRecord) => number | null }> = [],
+  pick: (record: PingRecord) => number | null = (record) => {
+    const value = pingPlotValue(record);
+    return value < 0 ? null : value;
+  },
 ) {
   const validIntervals = series
     .map((item) => item.task.intervalSec)
@@ -270,34 +288,11 @@ export function buildPingChartRows(
         if (anchor === null) anchors.push(useTimestamp);
       }
       grouped[useTimestamp][item.task.key] = pick(record);
-      for (const extra of extraPicks) {
-        grouped[useTimestamp][`${item.task.key}${extra.suffix}`] = extra.pick(record);
-      }
     }
   }
 
   return Object.values(grouped).sort((a, b) => Number(a.time) - Number(b.time));
 }
-
-// 极值带：分桶数据每个桶带 min/max，画成浅色区间；原始点没有区间。
-export const PING_BAND_LOW_SUFFIX = '__lo';
-export const PING_BAND_HIGH_SUFFIX = '__hi';
-
-export function pingSeriesHasBand(series: PingTaskSeries[]): boolean {
-  return series.some((item) => item.records.some((record) =>
-    Number.isFinite(record.min_latency) && Number.isFinite(record.max_latency)));
-}
-
-export const pingBandPicks = [
-  {
-    suffix: PING_BAND_LOW_SUFFIX,
-    pick: (record: PingRecord) => (Number.isFinite(record.min_latency) && (record.min_latency as number) >= 0 ? (record.min_latency as number) : null),
-  },
-  {
-    suffix: PING_BAND_HIGH_SUFFIX,
-    pick: (record: PingRecord) => (Number.isFinite(record.max_latency) && (record.max_latency as number) >= 0 ? (record.max_latency as number) : null),
-  },
-];
 
 function getLatestPingTimestamp(series: PingTaskSeries[]) {
   const timestamps = series.flatMap((item) =>
@@ -333,7 +328,7 @@ export function getPingTimeDomain(series: PingTaskSeries[], rangeHours?: number)
 export function getPingValues(series: PingTaskSeries[]) {
   return series.flatMap((item) =>
     item.records
-      .map((record) => Number(record.value))
+      .map((record) => pingPlotValue(record))
       .filter((value) => Number.isFinite(value) && value >= 0),
   );
 }
@@ -347,24 +342,23 @@ export function getPingYAxisDomain(series: PingTaskSeries[]): [number, number] {
   if (values.length === 0) return [0, 100];
 
   const min = Math.min(...values);
-  // 封顶用 P97 而不是最大值：孤立尖峰不再撑大坐标系（超出部分由
-  // YAxis allowDataOverflow 裁掉），数据本体零改动，统计卡与悬停仍能看到真实峰值。
-  const p97 = percentileOf(values, 0.97);
-  const lower = Math.max(0, min - Math.max(5, (p97 - min) * 0.3));
-  const upper = Math.max(p97 + Math.max(5, p97 * 0.2), min + 12);
+  const max = Math.max(...values);
+  const range = max - min;
+  const padding = range > 0 ? Math.max(5, range * 0.35) : Math.max(8, max * 0.25);
+  const lower = Math.max(0, min - padding);
+  const upper = max + padding;
+
+  if (upper - lower < 12) {
+    const extra = (12 - (upper - lower)) / 2;
+    return [Math.max(0, lower - extra), upper + extra];
+  }
 
   return [lower, upper];
 }
 
-function percentileOf(values: number[], ratio: number): number {
-  const sorted = [...values].sort((a, b) => a - b);
-  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * ratio) - 1));
-  return sorted[index];
-}
-
 export function getPingSeriesAverage(records: PingRecord[]): number | null {
   const chronological = records
-    .map((record) => Number(record.value))
+    .map((record) => pingPlotValue(record))
     .filter((value) => Number.isFinite(value) && value >= 0);
   if (chronological.length === 0) return null;
 
@@ -498,7 +492,7 @@ export function getPingTaskSummary(records: PingRecord[], stats?: PingTaskStats 
 
   let latest: number | null = null;
   for (let i = records.length - 1; i >= 0; i -= 1) {
-    const value = Number(records[i].value);
+    const value = pingPlotValue(records[i]);
     if (isPositive(value)) {
       latest = value;
       break;

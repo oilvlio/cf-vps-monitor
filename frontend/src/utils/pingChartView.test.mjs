@@ -44,7 +44,7 @@ const bucketSummary = getPingTaskSummary([
   { time: '2026-01-01T00:00:00Z', value: 55, avg_latency: 50, min_latency: 40, max_latency: 60, sample_count: 10, loss_count: 1, p75_latency: 58 },
   { time: '2026-01-01T00:01:00Z', value: 120, avg_latency: 100, min_latency: 90, max_latency: 130, sample_count: 30, loss_count: 6, p75_latency: 125 },
 ]);
-assert.equal(bucketSummary.latest, 120);
+assert.equal(bucketSummary.latest, 125, '最新值取曲线最后一个点，分桶点画的是 P75');
 assert.ok(Math.abs(bucketSummary.avg - 87.5) < 1e-9, 'avg 按 sample_count 加权');
 assert.equal(bucketSummary.min, 40);
 assert.equal(bucketSummary.max, 130);
@@ -113,20 +113,32 @@ console.log('ping task summary ok');
   assert.equal(formatPingMsDetail(null), '-');
 }
 
-// ---- 分桶的 p50 透传、极值带取值 ----
+// ---- 分桶窗口曲线取 P75 ----
 {
-  const { normalizePingRecord, buildPingChartRows, pingBandPicks, pingSeriesHasBand } = await import('./pingChart.ts');
-  const rec = normalizePingRecord({ time: '2026-01-01T00:00:00Z', value: 3.5, p50_latency: 3.5, p75_latency: 4.1, min_latency: 2, max_latency: 48, avg_latency: 5.2 });
+  const { normalizePingRecord, buildPingChartRows, pingPlotValue, getPingValues } = await import('./pingChart.ts');
+  const rec = normalizePingRecord({ time: '2026-01-01T00:00:00Z', value: 3.5, sample_count: 6, p50_latency: 3.5, p75_latency: 4.1, min_latency: 2, max_latency: 48, avg_latency: 5.2 });
   assert.equal(rec.p50_latency, 3.5);
-  const bandTask = { id: 1, key: 'a', label: 'A', target: '', type: 'icmp', intervalSec: 60, color: '#fff' };
-  const bucketed = [{ task: bandTask, records: [
-    rec,
-    { time: '2026-01-01T00:06:00Z', value: -1, sample_count: 6, loss_count: 6 },
-  ] }];
-  assert.equal(pingSeriesHasBand(bucketed), true);
-  const rows = buildPingChartRows(bucketed, undefined, pingBandPicks);
-  assert.deepEqual(rows.map((r) => [r.a, r.a__lo, r.a__hi]), [[3.5, 2, 48], [null, null, null]], '丢包桶没有区间');
-  assert.equal(pingSeriesHasBand([{ task: bandTask, records: [{ time: '2026-01-01T00:00:00Z', value: 3 }] }]), false, '原始点没有极值带');
-  assert.deepEqual(buildPingChartRows([{ task: bandTask, records: [{ time: '2026-01-01T00:00:00Z', value: 3 }] }]).map((r) => Object.keys(r).sort()), [['a', 'time']], '不传 extraPicks 不多出列');
+  assert.equal(pingPlotValue(rec), 4.1, '分桶点画 P75');
+  assert.equal(pingPlotValue({ time: 't', value: 3 }), 3, '原始点画 value');
+  assert.equal(pingPlotValue({ time: 't', value: 3.5, sample_count: 6 }), 3.5, '分桶点缺 p75 时退回 value');
+  assert.equal(pingPlotValue({ time: 't', value: -1, sample_count: 6, loss_count: 6 }), -1, '整桶丢包保持负值');
+  const task = { id: 1, key: 'a', label: 'A', target: '', type: 'icmp', intervalSec: 60, color: '#fff' };
+  const bucketed = [{ task, records: [rec, { time: '2026-01-01T00:06:00Z', value: -1, sample_count: 6, loss_count: 6 }] }];
+  assert.deepEqual(buildPingChartRows(bucketed).map((r) => r.a), [4.1, null], '丢包桶是缺口');
+  assert.deepEqual(getPingValues(bucketed), [4.1], 'Y 轴取值与曲线一致');
+  assert.deepEqual(buildPingChartRows([{ task, records: [{ time: '2026-01-01T00:00:00Z', value: 3 }] }]).map((r) => Object.keys(r).sort()), [['a', 'time']], '不多出额外列');
 }
-console.log('ping stats / band ok');
+
+// ---- Y 轴：max + padding，不裁尖峰 ----
+{
+  const { getPingYAxisDomain } = await import('./pingChart.ts');
+  const task = { id: 1, key: 'a', label: 'A', target: '', type: 'icmp', intervalSec: 60, color: '#fff' };
+  const records = Array.from({ length: 100 }, (_, i) => ({ time: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(), value: i === 50 ? 900 : 30 }));
+  const [lo, hi] = getPingYAxisDomain([{ task, records }]);
+  assert.ok(hi >= 900, '孤立尖峰也在坐标系内');
+  assert.ok(lo >= 0 && lo < 30);
+  assert.deepEqual(getPingYAxisDomain([]), [0, 100]);
+  const flat = getPingYAxisDomain([{ task, records: [{ time: '2026-01-01T00:00:00Z', value: 20 }] }]);
+  assert.ok(flat[1] - flat[0] >= 12, '平线至少撑出 12ms 高度');
+}
+console.log('ping stats / p75 plot ok');

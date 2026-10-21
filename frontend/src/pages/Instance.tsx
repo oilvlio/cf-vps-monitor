@@ -38,11 +38,6 @@ import {
   getPingTaskSummary,
   getPingTimeDomain,
   getPingYAxisDomain,
-  pingBandPicks,
-  pingSeriesHasBand,
-  PING_BAND_HIGH_SUFFIX,
-  PING_BAND_LOW_SUFFIX,
-  type PingChartRow,
   type PingTaskSeries,
   type PingTaskStats,
 } from '../utils/pingChart';
@@ -143,8 +138,6 @@ export default function Instance() {
   const [shouldLoadPing, setShouldLoadPing] = useState(false);
   // 选中的测速点：空 = 全部显示；点图例选中谁就只显示谁（与参考主题一致），再点一次取消选中。
   const [selectedPingKeys, setSelectedPingKeys] = useState<string[]>([]);
-  // 极值带：分桶数据每个桶的最小~最大值画成浅色区间，默认关闭，免得盖过曲线本身。
-  const [pingBand, setPingBand] = useState(false);
   // 断点连线默认关闭：关闭时缺口直接断开（如实显示没有数据），勾选后跨过所有空缺连成完整曲线。
   const [pingConnectGaps, setPingConnectGaps] = useState(false);
   const [pingRefresh, setPingRefresh] = useState(0);
@@ -411,11 +404,7 @@ export default function Instance() {
     const selected = new Set(selectedPingKeys);
     return pingSeriesWithRecords.filter((item) => selected.has(item.task.key));
   }, [pingSeriesWithRecords, selectedPingKeys]);
-  const pingHasBand = useMemo(() => pingSeriesHasBand(pingSeriesWithRecords), [pingSeriesWithRecords]);
-  const showPingBand = pingBand && pingHasBand;
-  const pingChartRows = useMemo(() => {
-    return buildPingChartRows(visiblePingSeries, undefined, showPingBand ? pingBandPicks : []);
-  }, [visiblePingSeries, showPingBand]);
+  const pingChartRows = useMemo(() => buildPingChartRows(visiblePingSeries), [visiblePingSeries]);
   const pingYAxis = useMemo(() => buildPingYAxis(getPingYAxisDomain(visiblePingSeries)), [visiblePingSeries]);
   const pingXAxisDomain = useMemo(
     () => getPingTimeDomain(visiblePingSeries, timeRangeHours[timeRange]),
@@ -708,12 +697,10 @@ export default function Instance() {
                   <p className="lp-panel-desc">
                     覆盖 {timeRangeLabel[timeRange]}
                     {pingSeries.length > 0 && ` · ${pingSeriesWithRecords.length} / ${pingSeries.length} 个任务有记录`}
+                    {timeRangeMs[timeRange] > 12 * 3600000 && ' · 每点取该时段 P75'}
                   </p>
                 </div>
                 <div className="lp-head-meta">
-                  {pingHasBand && (
-                    <LpSwitch label="极值带" title="曲线是每个时间段的中位数；开启后用浅色区间显示该段内的最小～最大延迟，尖峰不会被藏起来" active={pingBand} onToggle={() => setPingBand((v) => !v)} />
-                  )}
                   <LpSwitch label="断点连线" title="关闭：缺口直接断开，如实显示哪里没有数据；开启：缺口一律用实线连成完整曲线（更好看，但看不出掉线中断）" active={pingConnectGaps} onToggle={() => setPingConnectGaps((v) => !v)} />
                   {selectedPingKeys.length > 0 && (
                     <button type="button" className="lp-tool-btn" onClick={() => setSelectedPingKeys([])}>
@@ -796,8 +783,6 @@ export default function Instance() {
                           ticks={pingYAxis.ticks}
                           interval={0}
                           allowDecimals={false}
-                          // 极值带的最大值可能远高于曲线：按 Y 轴范围裁掉，别把基线压扁。
-                          allowDataOverflow
                           tick={<PingYAxisTick />}
                         />
                         <Tooltip
@@ -806,30 +791,6 @@ export default function Instance() {
                           itemSorter={(item) => Number(item.value ?? 0)}
                           formatter={(value, name) => [formatPingMsDetail(Number(value)), name]}
                         />
-                        {showPingBand && visiblePingSeries.map((item) => {
-                          const { key, color } = item.task;
-                          const lowKey = `${key}${PING_BAND_LOW_SUFFIX}`;
-                          const highKey = `${key}${PING_BAND_HIGH_SUFFIX}`;
-                          return (
-                            <Area
-                              key={`${key}-band`}
-                              type="monotone"
-                              dataKey={(row: PingChartRow) => {
-                                const low = row[lowKey];
-                                const high = row[highKey];
-                                return typeof low === 'number' && typeof high === 'number' ? [low, high] : null;
-                              }}
-                              stroke="none"
-                              fill={color}
-                              fillOpacity={0.14}
-                              connectNulls={pingConnectGaps}
-                              isAnimationActive={false}
-                              legendType="none"
-                              tooltipType="none"
-                              activeDot={false}
-                            />
-                          );
-                        })}
                         {visiblePingSeries.map((item) => {
                           const { key, color, label } = item.task;
                           return (

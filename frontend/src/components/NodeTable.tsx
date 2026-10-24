@@ -7,7 +7,6 @@ import { Badge, Box, Flex, IconButton, Popover, Table, Text } from '@radix-ui/th
 import { ArrowDown, ArrowUp, ChevronRight, ChevronsUpDown } from 'lucide-react';
 import UsageBar from './UsageBar';
 import Flag from './Flag';
-import MiniPingChart from './MiniPingChart';
 import PriceTags from './PriceTags';
 import { diskUsagePresentation, formatMetricBytes, formatMetricSpeed, formatMetricUptime, formatLastReport, getNodeDisplayRecord, getNodeLastReportTime, getNodeStatus, metricNumber, resourceTotal, resourceUsage, type NodeStatus } from '../utils/nodeMetrics';
 import { comparePublicClients } from '../utils/publicClients';
@@ -18,26 +17,10 @@ import { formatCpuSpec } from '../utils/cpuFormat';
 interface NodeTableProps {
   nodes: ClientInfo[];
   liveData: LiveDataMap;
-  includeHidden?: boolean;
 }
 
 type SortKey = 'manual' | 'name' | 'os' | 'status' | 'cpu' | 'ram' | 'disk' | 'network' | 'price' | 'traffic';
 type SortDir = 'asc' | 'desc';
-
-function formatUptimeZh(seconds?: number | null): string {
-  if (metricNumber(seconds) === null) return '—';
-  seconds = seconds as number;
-  const d = Math.floor(seconds / 86400);
-  const h = Math.floor((seconds % 86400) / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
-  const parts: string[] = [];
-  if (d) parts.push(`${d} 天`);
-  if (h) parts.push(`${h} 时`);
-  if (m) parts.push(`${m} 分`);
-  if (s || parts.length === 0) parts.push(`${s} 秒`);
-  return parts.join(' ');
-}
 
 function DetailRow({ label, value }: { label: string; value: React.ReactNode }) {
   return (
@@ -107,13 +90,11 @@ function ExpandedNodeDetails({
   live,
   lastReportTime,
   status,
-  includeHidden = false,
 }: {
   node: ClientInfo;
   live?: Partial<LiveRecord>;
   lastReportTime?: number;
   status: NodeStatus;
-  includeHidden?: boolean;
 }) {
   return (
     <Box className="node-table-expanded">
@@ -134,7 +115,6 @@ function ExpandedNodeDetails({
             <DetailRow label="内存" value={formatMetricBytes(resourceTotal(live?.ram_total, node.mem_total))} />
             <DetailRow label="交换" value={formatMetricBytes(live?.swap_total ?? node.swap_total)} />
             <DetailRow label="磁盘" value={diskUsagePresentation(live, node.disk_total).detail} />
-            {diskUsagePresentation(live).estimated && <DetailRow label="文件占用估算" value={diskUsagePresentation(live).sampleLabel} />}
           </DetailSection>
 
           <DetailSection title="系统环境">
@@ -165,16 +145,13 @@ function ExpandedNodeDetails({
           </DetailSection>
 
           <DetailSection title="运行状态">
-            <DetailRow label={status === 'offline' ? '上报时已运行' : '运行时间'} value={formatUptimeZh(live?.uptime)} />
+            <DetailRow label={status === 'offline' ? '上报时已运行' : '运行时间'} value={formatMetricUptime(live?.uptime)} />
             <DetailRow label="最后上报" value={formatLastReport(lastReportTime)} />
             <DetailRow label="地区" value={node.region || '-'} />
             <RemarkDetailRow value={node.public_remark} />
           </DetailSection>
         </div>
 
-        <div className="node-table-ping-section">
-          <MiniPingChart uuid={node.uuid} width="100%" height={210} limit={180} fillContainer includeHidden={includeHidden} />
-        </div>
       </div>
     </Box>
   );
@@ -198,7 +175,7 @@ function SortHeader({ column, children, style, activeKey, direction, onSort }: {
   );
 }
 
-export default function NodeTable({ nodes, liveData, includeHidden = false }: NodeTableProps) {
+export default function NodeTable({ nodes, liveData }: NodeTableProps) {
   const [sortKey, setSortKey] = useState<SortKey>('manual');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
   const [expandedRows, setExpandedRows] = useState<string[]>([]);
@@ -378,7 +355,7 @@ export default function NodeTable({ nodes, liveData, includeHidden = false }: No
                   <Table.Cell>
                     <Box className="node-table-resource-cell">
                       {diskPct !== null && <UsageBar value={diskPct} showLabel={false} />}
-                      <Text size="1" color="gray" title={disk.estimated ? `${disk.detail}；${disk.description} ${disk.sampleLabel}` : diskPct === null ? '磁盘使用量或容量未提供' : undefined}>{diskPct === null ? '—' : `${disk.estimated ? '≈ ' : ''}${diskPct.toFixed(1)}%`}</Text>
+                      <Text size="1" color="gray" title={diskPct === null ? '磁盘使用量或容量未提供' : `${disk.detail}`}>{diskPct === null ? '—' : `${diskPct.toFixed(1)}%`}</Text>
                     </Box>
                   </Table.Cell>
                   <Table.Cell>
@@ -414,7 +391,6 @@ export default function NodeTable({ nodes, liveData, includeHidden = false }: No
                         live={live}
                         lastReportTime={getNodeLastReportTime(node.uuid, liveData)}
                         status={status}
-                        includeHidden={includeHidden}
                       />
                     </Table.Cell>
                   </Table.Row>

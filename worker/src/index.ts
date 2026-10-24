@@ -6,7 +6,7 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { APP_VERSION } from './utils/app-version';
-import { shortGitSha } from './utils/update-check';
+import { shortGitSha } from './utils/git-sha';
 
 // 路由模块
 import { publicRoutes } from './routes/public';
@@ -30,17 +30,10 @@ import { clearScheduledDatabaseStartupFailure, recordScheduledDatabaseStartupFai
 import { sanitizeSetupDiagnosticDetail } from './utils/setup-diagnostics';
 import { getCloudflareClientIp } from './utils/request-ip';
 import {
-  checkWebsiteMonitorHttp,
-  shouldNotifyWebsiteDown,
-  shouldNotifyWebsiteRecovery,
-} from './utils/website-monitor';
-import {
   buildExpiryNotification,
   buildLoadNotification,
   buildNodeRecoveryNotification,
   buildOfflineNotification,
-  buildWebsiteAlertNotification,
-  buildWebsiteRecoveryNotification,
   type NotificationMessage,
 } from './utils/notification-templates';
 import { evaluateOfflineNotificationEvent, DEFAULT_OFFLINE_GRACE_PERIOD_SEC, DEFAULT_OFFLINE_CONFIRM_ROUNDS } from './utils/offline-notification';
@@ -166,8 +159,6 @@ function canServeWithoutDatabaseStartup(pathname: string): boolean {
     pathname === '/api/task/ping' ||
     pathname.startsWith('/api/records/') ||
     pathname.startsWith('/api/recent/') ||
-    pathname === '/api/websites' ||
-    pathname.startsWith('/api/websites/') ||
     pathname === '/api/theme/active.css' ||
     pathname.startsWith('/api/theme/assets/') ||
     pathname.startsWith('/api/theme/manifest/') ||
@@ -310,9 +301,9 @@ app.use('/api/*', async (c, next) => {
   return undefined;
 });
 
-app.get('/agent/install.sh', (c) => c.redirect('https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/agent/install.sh', 302));
-app.get('/agent/install-linux.sh', (c) => c.redirect('https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/agent/install-linux.sh', 302));
-app.get('/agent/install-windows.ps1', (c) => c.redirect('https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/agent/install-windows.ps1', 302));
+app.get('/agent/install.sh', (c) => c.redirect('https://raw.githubusercontent.com/oilvlio/cf-vps-monitor/main/agent/install.sh', 302));
+app.get('/agent/install-linux.sh', (c) => c.redirect('https://raw.githubusercontent.com/oilvlio/cf-vps-monitor/main/agent/install-linux.sh', 302));
+app.get('/agent/install-windows.ps1', (c) => c.redirect('https://raw.githubusercontent.com/oilvlio/cf-vps-monitor/main/agent/install-windows.ps1', 302));
 
 // 公开 API，无认证
 app.route('/api/setup', setupRoutes);
@@ -561,27 +552,26 @@ async function runRecordCleanup(context: ScheduledRunContext, now: Date): Promis
   if (Number.isFinite(lastCleanupAt) && now.getTime() - lastCleanupAt < RECORD_CLEANUP_INTERVAL_MS) {
     return;
   }
-  const recordHours = Math.min(72, Math.max(1, Number(settings['record_preserve_time'] || 72)));
-  const pingHours = Math.min(72, Math.max(1, Number(settings['ping_record_preserve_time'] || recordHours)));
+  const recordHours = Math.min(168, Math.max(1, Number(settings['record_preserve_time'] || 168)));
+  const pingHours = Math.min(168, Math.max(1, Number(settings['ping_record_preserve_time'] || recordHours)));
   const auditHours = Math.max(24, Number(settings['audit_log_preserve_time'] || 2160));
 
   const recordBefore = new Date(now.getTime() - recordHours * 60 * 60 * 1000).toISOString();
   const pingBefore = new Date(now.getTime() - pingHours * 60 * 60 * 1000).toISOString();
   const auditBefore = new Date(now.getTime() - auditHours * 60 * 60 * 1000).toISOString();
 
+  const rolledUp = await db.buildHistoryRollup(context.database, new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString());
   const recordDeleted = await db.deleteOldRecords(context.database, recordBefore);
-  const websiteDeleted = await db.deleteOldWebsiteChecks(context.database, recordBefore);
   const pingDeleted = await db.deleteOldPingRecords(context.database, pingBefore);
   const auditDeleted = await db.deleteOldAuditLogs(context.database, auditBefore);
   const deliveryDeleted = await db.cleanupNotificationDeliveryState(context.database, now.toISOString(), {
     batchSize: 1000, maxBatches: 1,
   });
-  const hasMore = recordDeleted.has_more || websiteDeleted.has_more || pingDeleted.has_more || auditDeleted.has_more || deliveryDeleted.has_more;
+  const hasMore = recordDeleted.has_more || pingDeleted.has_more || auditDeleted.has_more || deliveryDeleted.has_more;
   const deleted = {
     records: recordDeleted.records,
     gpu_records: recordDeleted.gpu_records,
     gpu_snapshots: recordDeleted.gpu_snapshots,
-    website_checks: websiteDeleted.website_checks,
     ping_records: pingDeleted.ping_records,
     ping_snapshots: pingDeleted.ping_snapshots,
     audit_logs: auditDeleted.audit_logs,
@@ -602,6 +592,7 @@ async function runRecordCleanup(context: ScheduledRunContext, now: Date): Promis
       ping_records: pingBefore,
       audit_logs: auditBefore,
     },
+    rolled_up: rolledUp,
     deleted,
     has_more: hasMore,
   })}`);
@@ -910,46 +901,6 @@ async function runLoadCheck(context: ScheduledRunContext, now: Date): Promise<vo
   }
 }
 
-async function runWebsiteMonitorChecks(context: ScheduledRunContext, now: Date): Promise<void> {
-  const monitors = await db.listDueWebsiteMonitors(context.database, now.toISOString(), 50);
-  for await (const monitor of scheduledItems(context, 'websites', monitors, monitor => String(monitor.id))) {
-    const check = await checkWebsiteMonitorHttp(monitor);
-    const updated = await db.recordWebsiteCheck(context.database, check);
-    if (!updated) continue;
-
-    if (shouldNotifyWebsiteDown(updated, now)) {
-      const downSince = updated.down_since ? new Date(updated.down_since).getTime() : now.getTime();
-      const downMinutes = Math.max(0, Math.floor((now.getTime() - downSince) / 60000));
-      const lastStatus = updated.last_error || (updated.last_status_code ? `HTTP ${updated.last_status_code}` : 'network_error');
-      const sent = await sendNotification(context, buildWebsiteAlertNotification({
-        name: updated.name,
-        url: updated.url,
-        downMinutes,
-        lastStatus,
-        checkedAt: check.checked_at,
-      }), { key: `website:${updated.id}`, eventId: `down:${updated.config_revision}:${updated.down_since}` }, now);
-      if (!sent) continue;
-      if (!(await db.markWebsiteMonitorNotified(context.database, updated.id, now.toISOString(), updated))) continue;
-      await db.insertAuditLog(context.database, 'system', 'website_down', `${sent ? '已发送' : '已记录'}网站告警: ${updated.name}`);
-    }
-
-    if (shouldNotifyWebsiteRecovery(updated)) {
-      const downSince = monitor.down_since ? new Date(monitor.down_since).getTime() : now.getTime();
-      const downMinutes = Math.max(0, Math.floor((now.getTime() - downSince) / 60000));
-      const sent = await sendNotification(context, buildWebsiteRecoveryNotification({
-        name: updated.name,
-        url: updated.url,
-        downMinutes,
-        statusCode: updated.last_status_code,
-        latencyMs: updated.last_latency_ms,
-        eventTime: now,
-      }), { key: `website:${updated.id}`, eventId: `recovery:${updated.config_revision}:${updated.last_notified_at}` }, now);
-      if (!sent) continue;
-      if (!(await db.markWebsiteMonitorNotified(context.database, updated.id, null, updated))) continue;
-      await db.insertAuditLog(context.database, 'system', 'website_recovery', `${sent ? '已发送' : '已记录'}网站恢复: ${updated.name}`);
-    }
-  }
-}
 
 async function runScheduledStep(
   context: ScheduledRunContext,
@@ -989,7 +940,6 @@ async function runScheduled(env: Bindings): Promise<void> {
       ['cron_load', 'cron_load_error', '负载告警检查', () => runLoadCheck(context, now)],
       ['cron_offline', 'cron_offline_error', '离线告警检查', () => runOfflineCheck(context, now)],
       ['cron_expiry', 'cron_expiry_error', '到期提醒检查', () => runExpiryCheck(context, now)],
-      ['cron_website', 'cron_website_error', '网站监控检查', () => runWebsiteMonitorChecks(context, now)],
     ] as const;
     try {
       for (const [component, action, label, step] of rotateScheduledItems(steps, Math.floor(now.getTime() / 120_000))) {

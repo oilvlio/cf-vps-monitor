@@ -26,17 +26,15 @@ export const formatSpeed = (bytes: number): string => {
   return `${val.toFixed(decimals)} ${units[i]}`;
 };
 
+// 运行时长只精确到小时：显示 d / h，不再显示分钟和秒（不足 1 小时显示 0h）。
 export const formatUptime = (seconds: number): string => {
-  if (!seconds || seconds < 0) return '0s';
+  if (!seconds || seconds < 0) return '0h';
   const d = Math.floor(seconds / 86400);
   const h = Math.floor((seconds % 86400) / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
   const parts: string[] = [];
   if (d) parts.push(`${d}d`);
   if (h) parts.push(`${h}h`);
-  if (m) parts.push(`${m}m`);
-  if (s || parts.length === 0) parts.push(`${s}s`);
+  if (parts.length === 0) parts.push('0h');
   return parts.join(' ');
 };
 

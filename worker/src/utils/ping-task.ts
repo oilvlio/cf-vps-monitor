@@ -224,11 +224,10 @@ export function validatePingTaskInput(
   }
   const intervalSec = Number.isInteger(intervalValue) ? intervalValue : 60;
 
+  // 定向任务允许暂不绑定任何客户端：任务先创建，之后再按服务器勾选分配。
+  // 未绑定的任务不会下发给任何 Agent，也不会产生探测记录。
   const allClients = readBoolean(body.all_clients, false);
   const clients = allClients ? [] : readStringArray(body.clients);
-  if (!allClients && clients.length === 0) {
-    errors.push('定向任务至少需要绑定一个客户端');
-  }
 
   if (allowedClientIds && clients.some(client => !allowedClientIds.has(client))) {
     errors.push('任务包含不存在的客户端');
@@ -249,4 +248,65 @@ export function validatePingTaskInput(
       interval_sec: intervalSec,
     },
   };
+}
+
+export const MAX_CLIENT_PING_ASSIGN_CHANGES = 40;
+
+export type ClientPingAssignmentPlan =
+  | { ok: true; updates: Array<{ id: number; clients: string[] }> }
+  | { ok: false; error: string };
+
+/**
+ * 从“服务器一侧”调整它运行的 Ping 任务。
+ *
+ * `base` 是编辑器打开时该服务器已有的任务，`desired` 是勾选后的结果；只应用两者的差量，
+ * 这样编辑期间在别处对同一服务器做出的分配不会被一份过期的列表覆盖。
+ * 全局任务（all_clients）跟随所有服务器，不能在这里逐台取消，改动它会被拒绝。
+ */
+export function planClientPingAssignment(
+  tasks: PingTask[],
+  clientUuid: string,
+  desired: number[],
+  base: number[],
+): ClientPingAssignmentPlan {
+  const byId = new Map<number, PingTask>();
+  for (const task of tasks) {
+    if (typeof task.id === 'number') byId.set(task.id, task);
+  }
+  const desiredSet = new Set(desired);
+  const baseSet = new Set(base);
+  const removed = [...baseSet].filter(id => !desiredSet.has(id));
+  const added = [...desiredSet].filter(id => !baseSet.has(id));
+
+  if (removed.length + added.length > MAX_CLIENT_PING_ASSIGN_CHANGES) {
+    return { ok: false, error: `一次最多调整 ${MAX_CLIENT_PING_ASSIGN_CHANGES} 个任务` };
+  }
+
+  const updates: Array<{ id: number; clients: string[] }> = [];
+
+  for (const id of removed) {
+    const task = byId.get(id);
+    // 已被删除的任务无需再取消。
+    if (!task) continue;
+    if (task.all_clients) {
+      return { ok: false, error: `任务「${task.name}」是全局任务，请在任务里关闭“所有服务器”后再按服务器调整` };
+    }
+    if (!task.clients.includes(clientUuid)) continue;
+    updates.push({ id, clients: task.clients.filter(uuid => uuid !== clientUuid) });
+  }
+
+  for (const id of added) {
+    const task = byId.get(id);
+    if (!task) return { ok: false, error: '有任务已被删除，请刷新后重试' };
+    if (task.all_clients) {
+      return { ok: false, error: `任务「${task.name}」是全局任务，请在任务里关闭“所有服务器”后再按服务器调整` };
+    }
+    if (task.clients.includes(clientUuid)) continue;
+    if (task.clients.length >= MAX_PING_TASK_CLIENTS) {
+      return { ok: false, error: `任务「${task.name}」最多绑定 ${MAX_PING_TASK_CLIENTS} 台服务器` };
+    }
+    updates.push({ id, clients: [...task.clients, clientUuid] });
+  }
+
+  return { ok: true, updates };
 }

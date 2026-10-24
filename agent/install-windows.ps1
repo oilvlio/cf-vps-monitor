@@ -35,6 +35,7 @@ param(
   [switch]$DisableWebSsh,
   [switch]$DisableAutoUpdate,
   [switch]$IgnoreUnsafeCert,
+  [switch]$DisableGpu,
   [string]$InstallGhproxy = "",
   [switch]$DryRun,
   [switch]$Uninstall,
@@ -91,7 +92,7 @@ function Set-InstanceDefaults {
   $base = ConvertTo-InstanceId $InstanceId
   $script:NormalizedInstanceId = $base
   if ([string]::IsNullOrWhiteSpace($script:ServiceName)) {
-    $script:ServiceName = "CFVpsMonitorAgent-$base"
+    $script:ServiceName = "CFVpsMonitorAgent"
   }
   if ([string]::IsNullOrWhiteSpace($script:InstallDir)) {
     $script:InstallDir = Join-Path "$env:ProgramFiles\CF VPS Monitor" $base
@@ -236,7 +237,7 @@ function Assert-AgentSystemResources {
 }
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$repository = "kadidalax/cf-vps-monitor"
+$repository = "oilvlio/cf-vps-monitor"
 $branch = "main"
 $autoBinaryUrl = $false
 
@@ -803,6 +804,7 @@ $runnerContent = @"
 `$env:CF_MONITOR_NIC_INCLUDE = $(ConvertTo-PowerShellLiteral $NicInclude)
 `$env:CF_MONITOR_NIC_EXCLUDE = $(ConvertTo-PowerShellLiteral $NicExclude)
 `$env:CF_MONITOR_TRAFFIC_RESET_DAY = $(ConvertTo-PowerShellLiteral ([string]$TrafficResetDay))
+`$env:CF_MONITOR_DISABLE_GPU = $(ConvertTo-PowerShellLiteral $(if ($DisableGpu) { 'true' } else { 'false' }))
 `$env:CF_MONITOR_TRAFFIC_STATE_FILE = Join-Path `$PSScriptRoot "state\traffic-state.json"
 `$logPath = Join-Path `$PSScriptRoot "state\agent.log"
 `$runnerLogPath = Join-Path `$PSScriptRoot "state\runner.log"

@@ -10,7 +10,6 @@ test('V-W01 review: retry after partial local interval-state persistence does no
   const tasks = [1, 2].map(id => ({ id, name: `Task ${id}`, type: 'tcp', target: 'example.test:443', all_clients: true, clients: [], interval_sec: 120 }));
   const external = {
     getSettingsByKeys: async () => ({ record_enabled: 'true', ping_record_persist_interval_sec: '120' }),
-    getHistoryStorageRowCounts: async () => ({ records: 0, gpu_records: 0, gpu_snapshots: 0, ping_records: 0, ping_snapshots: 0 }),
     getHistoryStorageBytes: async () => ({ total: 0 }),
     getHistoryStorageUsage: async () => ({ live_rows: 0, live_row_bytes: 0, estimated_live_storage_bytes: 0, allocated_bytes: 0, reusable_bytes: null, measurement: 'live-row-bytes-plus-index-estimate' }),
     listPingTasks: async () => tasks,

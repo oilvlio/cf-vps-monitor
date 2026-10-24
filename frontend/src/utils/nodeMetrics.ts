@@ -1,6 +1,5 @@
 import type { LiveDataMap, LiveRecord } from '../types';
 import { formatBytes, formatSpeed, formatUptime } from './format';
-import { diskMeasurementMetadata } from './diskMeasurement';
 
 export type NodeStatus = 'online' | 'offline' | 'unknown';
 
@@ -20,16 +19,10 @@ export function resourceUsage(usedValue: unknown, reportedTotal: unknown, metada
 }
 
 export function diskUsagePresentation(record: Partial<LiveRecord> = {}, metadataTotal?: number) {
-  const source = diskMeasurementMetadata(record);
-  const usage = resourceUsage(source.attempted && !source.valid ? null : record.disk, record.disk_total, metadataTotal);
-  const estimated = source.valid;
-  const sampleLabel = estimated ? `采样 ${formatLastReport(source.sampledAt)}` : '';
-  const description = estimated
-    ? '文件占用估算；不含快照、被挂载遮挡及已删除但仍打开的文件。'
-    : '';
+  const usage = resourceUsage(record.disk, record.disk_total, metadataTotal);
   return {
-    ...usage, estimated, sampledAt: source.sampledAt, sampleLabel, description,
-    detail: `${estimated ? '≈ ' : ''}${formatMetricBytes(usage.used)} / ${formatMetricBytes(usage.total)}`,
+    ...usage,
+    detail: `${formatMetricBytes(usage.used)} / ${formatMetricBytes(usage.total)}`,
   };
 }
 
@@ -60,6 +53,17 @@ export function formatMetricSpeed(value: unknown): string {
 export function formatMetricUptime(value: unknown): string {
   const metric = metricNumber(value);
   return metric === null ? '—' : formatUptime(metric);
+}
+
+// CPU 负载单值：保留两位小数；null/非法显示破折号（与「不可用」口径一致，不补 0）。
+export function formatLoadValue(value: unknown): string {
+  const metric = metricNumber(value);
+  return metric === null ? '—' : metric.toFixed(2);
+}
+
+// CPU 负载三值（1/5/15 分钟）：详情页负载卡头部与首页 NodeCard tooltip 同口径。
+export function formatLoadTriple(load: unknown, load5: unknown, load15: unknown): string {
+  return `${formatLoadValue(load)} / ${formatLoadValue(load5)} / ${formatLoadValue(load15)}`;
 }
 
 export function formatLastReport(timestamp?: number): string {

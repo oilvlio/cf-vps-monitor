@@ -25,7 +25,6 @@ export default function AdminLayout() {
   const sidebarRef = useRef<HTMLElement | null>(null);
   const sidebarToggleRef = useRef<HTMLButtonElement | null>(null);
   const [version, setVersion] = useState("dev");
-  const [hasUpdate, setHasUpdate] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const logoutPendingRef = useRef(false);
@@ -56,14 +55,6 @@ export default function AdminLayout() {
       })
       .catch(() => {});
   }, []);
-
-  useEffect(() => {
-    if (!isAuthenticated) return;
-    fetch("/api/admin/update-check")
-      .then((r) => r.ok ? r.json() : null)
-      .then((data) => setHasUpdate(Boolean(data?.has_update)))
-      .catch(() => {});
-  }, [isAuthenticated]);
 
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -298,8 +289,8 @@ export default function AdminLayout() {
               onClick={() => { closeSidebar(); navigate("/admin/about"); }}
               style={{ maxWidth: "100%", padding: "2px 6px" }}
             >
-              <Text size="1" color={hasUpdate ? "orange" : "gray"}>
-                {version}{hasUpdate ? " · 有更新" : ""}
+              <Text size="1" color="gray">
+                {version}
               </Text>
             </Button>
           </Flex>

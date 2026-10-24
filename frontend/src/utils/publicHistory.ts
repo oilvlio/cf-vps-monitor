@@ -9,6 +9,9 @@ export interface PublicMonitorRecord {
   disk_total: number | null;
   // null = 探针报告本机负载不可取信（容器内 /proc/loadavg 透传宿主机），不是 0。
   load: number | null;
+  // load5/load15 与 load 同语义，缺字段按 0（老数据兼容），显式 null 保留。
+  load5: number | null;
+  load15: number | null;
   temp: number | null;
   net_in: number;
   net_out: number;
@@ -64,10 +67,11 @@ function optionalMetric(record: Record<string, unknown>, key: string): number | 
 // numberField 把 null 当作「字段非法」，会让 allNumbers 判否而**整条记录被丢弃**——
 // 后果是那台节点的历史图表整段消失，而不是负载一项缺失。
 // 返回 undefined 表示字段真的非法，整条丢弃。
-function loadField(record: Record<string, unknown>): number | null | undefined {
-  if (!('load' in record) || record.load === undefined) return 0;
-  if (record.load === null) return null;
-  return typeof record.load === 'number' && Number.isFinite(record.load) ? record.load : undefined;
+// load5/load15 与 load 同规则（缺字段按 0，老数据兼容）。
+function loadField(record: Record<string, unknown>, key = 'load'): number | null | undefined {
+  if (!(key in record) || record[key] === undefined) return 0;
+  if (record[key] === null) return null;
+  return typeof record[key] === 'number' && Number.isFinite(record[key]) ? record[key] : undefined;
 }
 
 export function normalizePublicMonitorRecord(payload: unknown): PublicMonitorRecord | null {
@@ -77,6 +81,10 @@ export function normalizePublicMonitorRecord(payload: unknown): PublicMonitorRec
   if (!time) return null;
   const load = loadField(record);
   if (load === undefined) return null;
+  const load5 = loadField(record, 'load5');
+  if (load5 === undefined) return null;
+  const load15 = loadField(record, 'load15');
+  if (load15 === undefined) return null;
   // 温度未知不能补成 0，也不能丢弃同一条记录中的 CPU 等有效指标。
   const temp = typeof record.temp === 'number' && Number.isFinite(record.temp) ? record.temp : null;
   const values = {
@@ -105,6 +113,8 @@ export function normalizePublicMonitorRecord(payload: unknown): PublicMonitorRec
     disk: optionalMetric(record, 'disk'),
     disk_total: optionalMetric(record, 'disk_total'),
     load,
+    load5,
+    load15,
     temp,
     net_in: values.net_in,
     net_out: values.net_out,

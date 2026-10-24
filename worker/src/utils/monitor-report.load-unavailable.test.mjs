@@ -30,22 +30,41 @@ assert.equal(normalizeMonitorReport({ load: { load1: 2.5 } }).load, 2.5);
 // load 为 0 是**真实的空闲**，不能被 ?? 或 || 误伤成 null
 assert.equal(toMonitorRecord('n', 't', { load: 0 }).load, 0, '真实的 0 必须保留为 0');
 
+// ── 负载三元组 load5/load15：与 load 同一语义 ──
+const triple = normalizeMonitorReport({ cpu: 26, load: 1.25, load5: 0.75, load15: 0.5 });
+assert.equal(triple.load, 1.25);
+assert.equal(triple.load5, 0.75);
+assert.equal(triple.load15, 0.5);
+
+const tripleNull = normalizeMonitorReport({ cpu: 26, load: null, load5: null, load15: null });
+assert.equal(tripleNull.load, null);
+assert.equal(tripleNull.load5, null, 'load5 显式 null 必须保留');
+assert.equal(tripleNull.load15, null, 'load15 显式 null 必须保留');
+
+const tripleMissing = normalizeMonitorReport({ cpu: 1 });
+assert.equal(tripleMissing.load5, 0, 'load5 缺字段仍按 0（老探针兼容）');
+assert.equal(tripleMissing.load15, 0, 'load15 缺字段仍按 0（老探针兼容）');
+
+const tripleRecord = toMonitorRecord('node-1', '2026-08-14T00:00:00Z', { load: 1.25, load5: null, load15: 0.5 });
+assert.equal(tripleRecord.load, 1.25);
+assert.equal(tripleRecord.load5, null, '落库 load5 同样保留 null');
+assert.equal(tripleRecord.load15, 0.5);
+
+assert.equal(normalizeMonitorReport({ load5: -5 }).load5, 0, 'load5 负值仍钳到下界');
+assert.equal(normalizeMonitorReport({ load15: 999_999 }).load15, 10_000, 'load15 超大值仍钳到上界');
+
 console.log('ok - monitor-report 负载 null 语义');
 
 // ── 数据库侧的两条约束（扫 SQL） ──
 // 这两处漏改的表现都是「代码看着对、行为却不对」：列还是 not null 时写 null 直接报错；
 // 告警窗口把 null 当 0 时，节点看起来「一直不超阈值」，与「没有数据」是两回事。
 const { readFileSync } = await import('node:fs');
-const schema = readFileSync(new URL('../../../supabase/migrations/1_core_schema.sql', import.meta.url), 'utf8');
-const rpc = readFileSync(new URL('../../../supabase/migrations/4_rpc_api.sql', import.meta.url), 'utf8');
+const schema = readFileSync(new URL('../../../supabase/migrations/1_schema.sql', import.meta.url), 'utf8');
+const rpc = readFileSync(new URL('../../../supabase/migrations/2_functions.sql', import.meta.url), 'utf8');
 
 assert.ok(
   /^\s*load double precision,\s*$/m.test(schema),
   'records.load 必须建成可空列（不能再带 not null default 0）',
-);
-assert.ok(
-  /alter table records alter column load drop not null;/.test(rpc),
-  '存量库必须有幂等的 drop not null，否则老库写 null 会直接失败',
 );
 assert.ok(
   /input_metric <> 'load' or records\.load is not null/.test(rpc),
@@ -83,3 +102,36 @@ assert.ok(
 );
 
 console.log('ok - 负载 null 的数据库约束');
+
+// ── 负载三元组：列（1_schema.sql）、写入与读侧（2_functions.sql）缺一不可 ──
+// 列在 1_schema.sql，函数在 2_functions.sql；拼起来扫，保持原来对「三元组」整体的断言口径。
+const tripleSql = `${schema}\n${rpc}`;
+
+assert.ok(
+  /add column if not exists load5 double precision/.test(tripleSql),
+  'records.load5 必须建成可空列',
+);
+assert.ok(
+  /add column if not exists load15 double precision/.test(tripleSql),
+  'records.load15 必须建成可空列',
+);
+for (const key of ['load5', 'load15']) {
+  assert.ok(
+    new RegExp(`jsonb_typeof\\(input_record->'${key}'\\) = 'null'`).test(tripleSql),
+    `落库 RPC 必须区分 ${key} 的「显式 null」与「字段缺失」`,
+  );
+  assert.ok(
+    new RegExp(`coalesce\\(\\(input_record->>'${key}'\\)::double precision, 0\\)`).test(tripleSql),
+    `${key} 缺字段仍按 0（老探针兼容）`,
+  );
+}
+for (const fn of ['cfm_records_range_paged', 'cfm_records_range_cursor', 'cfm_records_range_bucketed']) {
+  const body = tripleSql.slice(tripleSql.indexOf(`function public.${fn}`));
+  const select = body.slice(0, body.indexOf('$$;'));
+  assert.ok(
+    select.includes('load5') && select.includes('load15'),
+    `${fn} 的显式列清单必须带上 load5/load15，否则读侧丢字段`,
+  );
+}
+
+console.log('ok - 负载三元组的数据库约束');

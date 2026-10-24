@@ -27,7 +27,6 @@ test('V-W01: actual probe delivery acknowledges only accepted data and retries S
   const token = 'synthetic-probe-token-'.padEnd(64, '0');
   await f.database.query("insert into clients(uuid,name,token) values ('probe-node','Synthetic probe fixture',$1)", [token]);
   await f.database.query("insert into ping_tasks(id,name,type,target,all_clients,interval_sec) values (1,'Synthetic TCP','tcp','example.test:443',1,120)");
-  await f.database.query("insert into website_monitors(id,name,url,agent_probe_mode,agent_probe_clients) values (1,'Synthetic website','https://example.test/','selected','[\"probe-node\"]')");
   const getStub = async name => {
     const namespace = await f.mf.getDurableObjectNamespace('LIVE_DATA');
     return namespace.get(namespace.idFromName(name));
@@ -139,17 +138,5 @@ test('V-W01: actual probe delivery acknowledges only accepted data and retries S
     const response = await postReport(stub);
     assert.equal(response.status, 200);
     assert.equal(await rowCount(), 0);
-  });
-
-  for (const rpcName of ['cfm_record_website_check', 'cfm_agent_website_probe_tasks']) await t.test(`website probe ${rpcName} failure prevents report acceptance`, async () => {
-    const monitor = (await f.database.query('select * from website_monitors where id=1')).rows[0];
-    const stub = await getStub(`website-probe-failure-${rpcName}`);
-    target = rpcName; mode = 'reject';
-    const response = await postReport(stub, { cpu: 19, timestamp: Date.now(), website_probe_results: [{
-      monitor_id: 1, config_revision: monitor.config_revision,
-      ok: true, effective_status: 'up', status_code: 200, raw_status_code: 200, latency_ms: 23,
-    }] });
-    await reached.promise;
-    assert.ok(response.status >= 500, 'A website result is covered by the same delivery receipt');
   });
 });

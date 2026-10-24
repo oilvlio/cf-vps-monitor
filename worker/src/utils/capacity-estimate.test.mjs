@@ -13,7 +13,7 @@ async function estimate({ pingCount = 2, recordEnabled = true, viewMinutes = 0 }
   const pingTasks = Array.from({ length: pingCount }, (_, i) => ({ id: i + 1, name: `Ping ${i + 1}`, all_clients: true, clients: [], interval_sec: 120 }));
   const functions = await loadTypeScriptFunctions(new URL('../routes/admin.ts', import.meta.url), [
     'parsePositiveNumber', 'parseBoundedNumber', 'parseJsonArray', 'estimatePingSnapshotRowsPerDay',
-    'estimateAgentPingTaskPullsPerDay', 'estimateCapacityCountCheckIntervalSec', 'buildCapacityEstimate',
+    'estimateAgentPingTaskPullsPerDay', 'estimateCapacityCountCheckIntervalSec', 'estimateRollupRowsPerClient', 'buildCapacityEstimate',
   ], {
     ...quota, ...helpers, buildAdminSettings,
     capacityEstimateCache: null, CAPACITY_ESTIMATE_CACHE_MS: 30_000, CAPACITY_ESTIMATE_SETTING_KEYS: [],
@@ -80,7 +80,6 @@ async function actualPingStateWrites(recordEnabled, transport) {
   const tasks = [1, 2].map(id => ({ id, name: `Ping ${id}`, all_clients: true, clients: [], interval_sec: 120 }));
   const db = {
     getSettingsByKeys: async () => ({ record_enabled: String(recordEnabled), ping_record_persist_interval_sec: '120' }),
-    getHistoryStorageRowCounts: async () => ({ records: 0, gpu_records: 0, gpu_snapshots: 0, ping_records: 0, ping_snapshots: 0 }),
     getHistoryStorageUsage: async () => ({ live_rows: 0, estimated_live_storage_bytes: 0 }),
     listPingTasks: async () => tasks,
     insertPingSnapshot: async () => { historyWrites += 1; },
@@ -150,7 +149,7 @@ test('the snapshot write estimate agrees with actual accepted WebSocket messages
   };
   const { LiveDataDO } = createWorkerLoader({ db: {
     getSettingsByKeys: async () => ({ record_enabled: 'false' }),
-    listPingTasks: async () => [], listAgentWebsiteProbeTasks: async () => [],
+    listPingTasks: async () => [],
   } }).load('worker/src/do/live-data.ts');
   const object = new LiveDataDO(state.state, {});
   const socket = createSocket({ role: 'agent', clientId: 'node', clientName: 'Fixture', hidden: false });

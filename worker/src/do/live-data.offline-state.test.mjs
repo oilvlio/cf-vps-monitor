@@ -26,7 +26,7 @@ function fixture({ initial = [], controls = [node], dbOverrides = {} } = {}) {
     listPublicClientRows: async () => structuredClone(controls || []),
     getSetting: async () => null, setSetting: async () => {},
     updateClient: async (_database, uuid, patch) => patches.push({ uuid, ...patch }),
-    listPingTasks: async () => [], listAgentWebsiteProbeTasks: async () => [],
+    listPingTasks: async () => [],
     insertAuditLog: async () => {}, tryClaimAuditThrottle: async () => true,
     ...dbOverrides,
   } });
@@ -70,7 +70,7 @@ async function wsReport(f, socket, report = {}) {
 }
 
 for (const transport of ['http', 'websocket']) {
-  test(`${transport} directory disk source and sampling time survive offline state and cold restart`, async () => {
+  test(`${transport} legacy disk metadata is stripped while measured bytes survive offline state and cold restart`, async () => {
     const f = fixture();
     const receivedAt = f.now;
     const measuredAt = receivedAt - 300_000;
@@ -90,8 +90,9 @@ for (const transport of ['http', 'websocket']) {
       const live = await snapshot(object);
       assert.deepEqual(live.online, []);
       assert.equal(live.last_known.node.disk, 8_388_608);
-      assert.equal(live.last_known.node.disk_source, 'directory');
-      assert.equal(live.last_known.node.disk_sampled_at, measuredAt);
+      assert.equal(live.last_known.node.disk_total, 5_024_000_000);
+      assert.equal(live.last_known.node.disk_source, undefined);
+      assert.equal(live.last_known.node.disk_sampled_at, undefined);
       assert.equal(live.last_known.node.lastReportTime, receivedAt);
     }
   });
@@ -420,7 +421,6 @@ function queuedBatchFixture({ failProbe = false } = {}) {
       return { record_enabled: String(failProbe) };
     },
     listPingTasks: async () => [{ id: 1, name: 'Fixture probe', all_clients: true, clients: [], interval_sec: 120 }],
-    getHistoryStorageRowCounts: async () => ({ records: 0, gpu_records: 0, gpu_snapshots: 0, ping_records: 0, ping_snapshots: 0 }),
     getHistoryStorageBytes: async () => ({ total: 0 }),
     getHistoryStorageUsage: async () => ({ live_rows: 0, estimated_live_storage_bytes: 0 }),
     insertPingSnapshot: async () => { if (failProbe) throw new Error('Synthetic required Ping snapshot failure'); },

@@ -17,29 +17,36 @@ async function fixture(run) {
       input_now: iso(start + offset), input_repeat_ms: 0,
     });
     const rows = async () => (await sql.query('select * from cfm_internal.notification_delivery_state order by key')).rows;
-    const website = async () => rpc(sql, 'cfm_create_website_monitor', { input_monitor: {
-      name: 'Synthetic website', url: 'https://site.audit.example.com', agent_probe_mode: 'off',
-    } });
-    await run({ sql, start, claim, complete, rows, website });
+    // 投递状态的拥有者：一个启用了离线通知的节点（键为 offline:<uuid>）。
+    const node = async (uuid = 'lifecycle-node') => {
+      await sql.query('insert into clients(uuid,name) values ($1,$2)', [uuid, 'Synthetic node']);
+      await sql.query('insert into offline_notifications(client,enable) values ($1,1)', [uuid]);
+      return { uuid, key: `offline:${uuid}` };
+    };
+    // 与 cfm_restore_backup_data 同一路径：以相同 uuid 还原该节点。
+    const restoreNode = ({ uuid }) => rpc(sql, 'cfm_restore_backup_data', {
+      input_backup: { clients: [{ uuid, name: 'Restored same ID' }] },
+    });
+    const deleteNode = ({ uuid }) => rpc(sql, 'cfm_delete_clients', { input_uuids: [uuid] });
+    await run({ sql, start, claim, complete, rows, node, restoreNode, deleteNode });
   } finally { await sql.close(); }
 }
 
-test('R-D06 deleting a website retires its completed delivery state', async () => {
-  await fixture(async ({ sql, claim, complete, rows, website }) => {
-    const site = await website();
-    const key = `website:${site.id}`;
+test('R-D06 deleting a node retires its completed delivery state', async () => {
+  await fixture(async ({ claim, complete, rows, node, deleteNode }) => {
+    const owner = await node();
+    const key = owner.key;
     const attempt = await claim(key);
     assert.equal(await complete(key, attempt.token), true);
     assert.equal((await rows())[0].status, 'sent');
-    await rpc(sql, 'cfm_delete_website_monitor', { input_id: site.id });
+    await deleteNode(owner);
     assert.deepEqual(await rows(), [], 'a completed state for a removed entity must be reclaimed');
   });
 });
 
 test('R-D06 a different event cannot steal an unexpired pending lease', async () => {
-  await fixture(async ({ claim, complete, rows, website }) => {
-    const site = await website();
-    const key = `website:${site.id}`;
+  await fixture(async ({ claim, complete, rows, node }) => {
+    const { key } = await node();
     const first = await claim(key);
     assert.equal((await claim(key, 'event-b', 1_000)).claimed, false);
     assert.equal((await rows())[0].claim_token, first.token);
@@ -52,11 +59,11 @@ test('R-D06 a different event cannot steal an unexpired pending lease', async ()
 });
 
 test('R-D06 deletion preserves an active token until matching completion retires it', async () => {
-  await fixture(async ({ sql, claim, complete, rows, website }) => {
-    const site = await website();
-    const key = `website:${site.id}`;
+  await fixture(async ({ claim, complete, rows, node, deleteNode }) => {
+    const owner = await node();
+    const key = owner.key;
     const first = await claim(key);
-    await rpc(sql, 'cfm_delete_website_monitor', { input_id: site.id });
+    await deleteNode(owner);
     assert.equal((await rows())[0].claim_token, first.token);
     assert.equal((await claim(key, 'event-b', 1_000)).claimed, false);
     assert.equal(await complete(key, 'wrong-token'), false);
@@ -99,13 +106,13 @@ test('R-D06 notification rule deletion reclaims inactive states for all its targ
 });
 
 for (const pending of [false, true]) {
-  test(`R-D06 same-ID website restore retires ${pending ? 'pending' : 'sent'} previous lifecycle`, async () => {
-    await fixture(async ({ sql, claim, complete, rows, website }) => {
-      const site = await website();
-      const key = `website:${site.id}`;
+  test(`R-D06 same-ID node restore retires ${pending ? 'pending' : 'sent'} previous lifecycle`, async () => {
+    await fixture(async ({ claim, complete, rows, node, restoreNode }) => {
+      const owner = await node();
+      const key = owner.key;
       const first = await claim(key);
       if (!pending) await complete(key, first.token);
-      await rpc(sql, 'cfm_restore_backup_data', { input_backup: { website_monitors: [site] } });
+      await restoreNode(owner);
       if (pending) {
         assert.equal((await claim(key, 'new-lifecycle', 1000)).claimed, false);
         assert.equal((await rows())[0].claim_token, first.token);
@@ -172,7 +179,7 @@ for (const kind of ['expiry', 'load']) for (const restorePoint of ['none', 'befo
       assert.equal(sends, 1);
       assert.equal(restores, restorePoint === 'none' ? 0 : 1);
       const saved = kind === 'expiry'
-        ? await rpc(sql, 'cfm_expiry_notification', { input_client: client })
+        ? (await sql.query('select last_notified from expiry_notifications where client = $1', [client])).rows[0]
         : await rpc(sql, 'cfm_load_notification', { input_id: 7 });
       if (restorePoint === 'none') assert.ok(saved.last_notified, 'normal confirmed delivery marks its current event');
       else assert.equal(saved.last_notified, null, 'a completed old send has no authority over the restored entity');
@@ -181,14 +188,14 @@ for (const kind of ['expiry', 'load']) for (const restorePoint of ['none', 'befo
 }
 
 test('R-D06 bounded cleanup retires legacy orphans and waits for active leases without erasing live sent events', async () => {
-  await fixture(async ({ sql, start, rows, website }) => {
-    const site = await website();
+  await fixture(async ({ sql, start, rows, node }) => {
+    const owner = await node('offline-live');
     await sql.exec("insert into clients(uuid,name) values ('live:client','Synthetic live client'); insert into load_notifications(id,name,clients) values (7,'Current rule','[]')");
     const legacy = [
-      [`website:${site.id}`, 'sent', null, start - 86_400_000],
+      [owner.key, 'sent', null, start - 86_400_000],
       ['load:7:live:client', 'sent', null, start - 86_400_000],
       ['custom:unclassified', 'sent', null, start - 86_400_000],
-      ['website:999', 'sent', null, start - 86_400_000],
+      ['offline:ghost', 'sent', null, start - 86_400_000],
       ['load:77:live:client', 'failed', null, start - 86_400_000],
       ['load:7:missing:client', 'sent', null, start - 86_400_000],
       ['offline:removed:client', 'pending', 'active-legacy-token', start + 90_000],
@@ -216,7 +223,7 @@ test('R-D06 bounded cleanup retires legacy orphans and waits for active leases w
       input_now: iso(start + 90_001), input_batch_size: 2, input_max_batches: 1,
     });
     assert.deepEqual(final, { notification_delivery_state: 1, has_more: false });
-    assert.deepEqual((await rows()).map(row => row.key), ['custom:unclassified', 'load:7:live:client', `website:${site.id}`]);
+    assert.deepEqual((await rows()).map(row => row.key), ['custom:unclassified', 'load:7:live:client', owner.key]);
     const access = (await sql.query(`select
       has_function_privilege('anon','public.cfm_cleanup_notification_delivery_state(timestamptz,integer,integer)','execute') as anon,
       has_function_privilege('authenticated','public.cfm_cleanup_notification_delivery_state(timestamptz,integer,integer)','execute') as authenticated,
@@ -252,7 +259,7 @@ test('R-D06 a legacy sent token is minted without resending and cannot cross a s
     assert.equal(await rpc(sql, 'cfm_mark_expiry_notification_sent', {
       input_client: 'node-a', input_time: iso(start), input_token: prior.token,
     }), false, 'event ID alone is not enough to identify the completed lifecycle');
-    assert.equal((await rpc(sql, 'cfm_expiry_notification', { input_client: 'node-a' })).last_notified, null);
+    assert.equal((await sql.query("select last_notified from expiry_notifications where client = 'node-a'")).rows[0].last_notified, null);
     assert.equal(await rpc(sql, 'cfm_mark_expiry_notification_sent', {
       input_client: 'node-a', input_time: iso(start), input_token: next.token,
     }), true);
@@ -268,11 +275,11 @@ test('R-D06 a legacy sent token is minted without resending and cannot cross a s
 });
 
 test('R-D06 active retirement survives expiry and a new owner can acquire a fresh lease', async () => {
-  await fixture(async ({ sql, claim, complete, rows, website }) => {
-    const site = await website();
-    const key = `website:${site.id}`;
+  await fixture(async ({ claim, complete, rows, node, restoreNode }) => {
+    const owner = await node();
+    const key = owner.key;
     const first = await claim(key);
-    await rpc(sql, 'cfm_restore_backup_data', { input_backup: { website_monitors: [site] } });
+    await restoreNode(owner);
     assert.equal((await claim(key, 'event-a', 89_999)).claimed, false);
     const retry = await claim(key, 'event-a', 90_001);
     assert.equal(retry.claimed, true);

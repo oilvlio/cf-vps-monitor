@@ -29,6 +29,7 @@ const actionLabels: Record<string, { label: string; color: string }> = {
   settings_edit: { label: '修改设置', color: 'blue' },
   ping_add: { label: '添加 Ping', color: 'blue' },
   ping_edit: { label: '编辑 Ping', color: 'blue' },
+  ping_assign: { label: '分配 Ping', color: 'blue' },
   ping_delete: { label: '删除 Ping', color: 'red' },
   offline_notification_edit: { label: '离线通知', color: 'orange' },
   load_notification_add: { label: '负载通知', color: 'blue' },

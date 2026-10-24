@@ -124,39 +124,6 @@ export function buildLoadNotification(input: {
   });
 }
 
-export function buildWebsiteAlertNotification(input: {
-  name: string;
-  url: string;
-  downMinutes: number;
-  lastStatus: string;
-  checkedAt: string;
-}): NotificationMessage {
-  return eventMessage({
-    emoji: '🌐',
-    event: '网站告警',
-    clients: input.name,
-    message: `${input.url}；状态 ${input.lastStatus}；持续 ${input.downMinutes} 分钟`,
-    time: input.checkedAt,
-  });
-}
-
-export function buildWebsiteRecoveryNotification(input: {
-  name: string;
-  url: string;
-  downMinutes: number;
-  statusCode: number | null;
-  latencyMs: number | null;
-  eventTime?: string | Date;
-}): NotificationMessage {
-  return eventMessage({
-    emoji: '🟢',
-    event: '网站恢复',
-    clients: input.name,
-    message: `${input.url}；HTTP ${input.statusCode ?? 'unknown'}；延迟 ${input.latencyMs ?? 0}ms；故障时长 ${input.downMinutes} 分钟`,
-    time: input.eventTime,
-  });
-}
-
 export function buildIpChangeNotification(input: {
   nodeName: string;
   parts: string[];

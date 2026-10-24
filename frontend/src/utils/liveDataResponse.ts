@@ -1,5 +1,4 @@
 import type { LastKnownRecord, LiveDataResponse } from '../contexts/LiveDataContext';
-import { diskMeasurementMetadata } from './diskMeasurement.ts';
 
 export type ViewerTokenResponse = {
   token: string;
@@ -21,8 +20,8 @@ export function emptyLiveDataResponse(now = Date.now()): LiveDataResponse {
 }
 
 const lastKnownMetrics = ['cpu', 'gpu', 'ram', 'ram_total', 'swap', 'swap_total', 'disk', 'disk_total',
-  'net_in', 'net_out', 'net_total_up', 'net_total_down', 'load', 'temp', 'uptime', 'process_count', 'connections', 'connections_udp'] as const;
-const nullableMetrics = new Set<string>(['disk', 'disk_total', 'load', 'temp', 'uptime']);
+  'net_in', 'net_out', 'net_total_up', 'net_total_down', 'load', 'load5', 'load15', 'temp', 'uptime', 'process_count', 'connections', 'connections_udp'] as const;
+const nullableMetrics = new Set<string>(['disk', 'disk_total', 'load', 'load5', 'load15', 'temp', 'uptime']);
 
 export function normalizeLastKnownRecord(payload: unknown, uuid: string): LastKnownRecord | null {
   const record = asRecord(payload);
@@ -35,13 +34,6 @@ export function normalizeLastKnownRecord(payload: unknown, uuid: string): LastKn
     if ((value === null && nullableMetrics.has(key)) || asFiniteNumber(value) !== null) {
       (result as Record<string, unknown>)[key] = value;
     }
-  }
-  const diskSource = diskMeasurementMetadata(record);
-  if (diskSource.valid) {
-    result.disk_source = 'directory';
-    result.disk_sampled_at = diskSource.sampledAt;
-  } else if (diskSource.attempted) {
-    result.disk = null;
   }
   if (typeof record.message === 'string') result.message = record.message;
   const order = asFiniteNumber(record.sort_order);

@@ -10,7 +10,7 @@ const { origin, check, finish } = await createHarness({
 function snapshot(clients, version) {
   const now = Date.now();
   const record = { cpu: 47, ram: 32_000_000, ram_total: 128_000_000, swap: 0, swap_total: 0,
-    disk: 300_000_000, disk_total: 1_024_000_000, disk_source: 'directory', disk_sampled_at: now - 60_000,
+    disk: 300_000_000, disk_total: 1_024_000_000,
     net_in: 0, net_out: 0, net_total_up: 0, net_total_down: 0, load: null, temp: null, uptime: 1000,
     process_count: 3, connections: 1, connections_udp: 0 };
   return { online: clients.map(client => client.uuid),

@@ -5,7 +5,6 @@ const { unwrapMonitorReportEnvelope } = await import('../utils/report-envelope.t
 const report = {
   timestamp: 12345,
   ping_results: [{ task_id: 1, value: 32 }],
-  website_probe_results: [{ monitor_id: 2, ok: true, latency_ms: 88, effective_status: 'up' }],
   basic_info: { os: 'linux', version: '2.0.0' },
 };
 

@@ -13,8 +13,8 @@ async function fixture(t) {
   const { runRecordCleanup } = await loadTypeScriptFunctions(new URL('./index.ts', import.meta.url), ['runRecordCleanup'], {
     RECORD_CLEANUP_LAST_RUN_KEY: 'maintenance_last_cleanup_at', RECORD_CLEANUP_INTERVAL_MS: 86400000,
     db: {
+      buildHistoryRollup: async () => ({}),
       deleteOldRecords: history('cfm_delete_old_records'),
-      deleteOldWebsiteChecks: history('cfm_delete_old_website_checks'),
       deleteOldPingRecords: history('cfm_delete_old_ping_records'),
       deleteOldAuditLogs: history('cfm_delete_old_audit_logs'),
       cleanupNotificationDeliveryState: (_db, now, options = {}) => transport('cfm_cleanup_notification_delivery_state', {
@@ -33,7 +33,7 @@ async function fixture(t) {
 test('R-D06 orphan delivery cleanup continues bounded batches before the daily completion stamp', async t => {
   const f = await fixture(t);
   await f.database.exec(`insert into cfm_internal.notification_delivery_state(key,event_id,status,attempts,next_attempt_at,updated_at)
-    select 'website:'||n,'synthetic-old-event','failed',1,'2026-01-01','2026-01-01' from generate_series(1,1001) n`);
+    select 'offline:orphan-'||n,'synthetic-old-event','failed',1,'2026-01-01','2026-01-01' from generate_series(1,1001) n`);
   await f.run('2026-09-09T00:00:00Z');
   assert.equal(await f.count(), 1, 'One bounded 1000-row batch leaves the remaining orphan for continuation');
   assert.equal(await f.completion(), undefined, 'Do not skip the remaining ledger backlog for the next day');
@@ -48,7 +48,7 @@ test('R-D06 orphan delivery cleanup continues bounded batches before the daily c
 test('R-D06 a live orphan lease is retained and drained by the next Cron after expiry', async t => {
   const f = await fixture(t);
   await f.database.exec(`insert into cfm_internal.notification_delivery_state(key,event_id,status,attempts,next_attempt_at,updated_at,claim_token)
-    values ('website:999','synthetic-sending','pending',1,'2026-09-09T00:01:30Z','2026-09-09T00:00:00Z','synthetic-active-token')`);
+    values ('offline:orphan-active','synthetic-sending','pending',1,'2026-09-09T00:01:30Z','2026-09-09T00:00:00Z','synthetic-active-token')`);
   await f.run('2026-09-09T00:00:00Z');
   assert.equal(await f.count(), 1, 'An in-flight provider send cannot lose its lease');
   assert.equal(await f.completion(), undefined, 'A retained retired lease needs near-term continuation');

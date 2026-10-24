@@ -1,4 +1,4 @@
-import { CF_MONITOR_REPOSITORY } from './projectLinks';
+import { CF_MONITOR_AGENT_REPOSITORY } from './projectLinks';
 
 export type AgentInstallPlatform = 'unix' | 'windows';
 
@@ -17,6 +17,12 @@ export type AgentInstallOptions = {
   mountExclude: string;
   nicInclude: string;
   nicExclude: string;
+  // 仅 Unix 安装脚本支持：容器内 /proc/loadavg 是宿主机口径时，仍上报宿主机负载。
+  allowHostLoad: boolean;
+  // 宿主机 CPU 核数，配合 allowHostLoad 把宿主机负载折算到本容器核数口径；空 = 不折算。
+  hostCpuCores: string;
+  // 关闭后 Agent 完全跳过 GPU 探测（不执行 nvidia-smi / rocm-smi），也不上报 GPU 字段。
+  disableGpu: boolean;
 };
 
 export const defaultAgentInstallOptions: AgentInstallOptions = {
@@ -34,12 +40,15 @@ export const defaultAgentInstallOptions: AgentInstallOptions = {
   mountExclude: '',
   nicInclude: '',
   nicExclude: '',
+  allowHostLoad: false,
+  hostCpuCores: '',
+  disableGpu: false,
 };
 
 export const CF_MONITOR_BRANCH = 'main';
 export const CF_MONITOR_AGENT_SCRIPT_REF = `refs/heads/${CF_MONITOR_BRANCH}`;
-export const CF_MONITOR_RELEASE_BASE = `https://github.com/${CF_MONITOR_REPOSITORY}/releases/latest/download`;
-export const CF_MONITOR_AGENT_SCRIPT_BASE = `https://raw.githubusercontent.com/${CF_MONITOR_REPOSITORY}/${CF_MONITOR_AGENT_SCRIPT_REF}/agent`;
+export const CF_MONITOR_RELEASE_BASE = `https://github.com/${CF_MONITOR_AGENT_REPOSITORY}/releases/latest/download`;
+export const CF_MONITOR_AGENT_SCRIPT_BASE = `https://raw.githubusercontent.com/${CF_MONITOR_AGENT_REPOSITORY}/${CF_MONITOR_AGENT_SCRIPT_REF}/agent`;
 
 function isLocalHttpHost(hostname: string) {
   const host = hostname.toLowerCase();
@@ -130,8 +139,8 @@ export function cfMonitorAgentScriptUrl(
   const ref = normalizeScriptRef(scriptRef);
   const tag = normalizeReleaseTag(releaseTag);
   const base = tag
-      ? `https://github.com/${CF_MONITOR_REPOSITORY}/releases/download/${tag}`
-      : `https://raw.githubusercontent.com/${CF_MONITOR_REPOSITORY}/${ref}/agent`;
+      ? `https://github.com/${CF_MONITOR_AGENT_REPOSITORY}/releases/download/${tag}`
+      : `https://raw.githubusercontent.com/${CF_MONITOR_AGENT_REPOSITORY}/${ref}/agent`;
   return proxiedUrl(`${base}/${scriptFile}`, ghproxy);
 }
 
@@ -163,6 +172,12 @@ function normalizeTrafficResetDay(value: string) {
   const day = Number.parseInt(value.trim(), 10);
   if (!Number.isFinite(day)) return '1';
   return String(Math.min(31, Math.max(1, day)));
+}
+
+function normalizeHostCpuCores(value: string) {
+  const cores = Number.parseInt(value.trim(), 10);
+  if (!Number.isFinite(cores) || cores <= 0) return '';
+  return String(Math.min(65535, cores));
 }
 
 function normalizeInstanceId(value?: string) {
@@ -208,6 +223,9 @@ export function buildAgentInstallCommand({
   const nicInclude = options.nicInclude.trim();
   const nicExclude = options.nicExclude.trim();
   const trafficResetDay = normalizeTrafficResetDay(options.trafficResetDay);
+  const allowHostLoad = Boolean(options.allowHostLoad);
+  const hostCpuCores = allowHostLoad ? normalizeHostCpuCores(options.hostCpuCores || '') : '';
+  const disableGpu = Boolean(options.disableGpu);
 
   switch (platform) {
     case 'unix': {
@@ -227,6 +245,9 @@ export function buildAgentInstallCommand({
       if (mountExclude) args.push('--mount-exclude', mountExclude);
       if (nicInclude) args.push('--nic-include', nicInclude);
       if (nicExclude) args.push('--nic-exclude', nicExclude);
+      if (allowHostLoad) args.push('--allow-host-load');
+      if (hostCpuCores) args.push('--host-cpu-cores', hostCpuCores);
+      if (disableGpu) args.push('--disable-gpu');
       return shPipe(
         `wget -qO- ${shellQuote(cfMonitorAgentScriptUrl('install.sh', ghproxy, releaseTag, scriptRef))}`,
         args,
@@ -248,6 +269,7 @@ export function buildAgentInstallCommand({
       if (mountExclude) args.push('-MountExclude', mountExclude);
       if (nicInclude) args.push('-NicInclude', nicInclude);
       if (nicExclude) args.push('-NicExclude', nicExclude);
+      if (disableGpu) args.push('-DisableGpu');
       return powershellCommand(
         `iwr ${psQuote(cfMonitorAgentScriptUrl('install-windows.ps1', ghproxy, releaseTag, scriptRef))} -UseBasicParsing -OutFile 'install-windows.ps1'; & '.\\install-windows.ps1' ${args.map((arg, index) => index % 2 === 0 ? arg : psQuote(arg)).join(' ')}`,
       );

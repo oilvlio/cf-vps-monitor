@@ -47,11 +47,10 @@ function fixture({ recordEnabled = false } = {}) {
   const records = [];
   const db = {
     getSettingsByKeys: async () => ({ record_enabled: String(recordEnabled), record_persist_interval_sec: '120' }),
-    getHistoryStorageRowCounts: async () => ({ records: 1, gpu_records: 0, gpu_snapshots: 0, ping_records: 0, ping_snapshots: 0 }),
     getHistoryStorageBytes: async () => ({ total: 420 }),
     getHistoryStorageUsage: async () => ({ live_rows: 1, live_row_bytes: 228, estimated_live_storage_bytes: 420, allocated_bytes: 420, reusable_bytes: null, measurement: 'live-row-bytes-plus-index-estimate' }),
     insertRecord: async (_db, record) => records.push(record), insertGPURecords: async () => {},
-    updateClient: async () => {}, listPingTasks: async () => [], listAgentWebsiteProbeTasks: async () => [],
+    updateClient: async () => {}, listPingTasks: async () => [],
     getSetting: async () => null, setSetting: async () => {}, tryClaimAuditThrottle: async () => true, insertAuditLog: async () => {},
   };
   const { LiveDataDO } = createWorkerLoader({ db, globals: { Date: Clock } }).load('worker/src/do/live-data.ts');

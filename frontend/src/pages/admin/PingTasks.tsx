@@ -16,7 +16,7 @@ import {
   Text,
   TextField,
 } from '@radix-ui/themes';
-import { Activity, ArrowDown, ArrowUp, Pencil, Plus, Search, Trash2 } from 'lucide-react';
+import { Activity, ArrowDown, ArrowUp, ListChecks, Pencil, Plus, Search, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
 import { useApi } from '../../contexts/AuthContext';
@@ -40,8 +40,12 @@ interface ClientLite {
   region?: string;
 }
 
-type TaskScopeFilter = 'all' | 'global' | 'selected';
+type TaskScopeFilter = 'all' | 'global' | 'selected' | 'unbound';
 type TaskViewMode = 'task' | 'server';
+
+function isUnboundTask(task: PingTask) {
+  return !task.all_clients && !task.clients?.length;
+}
 
 function getTaskScopeLabel(task: PingTask, clients: ClientLite[]) {
   if (task.all_clients) return '所有服务器';
@@ -114,11 +118,6 @@ function TaskDialog({
 
     if (!target) {
       toast.error('请输入目标地址');
-      return;
-    }
-
-    if (!allClients && selectedClients.length === 0) {
-      toast.error('请选择至少一个服务器，或启用所有服务器');
       return;
     }
 
@@ -204,7 +203,7 @@ function TaskDialog({
               <Flex align="center" justify="between" gap="3">
                 <Flex direction="column">
                   <Text size="2" weight="bold">应用范围</Text>
-                  <Text size="1" color="gray">支持应用到所有服务器，也支持绑定到指定服务器</Text>
+                  <Text size="1" color="gray">可应用到所有服务器、绑定到指定服务器，也可暂不分配，稍后在「服务器视图」里按服务器勾选</Text>
                 </Flex>
                 <Flex align="center" gap="2">
                   <Switch checked={allClients} onCheckedChange={(value) => setFormData({ ...formData, all_clients: value })} />
@@ -217,9 +216,17 @@ function TaskDialog({
                   {allClients ? '当前为全局任务' : '当前为定向任务'}
                 </Badge>
                 {!allClients && (
-                  <Badge variant="soft" color="blue">已选服务器 {selectedClients.length}</Badge>
+                  <Badge variant="soft" color={selectedClients.length > 0 ? 'blue' : 'amber'}>
+                    已选服务器 {selectedClients.length}
+                  </Badge>
                 )}
               </Flex>
+
+              {!allClients && selectedClients.length === 0 && (
+                <Text size="1" color="amber">
+                  未选择服务器：任务会先保存，但暂不在任何服务器上运行。
+                </Text>
+              )}
 
               {!allClients && (
                 <Grid columns={{ initial: '1', sm: '2' }} gap="2">
@@ -268,6 +275,164 @@ function TaskDialog({
   );
 }
 
+function NodeTasksDialog({
+  client,
+  tasks,
+  onClose,
+  onSaved,
+}: {
+  client: ClientLite | null;
+  tasks: PingTask[];
+  onClose: () => void;
+  onSaved: (updated: PingTask[]) => void;
+}) {
+  const apiFetch = useApi();
+  const [saving, setSaving] = useState(false);
+  const [search, setSearch] = useState('');
+  const [chosen, setChosen] = useState<number[]>([]);
+  const [base, setBase] = useState<number[]>([]);
+  const clientUuid = client?.uuid ?? null;
+
+  // 以打开时的勾选作为起点：保存只提交相对它的改动，
+  // 编辑期间别处对这台服务器做的分配不会被一份过期列表覆盖。
+  useEffect(() => {
+    if (!clientUuid) return;
+    const initial = tasks
+      .filter((task) => !task.all_clients && task.clients?.includes(clientUuid))
+      .map((task) => task.id);
+    setBase(initial);
+    setChosen(initial);
+    setSearch('');
+    // 只在切换服务器时重置；任务列表的后续刷新不应冲掉正在进行的勾选。
+  }, [clientUuid]);
+
+  const visibleTasks = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    if (!query) return tasks;
+    return tasks.filter((task) => [task.name, task.type, task.target].join(' ').toLowerCase().includes(query));
+  }, [tasks, search]);
+
+  const selectableVisible = visibleTasks.filter((task) => !task.all_clients);
+  const globalCount = tasks.filter((task) => task.all_clients).length;
+  const changed = chosen.filter((id) => !base.includes(id)).length + base.filter((id) => !chosen.includes(id)).length;
+
+  const toggle = (id: number) => {
+    setChosen((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  };
+
+  const setVisible = (on: boolean) => {
+    const ids = new Set(selectableVisible.map((task) => task.id));
+    setChosen((current) => on
+      ? [...new Set([...current, ...ids])]
+      : current.filter((id) => !ids.has(id)));
+  };
+
+  const handleSave = async () => {
+    if (!client) return;
+    if (changed === 0) {
+      onClose();
+      return;
+    }
+    setSaving(true);
+    try {
+      const result = await apiFetch('/admin/ping/assign', {
+        method: 'POST',
+        body: JSON.stringify({ client: client.uuid, tasks: chosen, base }),
+      });
+      if (result.success) {
+        toast.success('监控任务已更新');
+        onSaved(Array.isArray(result.tasks) ? result.tasks : []);
+        onClose();
+      } else {
+        toast.error(result.error || '保存失败');
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '保存失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog.Root open={Boolean(client)} onOpenChange={(open) => !open && onClose()}>
+      <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 560 }}>
+        <Dialog.Title>分配监控任务{client ? ` · ${client.name}` : ''}</Dialog.Title>
+
+        <Flex direction="column" gap="3" style={{ padding: '8px 0' }}>
+          <Flex gap="2" align="center" wrap="wrap">
+            <TextField.Root
+              style={{ flex: 1, minWidth: 180 }}
+              placeholder="搜索任务"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+            >
+              <TextField.Slot><Search size={14} /></TextField.Slot>
+            </TextField.Root>
+            <Button size="1" variant="soft" onClick={() => setVisible(true)} disabled={selectableVisible.length === 0}>全选</Button>
+            <Button size="1" variant="soft" color="gray" onClick={() => setVisible(false)} disabled={selectableVisible.length === 0}>清空</Button>
+          </Flex>
+
+          {globalCount > 0 && (
+            <Text size="1" color="gray">
+              「全局」任务跟随所有服务器，不能在这里逐台取消；如需只在部分服务器运行，请在任务里关闭“所有服务器”。
+            </Text>
+          )}
+
+          <Flex direction="column" gap="2" style={{ maxHeight: 400, overflow: 'auto' }}>
+            {tasks.length === 0 ? (
+              <Text color="gray" align="center" style={{ display: 'block', padding: 24 }}>暂无 Ping 任务，请先添加任务</Text>
+            ) : visibleTasks.length === 0 ? (
+              <Text color="gray" align="center" style={{ display: 'block', padding: 24 }}>没有匹配的任务</Text>
+            ) : visibleTasks.map((task) => {
+              const isGlobal = task.all_clients;
+              const selected = isGlobal || chosen.includes(task.id);
+              return (
+                <Box
+                  key={task.id}
+                  style={{
+                    padding: 10,
+                    borderRadius: 6,
+                    cursor: isGlobal ? 'not-allowed' : 'pointer',
+                    opacity: isGlobal ? 0.75 : 1,
+                    border: selected ? '1px solid var(--blue-8)' : '1px solid var(--gray-5)',
+                    background: selected ? 'var(--blue-2)' : 'var(--color-panel-solid)',
+                  }}
+                  onClick={() => { if (!isGlobal) toggle(task.id); }}
+                >
+                  <Flex align="center" gap="2">
+                    <Checkbox
+                      checked={selected}
+                      disabled={isGlobal}
+                      onClick={(event) => event.stopPropagation()}
+                      onCheckedChange={() => { if (!isGlobal) toggle(task.id); }}
+                    />
+                    <Flex direction="column" style={{ minWidth: 0, flex: 1 }}>
+                      <Flex align="center" gap="2">
+                        <Text size="2" weight="medium" truncate>{task.name}</Text>
+                        <Badge size="1" variant="soft">{task.type.toUpperCase()}</Badge>
+                        {isGlobal && <Badge size="1" variant="soft" color="green">全局</Badge>}
+                      </Flex>
+                      <Text size="1" color="gray" truncate style={{ fontFamily: 'monospace' }}>{task.target}</Text>
+                    </Flex>
+                  </Flex>
+                </Box>
+              );
+            })}
+          </Flex>
+        </Flex>
+
+        <Flex gap="3" justify="between" align="center" mt="4">
+          <Text size="1" color="gray">{changed > 0 ? `待保存 ${changed} 项改动` : '未作改动'}</Text>
+          <Flex gap="3">
+            <Button variant="soft" onClick={onClose}>取消</Button>
+            <Button onClick={handleSave} disabled={saving || changed === 0}>{saving ? '保存中...' : '保存'}</Button>
+          </Flex>
+        </Flex>
+      </Dialog.Content>
+    </Dialog.Root>
+  );
+}
+
 function TaskRow({
   task,
   boundNames,
@@ -294,9 +459,9 @@ function TaskRow({
             className="admin-ping-task-scope"
             size="1"
             color="gray"
-            title={task.all_clients ? '默认应用到全部服务器' : (boundNames || '未绑定服务器')}
+            title={task.all_clients ? '默认应用到全部服务器' : (boundNames || '未分配服务器，暂不运行')}
           >
-            {task.all_clients ? '默认应用到全部服务器' : (boundNames || '未绑定服务器')}
+            {task.all_clients ? '默认应用到全部服务器' : (boundNames || '未分配服务器，暂不运行')}
           </Text>
         </Flex>
       </Table.Cell>
@@ -305,6 +470,8 @@ function TaskRow({
       <Table.Cell>
         {task.all_clients ? (
           <Badge color="green">所有服务器</Badge>
+        ) : isUnboundTask(task) ? (
+          <Badge color="amber" variant="soft">未分配</Badge>
         ) : (
           <Badge color="blue" variant="soft">{task.clients?.length || 0} 台服务器</Badge>
         )}
@@ -344,6 +511,7 @@ export default function AdminPingTasks() {
   const [taskSearch, setTaskSearch] = useState('');
   const [serverSearch, setServerSearch] = useState('');
   const [scopeFilter, setScopeFilter] = useState<TaskScopeFilter>('all');
+  const [assignClient, setAssignClient] = useState<ClientLite | null>(null);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -381,10 +549,16 @@ export default function AdminPingTasks() {
     if (viewMode === 'server') void ensureClients();
   }, [ensureClients, viewMode]);
 
+  // 进入页面就加载服务器列表：任务作用域、按下方的搜索框们一开始就能显示昵称而非 UUID。
+  useEffect(() => {
+    void ensureClients();
+  }, [ensureClients]);
+
   const scopedTasks = useMemo(() => {
     return tasks.filter((task) => {
       if (scopeFilter === 'global' && !task.all_clients) return false;
       if (scopeFilter === 'selected' && task.all_clients) return false;
+      if (scopeFilter === 'unbound' && !isUnboundTask(task)) return false;
       return true;
     });
   }, [tasks, scopeFilter]);
@@ -403,12 +577,15 @@ export default function AdminPingTasks() {
     });
   }, [scopedTasks, clients, taskSearch]);
 
+  // “未分配”本身不属于任何服务器，服务器视图在该筛选下仍显示每台服务器的实际任务。
+  const serverScopedTasks = scopeFilter === 'unbound' ? tasks : scopedTasks;
+
   const serverRows = useMemo(() => {
     return clients.map((client) => ({
       client,
-      boundTasks: scopedTasks.filter((task) => task.all_clients || task.clients?.includes(client.uuid)),
+      boundTasks: serverScopedTasks.filter((task) => task.all_clients || task.clients?.includes(client.uuid)),
     }));
-  }, [clients, scopedTasks]);
+  }, [clients, serverScopedTasks]);
 
   const filteredServerRows = useMemo(() => {
     const query = serverSearch.trim().toLowerCase();
@@ -423,7 +600,8 @@ export default function AdminPingTasks() {
   }, [serverRows, serverSearch]);
 
   const globalTaskCount = tasks.filter((task) => task.all_clients).length;
-  const selectedTaskCount = tasks.length - globalTaskCount;
+  const unboundTaskCount = tasks.filter(isUnboundTask).length;
+  const selectedTaskCount = tasks.length - globalTaskCount - unboundTaskCount;
   const activeSearch = viewMode === 'task' ? taskSearch : serverSearch;
   const currentResultCount = viewMode === 'task' ? filteredTasks.length : filteredServerRows.length;
 
@@ -431,6 +609,15 @@ export default function AdminPingTasks() {
     setEditingTask(null);
     setDialogOpen(true);
     void ensureClients();
+  };
+
+  const openAssign = (client: ClientLite) => {
+    setAssignClient(client);
+  };
+
+  const mergeUpdatedTasks = (updated: PingTask[]) => {
+    if (updated.length === 0) return;
+    setTasks((current) => current.map((item) => updated.find((task) => task.id === item.id) ?? item));
   };
 
   const openEdit = (task: PingTask) => {
@@ -530,6 +717,7 @@ export default function AdminPingTasks() {
                 <Select.Item value="all">全部范围</Select.Item>
                 <Select.Item value="global">全局任务</Select.Item>
                 <Select.Item value="selected">定向任务</Select.Item>
+                <Select.Item value="unbound">未分配</Select.Item>
               </Select.Content>
             </Select.Root>
 
@@ -537,6 +725,7 @@ export default function AdminPingTasks() {
               <Badge variant="soft" color="blue">当前结果 {currentResultCount}</Badge>
               <Badge variant="soft" color="green">全局 {globalTaskCount}</Badge>
               <Badge variant="soft" color="amber">定向 {selectedTaskCount}</Badge>
+              {unboundTaskCount > 0 && <Badge variant="soft" color="gray">未分配 {unboundTaskCount}</Badge>}
             </Flex>
           </div>
         </div>
@@ -605,9 +794,14 @@ export default function AdminPingTasks() {
                       )}
                     </Flex>
                   </Box>
-                  <Badge className="admin-ping-server-count" size="1" variant="soft" color={boundTasks.length > 0 ? 'blue' : 'gray'}>
-                    {boundTasks.length} 项
-                  </Badge>
+                  <Flex align="center" gap="2">
+                    <Badge className="admin-ping-server-count" size="1" variant="soft" color={boundTasks.length > 0 ? 'blue' : 'gray'}>
+                      {boundTasks.length} 项
+                    </Badge>
+                    <Button size="1" variant="soft" onClick={() => openAssign(client)} aria-label={`分配 ${client.name} 的监控任务`}>
+                      <ListChecks size={13} /> 分配任务
+                    </Button>
+                  </Flex>
                 </Flex>
 
                 <div className="admin-ping-server-task-list">
@@ -648,6 +842,13 @@ export default function AdminPingTasks() {
               : [...current, task].sort((a, b) => (a.sort_order || a.id || 0) - (b.sort_order || b.id || 0));
           });
         }}
+      />
+
+      <NodeTasksDialog
+        client={assignClient}
+        tasks={tasks}
+        onClose={() => setAssignClient(null)}
+        onSaved={mergeUpdatedTasks}
       />
 
       <Dialog.Root open={Boolean(deleteTask)} onOpenChange={(open) => !open && setDeleteTask(null)}>

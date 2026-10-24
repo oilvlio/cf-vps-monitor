@@ -4,17 +4,15 @@ import test from 'node:test';
 import { BUNDLED_SUPABASE_MIGRATIONS } from '../../generated/supabase-migrations.ts';
 import { applyApplicationMigrations, createTestDatabase, rpc } from '../../../../scripts/test-support/postgres.mjs';
 
-const migration = await readFile(new URL('../../../../supabase/migrations/4_rpc_api.sql', import.meta.url), 'utf8');
-const generated = BUNDLED_SUPABASE_MIGRATIONS.find(({ version }) => version === '4_rpc_api')?.sql;
+const migration = await readFile(new URL('../../../../supabase/migrations/2_functions.sql', import.meta.url), 'utf8');
+const generated = BUNDLED_SUPABASE_MIGRATIONS.find(({ version }) => version === '2_functions')?.sql;
 assert.ok(generated);
 
 for (const source of [migration, generated]) {
   assert.match(source, /last_notified\s*=\s*case\s+when\s+excluded\.enable\s*=\s*0\s+then\s+null/i);
   assert.match(source, /set\s+last_notified\s*=\s*nullif\(input_time,\s*''\)::timestamptz/i);
   assert.match(source, /drop function if exists public\.cfm_mark_offline_notification_sent\(text, text\);/i);
-  for (const role of ['public', 'anon', 'authenticated']) {
-    assert.match(source, new RegExp(`revoke all on function public\\.cfm_mark_offline_notification_sent\\(text, text, text\\) from ${role};`, 'i'));
-  }
+  assert.match(source, /revoke all on function public\.cfm_mark_offline_notification_sent\(text, text, text\) from public, anon, authenticated;/i);
   assert.match(source, /grant execute on function public\.cfm_mark_offline_notification_sent\(text, text, text\) to service_role/i);
 }
 

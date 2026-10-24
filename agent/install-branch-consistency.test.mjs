@@ -85,16 +85,22 @@ for (const other of rest) {
 
 // 与前端保持同源：后台展示的安装命令从该分支拉取 install.sh，
 // 脚本再从同一分支拉源码，两者必须指向同一个分支。
-// 仓库常量的权威定义在 projectLinks.ts（agentInstallCommand.ts 只是 import 它）。
+// 仓库常量的权威定义在 projectLinks.ts 的 CF_MONITOR_AGENT_REPOSITORY
+//（fork 把 agent 二进制发布到自己的 release，安装脚本必须与它同源；
+// CF_MONITOR_REPOSITORY 只是项目主页链接，仍指向上游）。
 const frontendSource = readFileSync(
   new URL('../frontend/src/utils/projectLinks.ts', import.meta.url),
   'utf8',
 );
-const frontendRepo = readConstant(
-  frontendSource,
-  /CF_MONITOR_REPOSITORY\s*=\s*'([^']+)'/,
-  '前端的仓库常量',
-);
+const frontendAgentRepo = frontendSource.match(
+  /CF_MONITOR_AGENT_REPOSITORY\s*=\s*'([^']+)'/,
+)?.[1];
+const frontendRepo = frontendAgentRepo
+  ?? readConstant(
+    frontendSource,
+    /CF_MONITOR_REPOSITORY\s*=\s*'([^']+)'/,
+    '前端的仓库常量',
+  );
 assert.equal(
   frontendRepo,
   first.repository,

@@ -1,7 +1,7 @@
 // 迁移文件内的「新增列 DDL」必须排在任何引用该列的语句之前。
 //
-// 为什么本地测不出来：全新库由 1_core_schema.sql 的 create table 建好全部列，
-// 4_rpc_api.sql 里的 alter table ... add column 只是幂等兜底，顺序怎么排都无所谓。
+// 为什么本地测不出来：全新库由 1_schema.sql 的 create table 建好全部列，
+// 其中的 alter table ... add column 只是给存量库的幂等兜底，顺序怎么排都无所谓。
 // 只有**存量库**才会走到「列还不存在，就先创建引用它的函数」这条路径。
 //
 // 为什么必须是硬错误而不是延迟报错：language sql 的函数体在 CREATE 时就做完整语义校验，

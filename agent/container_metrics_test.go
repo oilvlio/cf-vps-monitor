@@ -83,68 +83,20 @@ func assertContainerMetricInt(t *testing.T, label string, got *int64, want int64
 	}
 }
 
-func TestContainerMetricsDiskScope(t *testing.T) {
-	for _, tc := range []struct {
-		name, mountinfo, fstype, source string
-		want                            int64
-	}{
-		{"independent ext4", independentContainerMount, "ext4", "/dev/mapper/vg-container", 100},
-		{"independent xfs", "31 20 253:1 / / rw - xfs /dev/mapper/vg-container rw\n", "xfs", "/dev/dm-1", 100},
-		{"shared host directory", sharedContainerMount, "ext4", "/dev/bcache0", -1},
-		{"escaped shared directory", "31 20 253:1 /containers/name\\040space/rootfs / rw - ext4 /dev/vda1 rw\n", "ext4", "/dev/vda1", -1},
-		{"overlay host backing store", "31 20 0:10 / / rw - overlay overlay rw,lowerdir=/lower,upperdir=/upper\n", "overlay", "overlay", -1},
-		{"unproven zfs quota", "31 20 0:10 / / rw - zfs pool/container rw\n", "zfs", "pool/container", -1},
-		{"unproven btrfs subvolume", "31 20 0:10 /@container / rw - btrfs /dev/vda1 rw\n", "btrfs", "/dev/vda1", -1},
-		{"unidentified block source", "31 20 0:10 / / rw - ext4 none rw\n", "ext4", "none", -1},
-		{"conflicting stacked mount", independentContainerMount + "32 20 0:10 / / rw - overlay overlay rw\n", "ext4", "/dev/mapper/vg-container", -1},
-		{"missing root mount", lxcfsUptimeMount, "ext4", "/dev/mapper/vg-container", -1},
-		{"malformed mount evidence", "31 20 253:1 / / rw ext4 /dev/vda1\n", "ext4", "/dev/vda1", -1},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			source := containerMetricFixture(t, tc.mountinfo)
-			source.partitions = func(bool) ([]disk.PartitionStat, error) {
-				return []disk.PartitionStat{{Device: tc.source, Mountpoint: "/", Fstype: tc.fstype}}, nil
-			}
-			var calls int
-			source.diskUsage = func(name string) (*disk.UsageStat, error) {
-				calls++
-				return &disk.UsageStat{Path: name, Used: 20, Total: 100}, nil
-			}
-			used, total := source.diskUsageTotals("", "")
-			wantUsed := int64(20)
-			if tc.want < 0 {
-				wantUsed = -1
-				if calls != 0 {
-					t.Errorf("sampled %d unproven host filesystems", calls)
-				}
-			}
-			assertContainerMetricInt(t, "disk used", used, wantUsed)
-			assertContainerMetricInt(t, "disk total", total, tc.want)
-		})
-	}
-}
-
 func TestContainerMetricsDiskFiltersAndAggregation(t *testing.T) {
 	for _, tc := range []struct {
 		name, include, exclude string
-		container              bool
 		used, total            int64
 	}{
-		{"container cannot count host bind", "", "", true, -1, -1},
-		{"exclude shared bind", "", "/shared", true, 20, 100},
-		{"explicit root", "/", "", true, 20, 100},
-		{"explicit host bind stays unknown", "/shared", "", true, -1, -1},
-		{"exclude wins over include", "/", "/", true, -1, -1},
-		{"bare metal preserves device dedup", "", "", false, 900, 10000},
-		{"bare metal preserves explicit mount sum", "/,/shared", "", false, 920, 10100},
+		{"default dedup keeps the larger filesystem", "", "", 900, 10000},
+		{"exclude shared bind", "", "/shared", 20, 100},
+		{"explicit root", "/", "", 20, 100},
+		{"explicit shared bind", "/shared", "", 900, 10000},
+		{"explicit mounts sum", "/,/shared", "", 920, 10100},
+		{"exclude wins over include", "/", "/", 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			source := containerMetricFixture(t, independentContainerMount+"32 20 253:1 /host/shared /shared rw - ext4 /dev/mapper/vg-container rw\n")
-			if !tc.container {
-				if err := os.Remove(filepath.Join(source.root, "run", "systemd", "container")); err != nil {
-					t.Fatal(err)
-				}
-			}
 			source.partitions = func(bool) ([]disk.PartitionStat, error) {
 				return []disk.PartitionStat{
 					{Device: "/dev/mapper/vg-container", Mountpoint: "/", Fstype: "ext4"},
@@ -171,13 +123,24 @@ func TestContainerMetricsDiskFiltersAndAggregation(t *testing.T) {
 }
 
 func TestContainerMetricsDiskReadFailures(t *testing.T) {
-	for _, name := range []string{"partitions", "mountinfo", "usage", "zero total", "used exceeds total", "overflow", "partial multiple disks"} {
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		used, total int64
+	}{
+		{"partitions", 0, 0},
+		{"missing mountinfo", 20, 100},
+		{"usage", 0, 0},
+		{"zero total", 0, 0},
+		{"used exceeds total", 101, 100},
+		{"overflow", 0, 0},
+		{"partial multiple disks", 20, 100},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			source := containerMetricFixture(t, independentContainerMount)
-			switch name {
+			switch tc.name {
 			case "partitions":
 				source.partitions = func(bool) ([]disk.PartitionStat, error) { return nil, errors.New("denied") }
-			case "mountinfo":
+			case "missing mountinfo":
 				if err := os.Remove(filepath.Join(source.root, "proc", "self", "mountinfo")); err != nil {
 					t.Fatal(err)
 				}
@@ -190,7 +153,6 @@ func TestContainerMetricsDiskReadFailures(t *testing.T) {
 			case "overflow":
 				source.diskUsage = func(string) (*disk.UsageStat, error) { return &disk.UsageStat{Total: 1 << 63}, nil }
 			case "partial multiple disks":
-				writeFileTree(t, source.root, map[string]string{"proc/self/mountinfo": independentContainerMount + "32 20 253:2 / /data rw - xfs /dev/vdb1 rw\n"})
 				source.partitions = func(bool) ([]disk.PartitionStat, error) {
 					return []disk.PartitionStat{{Device: "/dev/mapper/vg-container", Mountpoint: "/", Fstype: "ext4"}, {Device: "/dev/vdb1", Mountpoint: "/data", Fstype: "xfs"}}, nil
 				}
@@ -202,8 +164,8 @@ func TestContainerMetricsDiskReadFailures(t *testing.T) {
 				}
 			}
 			used, total := source.diskUsageTotals("", "")
-			assertContainerMetricInt(t, "used", used, -1)
-			assertContainerMetricInt(t, "total", total, -1)
+			assertContainerMetricInt(t, "used", used, tc.used)
+			assertContainerMetricInt(t, "total", total, tc.total)
 		})
 	}
 }
@@ -294,19 +256,8 @@ func TestContainerMetricsTemperatureScope(t *testing.T) {
 }
 
 func TestContainerMetricsCollectorWiring(t *testing.T) {
-	for _, tc := range []struct {
-		trustedUptime   bool
-		configuredTotal string
-		wantTotal       int64
-	}{
-		{false, "0", -1},
-		{true, "0", -1},
-		{true, "5024000000", 5024000000},
-	} {
-		t.Run(fmt.Sprintf("trusted uptime %t capacity %s", tc.trustedUptime, tc.configuredTotal), func(t *testing.T) {
-			containerDiskConfigFixture(t)
-			t.Setenv(containerDiskConfigEnv, tc.configuredTotal)
-			applyEnvDefaults()
+	for _, trustedUptime := range []bool{false, true} {
+		t.Run(fmt.Sprintf("trusted uptime %t", trustedUptime), func(t *testing.T) {
 			preparer, _ := basicInfoDeliveryFixture(t)
 			previousSource, previousSampler, previousTraffic := nodeMetrics, nodeTemperatureSampler, trafficTracker
 			previousInclude, previousExclude := mountInclude, mountExclude
@@ -315,7 +266,7 @@ func TestContainerMetricsCollectorWiring(t *testing.T) {
 				mountInclude, mountExclude = previousInclude, previousExclude
 			})
 			mountinfo := sharedContainerMount
-			if tc.trustedUptime {
+			if trustedUptime {
 				mountinfo += lxcfsUptimeMount
 			}
 			nodeMetrics = containerMetricFixture(t, mountinfo)
@@ -338,21 +289,21 @@ func TestContainerMetricsCollectorWiring(t *testing.T) {
 			t.Setenv("PATH", t.TempDir())
 			report := collectReportWithInterval(3)
 			preparer.attachBasicInfoIfDue(&report, time.Now())
-			wantBasicTotal := max(tc.wantTotal, 0)
-			if report.BasicInfo == nil || report.BasicInfo.DiskTotal != wantBasicTotal {
-				t.Errorf("basic disk total did not match verified capacity: %#v", report.BasicInfo)
+			if report.BasicInfo == nil || report.BasicInfo.DiskTotal != 1055735824384 {
+				t.Errorf("basic disk total did not come from statfs: %#v", report.BasicInfo)
 			}
 			wantUptime, wantBasicUptime := int64(-1), int64(0)
-			if tc.trustedUptime {
+			if trustedUptime {
 				wantUptime, wantBasicUptime = 123, 123
 			}
 			assertContainerMetricInt(t, "report uptime", report.Uptime, wantUptime)
 			if report.BasicInfo != nil && report.BasicInfo.Uptime != wantBasicUptime {
 				t.Errorf("basic uptime = %d, want %d", report.BasicInfo.Uptime, wantBasicUptime)
 			}
-			assertContainerMetricInt(t, "reported total", report.DiskTotal, tc.wantTotal)
-			if report.Disk != nil || report.Temp != nil || reads.Load() != 0 {
-				t.Error("normal report collector retained host disk or temperature")
+			assertContainerMetricInt(t, "reported used", report.Disk, 12951896064)
+			assertContainerMetricInt(t, "reported total", report.DiskTotal, 1055735824384)
+			if report.Temp != nil || reads.Load() != 0 {
+				t.Error("container report retained a host temperature reading")
 			}
 			data, err := json.Marshal(report)
 			if err != nil {
@@ -362,10 +313,8 @@ func TestContainerMetricsCollectorWiring(t *testing.T) {
 			if err := json.Unmarshal(data, &fields); err != nil {
 				t.Fatal(err)
 			}
-			for _, name := range []string{"disk", "temp"} {
-				if string(fields[name]) != "null" {
-					t.Errorf("prepared report %s = %s, want null", name, fields[name])
-				}
+			if string(fields["disk"]) != "12951896064" || string(fields["temp"]) != "null" {
+				t.Errorf("prepared report disk=%s temp=%s", fields["disk"], fields["temp"])
 			}
 			if report.ReportInterval != 3 || report.Timestamp <= 0 || report.RAMTotal <= 0 {
 				t.Error("normal interval, timestamp or memory collection was lost")

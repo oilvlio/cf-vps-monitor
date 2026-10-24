@@ -4,24 +4,14 @@ import { BUNDLED_SUPABASE_MIGRATIONS } from '../../generated/supabase-migrations
 
 const migrationsUrl = new URL('../../../../supabase/migrations/', import.meta.url);
 const migrationFiles = (await readdir(migrationsUrl)).filter((name) => name.endsWith('.sql')).sort();
-assert.deepEqual(migrationFiles, [
-  '1_core_schema.sql',
-  '2_security_access.sql',
-  '3_feature_schema.sql',
-  '4_rpc_api.sql',
-  '5_runtime_defaults.sql',
-]);
-assert.deepEqual(BUNDLED_SUPABASE_MIGRATIONS.map(({ version }) => version), [
-  '1_core_schema',
-  '2_security_access',
-  '3_feature_schema',
-  '4_rpc_api',
-  '5_runtime_defaults',
-]);
+const expectedMigrations = ['1_schema', '2_functions'];
+assert.deepEqual(migrationFiles, expectedMigrations.map((name) => `${name}.sql`));
+assert.deepEqual(BUNDLED_SUPABASE_MIGRATIONS.map(({ version }) => version), expectedMigrations);
 
-const featureSchemaSql = await readFile(new URL('3_feature_schema.sql', migrationsUrl), 'utf8');
-const migrationSql = await readFile(new URL('../../../../supabase/migrations/4_rpc_api.sql', import.meta.url), 'utf8');
-const runtimeDefaultsSql = await readFile(new URL('5_runtime_defaults.sql', migrationsUrl), 'utf8');
+// 1_schema.sql：表 / 列 / 约束 / 默认数据（全新安装终态）；2_functions.sql：全部 RPC 与其权限。
+const featureSchemaSql = await readFile(new URL('1_schema.sql', migrationsUrl), 'utf8');
+const migrationSql = await readFile(new URL('2_functions.sql', migrationsUrl), 'utf8');
+const runtimeDefaultsSql = featureSchemaSql;
 const generatedSql = await readFile(new URL('../../generated/supabase-migrations.ts', import.meta.url), 'utf8');
 const agentRoutesSql = await readFile(new URL('../../routes/client.ts', import.meta.url), 'utf8');
 const allMigrationSql = await Promise.all(migrationFiles.map((name) => readFile(new URL(name, migrationsUrl), 'utf8'))).then((sources) => sources.join('\n'));
@@ -43,12 +33,9 @@ assert.match(migrationSql, /create or replace function public\.cfm_rotate_client
 assert.doesNotMatch(featureSchemaSql, /create or replace function public\.cfm_(?:create_client|rotate_client_token)\(/i);
 assert.doesNotMatch(runtimeDefaultsSql, /create or replace function public\.cfm_(?:create_client|rotate_client_token)\(/i);
 
-for (const source of [migrationSql, generatedSql]) {
-  assert.doesNotMatch(source, /revoke all on function public\.cfm_public_website_monitor\(integer, integer\)/);
-  assert.doesNotMatch(source, /grant execute on function public\.cfm_public_website_monitor\(integer, integer\)/);
-}
-
-assert.match(migrationSql, /drop function if exists public\.cfm_public_website_monitor\(integer, integer\);/);
+// 网站监控已下线：迁移文件里不得再出现任何 website 对象（独立为库的遗留表不归迁移管）。
+assert.doesNotMatch(migrationSql, /website/i);
+assert.doesNotMatch(featureSchemaSql, /website/i);
 
 const mfaSources = [featureSchemaSql + migrationSql, generatedSql];
 const mfaFunctions = [
@@ -67,9 +54,7 @@ for (const source of mfaSources) {
 
   for (const functionName of mfaFunctions) {
     assert.match(source, new RegExp(`create or replace function public\\.${functionName}\\(`, 'i'));
-    assert.match(source, new RegExp(`revoke all on function public\\.${functionName}\\([^;]+\\) from public;`, 'i'));
-    assert.match(source, new RegExp(`revoke all on function public\\.${functionName}\\([^;]+\\) from anon;`, 'i'));
-    assert.match(source, new RegExp(`revoke all on function public\\.${functionName}\\([^;]+\\) from authenticated;`, 'i'));
+    assert.match(source, new RegExp(`revoke all on function public\\.${functionName}\\([^;]+\\) from public, anon, authenticated;`, 'i'));
     assert.match(source, new RegExp(`grant execute on function public\\.${functionName}\\([^;]+\\) to service_role;`, 'i'));
   }
 }
@@ -87,9 +72,7 @@ assert.match(runtimeDefaultsSql, /\('webhook_url', ''\)/i);
 // 这里锁三件事：函数在（且两份 SQL 一致）、on conflict 分支在、比较方向没被写反。
 for (const source of [migrationSql, generatedSql]) {
   assert.match(source, /create or replace function public\.cfm_try_claim_audit_throttle\(/i);
-  for (const role of ['public', 'anon', 'authenticated']) {
-    assert.match(source, new RegExp(`revoke all on function public\\.cfm_try_claim_audit_throttle\\([^;]+\\) from ${role};`, 'i'));
-  }
+  assert.match(source, /revoke all on function public\.cfm_try_claim_audit_throttle\([^;]+\) from public, anon, authenticated;/i);
   assert.match(source, /grant execute on function public\.cfm_try_claim_audit_throttle\([^;]+\) to service_role;/i);
 }
 const throttleBody = migrationSql.match(

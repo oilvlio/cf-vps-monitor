@@ -19,13 +19,13 @@ async function fixture({ sameUuid = false, removed = false, includeClients = tru
   let failSync = syncFails;
   const db = {
     getBackupConfigurationSnapshot: async () => ({ clients: structuredClone(clients), settings: { record_enabled: 'false' },
-      ping_tasks: [], website_monitors: [], offline_notifications: [], expiry_notifications: [], load_notifications: [] }),
+      ping_tasks: [], offline_notifications: [], expiry_notifications: [], load_notifications: [] }),
     listClients: async () => structuredClone(clients),
     listPublicClientRows: async () => structuredClone(clients),
     getAllSettings: async () => ({ record_enabled: 'false' }),
     getSettingsByKeys: async () => ({ record_enabled: 'false' }),
     getSetting: async () => null, setSetting: async () => {},
-    listPingTasks: async () => [], listWebsiteMonitors: async () => [], listAgentWebsiteProbeTasks: async () => [],
+    listPingTasks: async () => [],
     listOfflineNotifications: async () => [], listExpiryNotifications: async () => [], listLoadNotifications: async () => [],
     restoreBackupData: async (_db, backup) => {
       restoreCalls += 1;

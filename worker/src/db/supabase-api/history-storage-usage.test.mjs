@@ -10,14 +10,7 @@ test('AUD-13 deleted rows release the live-data budget even while allocated file
       insert into records(client,time) select 'synthetic-node', '2026-09-01'::timestamptz + n * interval '1 second'
         from generate_series(1,36000) n;
     `);
-    const hasUsage = (await database.query("select to_regprocedure('public.cfm_history_storage_usage()') is not null as present")).rows[0].present;
-    const readUsage = async () => {
-      if (hasUsage) return rpc(database, 'cfm_history_storage_usage');
-      // The released capacity gate consumes the allocated-byte RPC directly.
-      const sizes = await rpc(database, 'cfm_history_storage_bytes');
-      const counts = await rpc(database, 'cfm_history_storage_counts');
-      return { live_rows: Object.values(counts).reduce((a, b) => a + b, 0), allocated_bytes: sizes.total, estimated_live_storage_bytes: sizes.total };
-    };
+    const readUsage = async () => rpc(database, 'cfm_history_storage_usage');
     const before = await readUsage();
     await database.exec('delete from records where id > 1;');
     const after = await readUsage();

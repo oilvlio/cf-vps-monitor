@@ -6,14 +6,14 @@ import Flag from './Flag';
 import PriceTags from './PriceTags';
 import type { HomePingNode } from '../utils/homePing';
 import { DEFAULT_HOME_PING_SAMPLE_COUNT, homePingHead, homePingSlots, latencyLevel } from '../utils/homePing';
-import { diskUsagePresentation, formatLastReport, formatLoadValue, formatMetricBytes, formatMetricSpeed, formatMetricUptime, metricNumber, resourceUsage, type NodeStatus } from '../utils/nodeMetrics';
+import { diskUsagePresentation, formatLastReport, formatLoadValue, formatMetricBytes, formatMetricSpeed, formatMetricUptimeCn, metricNumber, resourceUsage, type NodeStatus } from '../utils/nodeMetrics';
 import { formatTrafficLimitLabel, parseTrafficLimitType } from '../utils/traffic';
 import { ClientInfo, LiveRecord } from '../types';
 import { getOSDisplay } from '../utils/osIcon';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { formatCpuSpec } from '../utils/cpuFormat';
 import { parseMonitorTags } from '../utils/tags';
-import { getExpiryInfo } from '../utils/billing';
+import { getExpiryInfo, getExpiryRemaining } from '../utils/billing';
 
 interface NodeCardProps {
   client: ClientInfo;
@@ -77,15 +77,14 @@ function formatPercent(value: number | null) {
   return `${clamped.toFixed(clamped < 10 ? 1 : 0)}%`;
 }
 
-const LP_DOT_COUNT = 20;
-
-function LpDotBar({ percent, level }: { percent: number | null; level: string }) {
-  const lit = percent === null ? 0 : Math.round((clampPercent(percent) / 100) * LP_DOT_COUNT);
+// 连续细条：纯色填充，颜色只随档位（正常 / 偏高 / 过高）切换，不做渐变。
+function LpBar({ percent, level }: { percent: number | null; level: string }) {
+  const width = percent === null ? 0 : clampPercent(percent);
+  // 有用量但很小时保留一点可见宽度，免得条看起来是空的。
+  const shown = width > 0 ? Math.max(width, 1.5) : 0;
   return (
-    <span className="lp-dots" data-level={level} aria-hidden="true">
-      {Array.from({ length: LP_DOT_COUNT }, (_, i) => (
-        <i key={i} className="lp-dot" data-lit={i < lit ? 'true' : 'false'} />
-      ))}
+    <span className="lp-bar" data-level={level} aria-hidden="true">
+      <i className="lp-bar-fill" style={{ width: `${shown}%` }} />
     </span>
   );
 }
@@ -110,7 +109,7 @@ function LpMetric({
         <span className="lp-metric-label">{icon}{label}</span>
         <span className="lp-metric-value" data-load={level}>{value}</span>
       </div>
-      <LpDotBar percent={percent} level={level} />
+      <LpBar percent={percent} level={level} />
     </div>
   );
 }
@@ -190,7 +189,8 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
   const downloadSpeed = formatMetricSpeed(d.net_in);
   const osConfig = getOSDisplay(client.os || '');
   const trafficLimitLabel = formatTrafficLimitLabel(client.traffic_limit, client.traffic_limit_type);
-  const uptimeLabel = formatMetricUptime(d.uptime);
+  const uptimeLabel = `${nodeStatus === 'offline' ? '上报时' : ''}在线${formatMetricUptimeCn(d.uptime)}`;
+  const expiry = getExpiryRemaining(client.expired_at);
   const cpuTitle = formatCpuSpec(client.cpu_name, client.cpu_cores);
 
   const trafficUsed = (() => {
@@ -206,7 +206,7 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
     }
   })();
   const trafficPct = client.traffic_limit > 0 && trafficUsed !== null ? Math.min(100, (trafficUsed / client.traffic_limit) * 100) : undefined;
-  const quotaLit = trafficPct === undefined ? 0 : (trafficUsed !== null && trafficUsed > 0 ? Math.max(1, Math.round((trafficPct / 100) * LP_DOT_COUNT)) : 0);
+  const quotaLevel = trafficPct === undefined ? 'none' : getUsageLevel(trafficPct);
   const hasBillingInfo = (client.price !== undefined && client.price !== 0) || Boolean(getExpiryInfo(client.expired_at).label);
 
   return (
@@ -268,7 +268,7 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
                 currency={client.currency}
                 expired_at={client.expired_at}
                 showTags={false}
-                showExpiry
+                showExpiry={false}
               />
             </span>
             <NodeIpBadges client={client} className="node-card-title-ip-badges" />
@@ -284,33 +284,33 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
               <LpMetric icon={<Activity size={14} />} label="负载" value={formatLoadValue(load1)} title={loadTitle} percent={loadPct} />
             </div>
 
-            <div className="lp-net">
-              <div className="lp-net-col">
-                <div className="lp-net-head"><span className="lp-net-dir">实时速率</span></div>
-                <div className="lp-net-foot"><span className="lp-net-dir is-up"><ArrowUp size={14} />上行</span><span>{uploadSpeed}</span></div>
-                <div className="lp-net-foot"><span className="lp-net-dir is-down"><ArrowDown size={14} />下行</span><span>{downloadSpeed}</span></div>
-              </div>
-              <div className="lp-net-col">
-                <div className="lp-net-head"><span className="lp-net-dir">累计流量</span></div>
-                <div className="lp-net-foot"><span className="lp-net-dir is-up"><ArrowUp size={14} />上行</span><span>{formatMetricBytes(totalUp)}</span></div>
-                <div className="lp-net-foot"><span className="lp-net-dir is-down"><ArrowDown size={14} />下行</span><span>{formatMetricBytes(totalDown)}</span></div>
-              </div>
+            <div className="lp-info">
+              <span className="lp-info-head" />
+              <span className="lp-info-head is-end">实时</span>
+              <span className="lp-info-head is-end">累计</span>
+              <span className="lp-info-head lp-life-cell" />
+
+              <span className="lp-net-dir is-up"><ArrowUp size={13} />上行</span>
+              <span className="lp-info-val">{uploadSpeed}</span>
+              <span className="lp-info-val">{formatMetricBytes(totalUp)}</span>
+              <span className="lp-life-cell" title={uptimeLabel}>{uptimeLabel}</span>
+
+              <span className="lp-net-dir is-down"><ArrowDown size={13} />下行</span>
+              <span className="lp-info-val">{downloadSpeed}</span>
+              <span className="lp-info-val">{formatMetricBytes(totalDown)}</span>
+              <span className="lp-life-cell" data-tone={expiry.color} title={expiry.text}>{expiry.text}</span>
             </div>
 
             <div className="lp-quota" title={trafficLimitLabel || '月度流量'}>
               <div className="lp-quota-head">
-                <span className="lp-quota-label">在线时长 {nodeStatus === 'offline' ? '(上报时) ' : ''}{uptimeLabel}</span>
+                <span className="lp-quota-label">流量</span>
                 <span className="lp-quota-usage">
                   {client.traffic_limit > 0
                     ? `${formatMetricBytes(trafficUsed)} / ${formatMetricBytes(client.traffic_limit)}`
                     : trafficLimitLabel || '流量未限'}
                 </span>
               </div>
-              <div className="lp-quota-track" aria-hidden="true">
-                {Array.from({ length: LP_DOT_COUNT }, (_, i) => (
-                  <span key={i} className="lp-quota-seg" data-lit={trafficLimitLabel ? (i < quotaLit ? 'true' : 'false') : undefined} data-pos={i} />
-                ))}
-              </div>
+              <LpBar percent={trafficPct ?? null} level={quotaLevel} />
             </div>
 
             {homePing && <LpPingRows data={homePing} sampleCount={homePingSampleCount} />}

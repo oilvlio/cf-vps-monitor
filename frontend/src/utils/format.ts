@@ -34,6 +34,14 @@ export const formatUptime = (seconds: number): string => {
   return `${Math.floor(seconds / 3600)}h`;
 };
 
+// 首页卡片用的中文时长：满 1 天显示「N天」，不足 1 天显示「N小时」，不足 1 小时显示「0小时」。
+export const formatUptimeCn = (seconds: number): string => {
+  if (!seconds || seconds < 0) return '0小时';
+  const d = Math.floor(seconds / 86400);
+  if (d >= 1) return `${d}天`;
+  return `${Math.floor(seconds / 3600)}小时`;
+};
+
 export const formatPercent = (value: number, total: number): number => {
   if (!total || total === 0) return 0;
   return Math.min(100, (value / total) * 100);

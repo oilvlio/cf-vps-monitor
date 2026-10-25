@@ -1,5 +1,5 @@
 import type { LiveDataMap, LiveRecord } from '../types';
-import { formatBytes, formatSpeed, formatUptime } from './format';
+import { formatBytes, formatSpeed, formatUptime, formatUptimeCn } from './format';
 
 export type NodeStatus = 'online' | 'offline' | 'unknown';
 
@@ -53,6 +53,11 @@ export function formatMetricSpeed(value: unknown): string {
 export function formatMetricUptime(value: unknown): string {
   const metric = metricNumber(value);
   return metric === null ? '—' : formatUptime(metric);
+}
+
+export function formatMetricUptimeCn(value: unknown): string {
+  const metric = metricNumber(value);
+  return metric === null ? '—' : formatUptimeCn(metric);
 }
 
 // CPU 负载单值：保留两位小数；null/非法显示破折号（与「不可用」口径一致，不补 0）。

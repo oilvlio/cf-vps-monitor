@@ -5940,12 +5940,12 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   padding-top: 8px;
 }
 .lp-body .lp-stack.rt-Flex {
-  gap: 7px;
+  gap: 6px;
 }
 .lp-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px 12px;
+  gap: 6px 14px;
 }
 .lp-grid[data-cols='2'] {
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -5953,7 +5953,7 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
 .lp-metric {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3px;
   min-width: 0;
 }
 .lp-metric-head {
@@ -5989,55 +5989,79 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.lp-dots {
-  display: flex;
-  gap: 2px;
-  height: 11px;
-}
-.lp-dot {
-  flex: 1;
-  min-width: 0;
-  border-radius: 2px;
+/* 连续细条：资源 / 流量配额共用，纯色填充 */
+.lp-bar {
+  display: block;
+  height: 5px;
+  border-radius: 999px;
   background: var(--monitor-ring-track);
+  overflow: hidden;
 }
-.lp-dots[data-level='normal'] .lp-dot[data-lit='true'] {
+.lp-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
   background: var(--monitor-secondary);
+  transition: width 0.3s ease;
 }
-.lp-dots[data-level='warm'] .lp-dot[data-lit='true'] {
+.lp-bar[data-level='warm'] .lp-bar-fill {
   background: var(--monitor-warning);
 }
-.lp-dots[data-level='hot'] .lp-dot[data-lit='true'] {
+.lp-bar[data-level='hot'] .lp-bar-fill {
   background: var(--monitor-danger);
 }
-.lp-dots[data-level='none'] .lp-dot {
-  background: var(--monitor-ring-track);
-}
 
-/* 上下行速率 + 总量 */
-.lp-net {
+/* 速率 / 累计 / 在线·到期：一张对齐的小表（4 列 × 3 行） */
+.lp-info {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr) minmax(0, 0.95fr);
+  column-gap: 10px;
+  row-gap: 1px;
+  align-items: center;
   border-top: 1px solid var(--monitor-border);
-  padding-top: 8px;
+  padding-top: 6px;
+  color: var(--monitor-muted-text);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
 }
-.lp-net-col {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+.lp-info > span {
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.lp-net-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
+.lp-info-head {
+  font-size: 11px;
+  line-height: 1.3;
+  opacity: 0.8;
+}
+.lp-info-head.is-end,
+.lp-info-val {
+  text-align: right;
+}
+.lp-info-val {
+  color: var(--gray-12);
+}
+.lp-life-cell {
+  padding-left: 10px;
+  border-left: 1px solid var(--monitor-border);
+  color: var(--gray-12);
+  font-weight: 600;
+}
+.lp-life-cell[data-tone='green'] {
+  color: var(--monitor-success);
+}
+.lp-life-cell[data-tone='yellow'] {
+  color: var(--monitor-warning);
+}
+.lp-life-cell[data-tone='red'] {
+  color: var(--monitor-danger);
 }
 .lp-net-dir {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  font-size: 13px;
+  gap: 4px;
+  font-size: 12.5px;
   font-weight: 600;
   color: var(--monitor-muted-text);
 }
@@ -6047,29 +6071,12 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
 .lp-net-dir.is-down {
   color: var(--monitor-success);
 }
-.lp-net-rate {
-  font-size: 15px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  color: var(--gray-12);
-}
-.lp-net-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  color: var(--monitor-muted-text);
-  font-size: 12.5px;
-  font-variant-numeric: tabular-nums;
-}
 
-/* 月度配额点阵条：绿→黄→红按位置着色 */
+/* 月度流量配额：标签 + 用量 + 连续细条 */
 .lp-quota {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  border-top: 1px solid var(--monitor-border);
-  padding-top: 8px;
+  gap: 3px;
 }
 .lp-quota-head {
   display: flex;
@@ -6081,33 +6088,12 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   color: var(--monitor-muted-text);
   font-size: 12.5px;
   font-weight: 600;
-  font-variant-numeric: tabular-nums;
 }
 .lp-quota-usage {
   color: var(--monitor-muted-text);
   font-size: 12.5px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-}
-.lp-quota-track {
-  display: flex;
-  gap: 2px;
-  height: 11px;
-}
-.lp-quota-seg {
-  flex: 1;
-  min-width: 0;
-  border-radius: 2px;
-  background: var(--monitor-ring-track);
-}
-.lp-quota-seg[data-lit='true']:nth-child(-n+12) {
-  background: var(--monitor-success);
-}
-.lp-quota-seg[data-lit='true']:nth-child(n+13):nth-child(-n+17) {
-  background: var(--monitor-warning);
-}
-.lp-quota-seg[data-lit='true']:nth-child(n+18) {
-  background: var(--monitor-danger);
 }
 
 /* 底部单条 ping 点阵行 */

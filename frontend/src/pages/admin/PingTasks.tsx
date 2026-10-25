@@ -291,6 +291,11 @@ function NodeTasksDialog({
   const [search, setSearch] = useState('');
   const [chosen, setChosen] = useState<number[]>([]);
   const [base, setBase] = useState<number[]>([]);
+  // 首页探测点：每台服务器只能有一个，null 表示首页不显示。
+  const [homeTaskId, setHomeTaskId] = useState<number | null>(null);
+  const [initialHomeTaskId, setInitialHomeTaskId] = useState<number | null>(null);
+  const [homeLoaded, setHomeLoaded] = useState(false);
+  const [homeError, setHomeError] = useState('');
   const clientUuid = client?.uuid ?? null;
 
   // 以打开时的勾选作为起点：保存只提交相对它的改动，
@@ -306,6 +311,30 @@ function NodeTasksDialog({
     // 只在切换服务器时重置；任务列表的后续刷新不应冲掉正在进行的勾选。
   }, [clientUuid]);
 
+  // 读取这台服务器当前的首页探测点。读取失败时不允许改动，避免用一个空值覆盖真实设置。
+  useEffect(() => {
+    if (!clientUuid) return undefined;
+    let cancelled = false;
+    setHomeTaskId(null);
+    setInitialHomeTaskId(null);
+    setHomeLoaded(false);
+    setHomeError('');
+    apiFetch('/admin/home-ping')
+      .then((result: { assignments?: Record<string, unknown> }) => {
+        if (cancelled) return;
+        const raw = Number(result?.assignments?.[clientUuid]);
+        const current = Number.isInteger(raw) && raw > 0 ? raw : null;
+        setHomeTaskId(current);
+        setInitialHomeTaskId(current);
+        setHomeLoaded(true);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setHomeError(error instanceof Error && error.message ? error.message : '读取首页探测点失败');
+      });
+    return () => { cancelled = true; };
+  }, [apiFetch, clientUuid]);
+
   const visibleTasks = useMemo(() => {
     const query = search.trim().toLowerCase();
     if (!query) return tasks;
@@ -314,10 +343,21 @@ function NodeTasksDialog({
 
   const selectableVisible = visibleTasks.filter((task) => !task.all_clients);
   const globalCount = tasks.filter((task) => task.all_clients).length;
-  const changed = chosen.filter((id) => !base.includes(id)).length + base.filter((id) => !chosen.includes(id)).length;
+  const assignChanged = chosen.filter((id) => !base.includes(id)).length + base.filter((id) => !chosen.includes(id)).length;
+  const isTaskSelected = (task: PingTask) => task.all_clients || chosen.includes(task.id);
+  // 首页探测点必须是已勾选（或全局）的任务；取消勾选后自动视为不显示。
+  const effectiveHomeId = homeTaskId !== null && tasks.some((task) => task.id === homeTaskId && isTaskSelected(task))
+    ? homeTaskId
+    : null;
+  const homeChanged = homeLoaded && effectiveHomeId !== initialHomeTaskId;
+  const changed = assignChanged + (homeChanged ? 1 : 0);
 
   const toggle = (id: number) => {
     setChosen((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  };
+
+  const toggleHome = (id: number, on: boolean) => {
+    setHomeTaskId(on ? id : null);
   };
 
   const setVisible = (on: boolean) => {
@@ -335,17 +375,35 @@ function NodeTasksDialog({
     }
     setSaving(true);
     try {
-      const result = await apiFetch('/admin/ping/assign', {
-        method: 'POST',
-        body: JSON.stringify({ client: client.uuid, tasks: chosen, base }),
-      });
-      if (result.success) {
-        toast.success('监控任务已更新');
-        onSaved(Array.isArray(result.tasks) ? result.tasks : []);
-        onClose();
-      } else {
-        toast.error(result.error || '保存失败');
+      let updatedTasks: PingTask[] = [];
+      if (assignChanged > 0) {
+        const result = await apiFetch('/admin/ping/assign', {
+          method: 'POST',
+          body: JSON.stringify({ client: client.uuid, tasks: chosen, base }),
+        });
+        if (!result.success) {
+          toast.error(result.error || '保存失败');
+          return;
+        }
+        updatedTasks = Array.isArray(result.tasks) ? result.tasks : [];
+        onSaved(updatedTasks);
+        // 任务分配已落库：即使后面的首页设置失败，也别让下次保存重复提交这部分。
+        setBase(chosen);
       }
+
+      if (homeChanged) {
+        try {
+          await apiFetch('/admin/clients/' + client.uuid + '/home-ping', {
+            method: 'POST',
+            body: JSON.stringify({ task_id: effectiveHomeId }),
+          });
+        } catch (error) {
+          toast.error(error instanceof Error ? `监控任务已保存，但首页显示设置失败：${error.message}` : '监控任务已保存，但首页显示设置失败');
+          return;
+        }
+      }
+      toast.success('监控任务已更新');
+      onClose();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '保存失败');
     } finally {
@@ -377,6 +435,11 @@ function NodeTasksDialog({
               「全局」任务跟随所有服务器，不能在这里逐台取消；如需只在部分服务器运行，请在任务里关闭“所有服务器”。
             </Text>
           )}
+
+          {homeError && <Text size="1" color="red">{homeError}</Text>}
+          <Text size="1" color="gray">
+            勾选任务后，可在该任务右侧打开“首页显示”：首页节点卡片上的延迟 / 丢包色块只读这一个任务。
+          </Text>
 
           <Flex direction="column" gap="2" style={{ maxHeight: 400, overflow: 'auto' }}>
             {tasks.length === 0 ? (
@@ -414,6 +477,21 @@ function NodeTasksDialog({
                       </Flex>
                       <Text size="1" color="gray" truncate style={{ fontFamily: 'monospace' }}>{task.target}</Text>
                     </Flex>
+                    {selected && (
+                      <label
+                        className="admin-ping-home-toggle"
+                        title="首页节点卡片的延迟 / 丢包色块读取这个任务，每台服务器只能选一个"
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        <Text size="1" color={effectiveHomeId === task.id ? 'blue' : 'gray'}>首页显示</Text>
+                        <Switch
+                          size="1"
+                          checked={effectiveHomeId === task.id}
+                          disabled={!homeLoaded}
+                          onCheckedChange={(on) => toggleHome(task.id, on)}
+                        />
+                      </label>
+                    )}
                   </Flex>
                 </Box>
               );
@@ -780,7 +858,7 @@ export default function AdminPingTasks() {
           ) : (
             filteredServerRows.map(({ client, boundTasks }) => (
               <div className="admin-ping-server-card" key={client.uuid}>
-                <Flex className="admin-ping-server-card-head" justify="between" align="start" gap="2">
+                <Flex className="admin-ping-server-card-head" justify="between" align="start" gap="2" wrap="wrap">
                   <Box className="admin-ping-server-main">
                     <Text className="admin-ping-server-name" size="2" weight="bold" title={client.name}>
                       {client.name}
@@ -794,7 +872,7 @@ export default function AdminPingTasks() {
                       )}
                     </Flex>
                   </Box>
-                  <Flex align="center" gap="2">
+                  <Flex className="admin-ping-server-actions" align="center" gap="2">
                     <Badge className="admin-ping-server-count" size="1" variant="soft" color={boundTasks.length > 0 ? 'blue' : 'gray'}>
                       {boundTasks.length} 项
                     </Badge>

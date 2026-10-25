@@ -111,13 +111,14 @@ test('node state: explicit unavailable fields override metadata while missing fi
   assert.equal(formatMetricUptime(0), '0h');
 });
 
-test('node state: uptime only shows days and hours, never minutes or seconds', () => {
+test('node state: uptime shows a single unit — d when >= 1 day, otherwise h', () => {
   const { formatMetricUptime } = productionModule('src/utils/nodeMetrics.ts');
   assert.equal(formatMetricUptime(59), '0h');
   assert.equal(formatMetricUptime(3599), '0h');
   assert.equal(formatMetricUptime(3600), '1h');
   assert.equal(formatMetricUptime(5 * 3600 + 59 * 60 + 59), '5h');
   assert.equal(formatMetricUptime(86400), '1d');
-  assert.equal(formatMetricUptime(3 * 86400 + 5 * 3600 + 12 * 60 + 7), '3d 5h');
-  assert.equal(formatMetricUptime(120 * 86400 + 23 * 3600), '120d 23h');
+  assert.equal(formatMetricUptime(86400 - 1), '23h');
+  assert.equal(formatMetricUptime(3 * 86400 + 5 * 3600 + 12 * 60 + 7), '3d');
+  assert.equal(formatMetricUptime(120 * 86400 + 23 * 3600), '120d');
 });

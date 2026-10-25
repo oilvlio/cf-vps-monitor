@@ -26,16 +26,12 @@ export const formatSpeed = (bytes: number): string => {
   return `${val.toFixed(decimals)} ${units[i]}`;
 };
 
-// 运行时长只精确到小时：显示 d / h，不再显示分钟和秒（不足 1 小时显示 0h）。
+// 运行时长只显示一个单位：满 1 天显示 d（如 12d），不足 1 天显示 h（如 5h），不足 1 小时显示 0h。
 export const formatUptime = (seconds: number): string => {
   if (!seconds || seconds < 0) return '0h';
   const d = Math.floor(seconds / 86400);
-  const h = Math.floor((seconds % 86400) / 3600);
-  const parts: string[] = [];
-  if (d) parts.push(`${d}d`);
-  if (h) parts.push(`${h}h`);
-  if (parts.length === 0) parts.push('0h');
-  return parts.join(' ');
+  if (d >= 1) return `${d}d`;
+  return `${Math.floor(seconds / 3600)}h`;
 };
 
 export const formatPercent = (value: number, total: number): number => {

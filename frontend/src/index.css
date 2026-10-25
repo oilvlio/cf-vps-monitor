@@ -2751,7 +2751,7 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
 
 .admin-ping-server-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   gap: 10px;
 }
 
@@ -2779,8 +2779,26 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   min-width: 0;
 }
 
+/* 名称区占满剩余宽度并允许收缩，操作区不换行；放不下时整体换到下一行，避免按钮溢出卡片 */
 .admin-ping-server-main {
   min-width: 0;
+  flex: 1 1 120px;
+}
+
+.admin-ping-server-actions {
+  flex: 0 0 auto;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.admin-ping-home-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 2px 4px;
+  cursor: pointer;
+  white-space: nowrap;
 }
 
 .admin-ping-server-name {

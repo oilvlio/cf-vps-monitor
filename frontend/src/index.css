@@ -6011,59 +6011,67 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   background: var(--monitor-danger);
 }
 
-/* 速率 / 累计 / 在线·到期：一张对齐的小表（4 列 × 3 行） */
+/* 速率 / 累计 / 在线·剩余：两列，列宽和间距与上面的资源网格（.lp-grid）完全一致，
+   左列 = 上下行（图标 + 实时速率 + 累计流量），右列 = 在线 / 剩余（名称靠左，数值靠右） */
 .lp-info {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr) minmax(0, 0.95fr);
-  column-gap: 10px;
-  row-gap: 1px;
-  align-items: center;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 14px;
   border-top: 1px solid var(--monitor-border);
   padding-top: 6px;
-  color: var(--monitor-muted-text);
-  font-size: 12.5px;
+  font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
-.lp-info > span {
+.lp-info-col {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.lp-info-row {
+  display: grid;
+  align-items: center;
+  column-gap: 8px;
+  min-width: 0;
+  line-height: 1.5;
+}
+.lp-info-net {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+.lp-info-life {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.lp-info-row > span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.lp-info-head {
-  font-size: 11px;
-  line-height: 1.3;
-  opacity: 0.8;
-}
-.lp-info-head.is-end,
-.lp-info-val {
-  text-align: right;
-}
-.lp-info-val {
+.lp-info-speed {
   color: var(--gray-12);
 }
-.lp-life-cell {
-  padding-left: 10px;
-  border-left: 1px solid var(--monitor-border);
+.lp-info-total,
+.lp-info-value {
   color: var(--gray-12);
   font-weight: 600;
+  text-align: right;
 }
-.lp-life-cell[data-tone='green'] {
+.lp-info-label {
+  color: var(--monitor-muted-text);
+  font-weight: 600;
+}
+.lp-info-value[data-tone='green'] {
   color: var(--monitor-success);
 }
-.lp-life-cell[data-tone='yellow'] {
+.lp-info-value[data-tone='yellow'] {
   color: var(--monitor-warning);
 }
-.lp-life-cell[data-tone='red'] {
+.lp-info-value[data-tone='red'] {
   color: var(--monitor-danger);
 }
 .lp-net-dir {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--monitor-muted-text);
 }
 .lp-net-dir.is-up {
   color: var(--monitor-secondary);

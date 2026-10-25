@@ -52,19 +52,20 @@ export function getExpiryInfo(expired_at?: string | number, nowMs = Date.now()):
   return { label: `剩 ${diffDays}天`, color: 'red' };
 }
 
-// 首页卡片的到期文案：「剩余N天」；已到期 / 长期有效单独处理；没设置到期时间返回空文案。
-export function getExpiryRemaining(expired_at?: string | number, nowMs = Date.now()): { text: string; color: 'green' | 'yellow' | 'red' | 'gray' } {
-  if (!expired_at) return { text: '', color: 'gray' };
+// 首页卡片的剩余天数（只返回数值部分，「剩余」标签由卡片自己渲染）：
+// 「N天」/「已到期」/「长期」；没设置到期时间返回空串。
+export function getExpiryRemaining(expired_at?: string | number, nowMs = Date.now()): { value: string; color: 'green' | 'yellow' | 'red' | 'gray' } {
+  if (!expired_at) return { value: '', color: 'gray' };
   const expiredTime = new Date(expired_at).getTime();
-  if (!Number.isFinite(expiredTime)) return { text: '', color: 'gray' };
+  if (!Number.isFinite(expiredTime)) return { value: '', color: 'gray' };
 
   const diffDays = Math.ceil((expiredTime - nowMs) / (1000 * 60 * 60 * 24));
-  if (diffDays <= 0) return { text: '已到期', color: 'red' };
-  if (diffDays > 36500) return { text: '长期有效', color: 'green' };
-  const text = `剩余${diffDays}天`;
-  if (diffDays > 30) return { text, color: 'green' };
-  if (diffDays >= 7) return { text, color: 'yellow' };
-  return { text, color: 'red' };
+  if (diffDays <= 0) return { value: '已到期', color: 'red' };
+  if (diffDays > 36500) return { value: '长期', color: 'green' };
+  const value = `${diffDays}天`;
+  if (diffDays > 30) return { value, color: 'green' };
+  if (diffDays >= 7) return { value, color: 'yellow' };
+  return { value, color: 'red' };
 }
 
 export function getLongTermDateValue(): string {

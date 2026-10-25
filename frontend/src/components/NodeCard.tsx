@@ -189,7 +189,8 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
   const downloadSpeed = formatMetricSpeed(d.net_in);
   const osConfig = getOSDisplay(client.os || '');
   const trafficLimitLabel = formatTrafficLimitLabel(client.traffic_limit, client.traffic_limit_type);
-  const uptimeLabel = `${nodeStatus === 'offline' ? '上报时' : ''}在线${formatMetricUptimeCn(d.uptime)}`;
+  const uptimeLabel = nodeStatus === 'offline' ? '上报时在线' : '在线';
+  const uptimeValue = formatMetricUptimeCn(d.uptime);
   const expiry = getExpiryRemaining(client.expired_at);
   const cpuTitle = formatCpuSpec(client.cpu_name, client.cpu_cores);
 
@@ -285,20 +286,30 @@ export default function NodeCard({ client, live, online, status, lastReportTime,
             </div>
 
             <div className="lp-info">
-              <span className="lp-info-head" />
-              <span className="lp-info-head is-end">实时</span>
-              <span className="lp-info-head is-end">累计</span>
-              <span className="lp-info-head lp-life-cell" />
-
-              <span className="lp-net-dir is-up"><ArrowUp size={13} />上行</span>
-              <span className="lp-info-val">{uploadSpeed}</span>
-              <span className="lp-info-val">{formatMetricBytes(totalUp)}</span>
-              <span className="lp-life-cell" title={uptimeLabel}>{uptimeLabel}</span>
-
-              <span className="lp-net-dir is-down"><ArrowDown size={13} />下行</span>
-              <span className="lp-info-val">{downloadSpeed}</span>
-              <span className="lp-info-val">{formatMetricBytes(totalDown)}</span>
-              <span className="lp-life-cell" data-tone={expiry.color} title={expiry.text}>{expiry.text}</span>
+              <div className="lp-info-col">
+                <div className="lp-info-row lp-info-net" title="上行：实时速率 / 累计流量">
+                  <span className="lp-net-dir is-up" role="img" aria-label="上行"><ArrowUp size={14} /></span>
+                  <span className="lp-info-speed">{uploadSpeed}</span>
+                  <span className="lp-info-total">{formatMetricBytes(totalUp)}</span>
+                </div>
+                <div className="lp-info-row lp-info-net" title="下行：实时速率 / 累计流量">
+                  <span className="lp-net-dir is-down" role="img" aria-label="下行"><ArrowDown size={14} /></span>
+                  <span className="lp-info-speed">{downloadSpeed}</span>
+                  <span className="lp-info-total">{formatMetricBytes(totalDown)}</span>
+                </div>
+              </div>
+              <div className="lp-info-col">
+                <div className="lp-info-row lp-info-life">
+                  <span className="lp-info-label">{uptimeLabel}</span>
+                  <span className="lp-info-value">{uptimeValue}</span>
+                </div>
+                {expiry.value && (
+                  <div className="lp-info-row lp-info-life">
+                    <span className="lp-info-label">剩余</span>
+                    <span className="lp-info-value" data-tone={expiry.color}>{expiry.value}</span>
+                  </div>
+                )}
+              </div>
             </div>
 
             <div className="lp-quota" title={trafficLimitLabel || '月度流量'}>

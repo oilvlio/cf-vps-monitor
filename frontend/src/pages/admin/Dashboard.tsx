@@ -390,7 +390,7 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: Command
     let cancelled = false;
     if (open) {
       // 重置日以后台记录为准：装机命令与节点配置从一开始就一致，
-      // 否则装完立刻会被 policy 改回后台的值，并连带清零当期累计。
+      // 否则装完立刻会被 policy 改回后台的值，探针侧的计费周期窗口会随之来回切换。
       setInstallOptions({
         ...defaultAgentInstallOptions,
         trafficResetDay: String(client.traffic_reset_day || 1),
@@ -742,7 +742,7 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
               />
               <Text size="1" color="gray" style={{ display: 'block', marginTop: 4 }}>
                 每月几号开始重新计算流量，保存后由服务端下发给探针，无需重装。
-                <Text size="1" color="orange"> 改这个值会让当期已累计的流量从此刻重新起算。</Text>
+                <Text size="1" color="gray"> 探针按天记录流量增量，改这个值只会换一个统计窗口，当期流量不会清零（探针保留最近一年的逐日数据）。</Text>
               </Text>
             </Box>
             <Flex className="billing-switch-row" gap="3">

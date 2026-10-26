@@ -2549,6 +2549,21 @@ type trafficInterfaceState struct {
 	Recv uint64 `json:"recv"`
 }
 
+// trafficDayState 是某个本地自然日内的网络流量增量（vnstat 式的日桶）。
+type trafficDayState struct {
+	Up   int64 `json:"up"`
+	Down int64 `json:"down"`
+}
+
+const (
+	// trafficCounterVersion 是 traffic-state.json 的格式版本。
+	// 0/1：只存「当期累计」，改重置日必须清零；2：按天存增量，月度流量由日桶聚合而来。
+	trafficCounterVersion = 2
+	// trafficDayRetentionDays 日桶保留天数。远大于任何一个计费周期（最长约 31 天），
+	// 这样改重置日、跨月、补看上个周期都不会缺数据。
+	trafficDayRetentionDays = 366
+)
+
 type trafficResetState struct {
 	ResetDay          int                              `json:"reset_day"`
 	Period            string                           `json:"period"`
@@ -2566,6 +2581,9 @@ type trafficResetState struct {
 	PolicyResetDay    *int                             `json:"policy_reset_day,omitempty"`
 	Revision          uint64                           `json:"revision,omitempty"`
 	HistoryIncomplete bool                             `json:"history_incomplete,omitempty"`
+	// Days 按本地日期（2006-01-02）存放每天的流量增量，CounterVersion>=2 时有效。
+	// PeriodUp/PeriodDown 在 v2 里只是「按当前重置日聚合后的缓存值」，不再是事实来源。
+	Days map[string]trafficDayState `json:"days,omitempty"`
 }
 
 type trafficResetTracker struct {
@@ -2600,16 +2618,15 @@ func newTrafficResetTracker(resetDay int, token string, scope string) *trafficRe
 	tracker.loaded = true
 	if day := tracker.state.PolicyResetDay; day != nil && *day >= 1 && *day <= 31 {
 		tracker.resetDay, tracker.policyResetDay, tracker.resetDaySource = *day, intPtr(*day), "server"
-	} else if tracker.state.ResetDay >= 1 && tracker.state.ResetDay <= 31 && tracker.state.Period != "" && tracker.state.ResetDaySource != "local" {
+	} else if tracker.state.ResetDay >= 1 && tracker.state.ResetDay <= 31 && (tracker.state.Period != "" || tracker.state.CounterVersion >= 2) && tracker.state.ResetDaySource != "local" {
 		// Legacy state did not record policy origin. Preserve its valid effective cycle until a fresh policy arrives.
 		tracker.resetDay, tracker.resetDaySource = tracker.state.ResetDay, "restored"
 	}
 	return tracker
 }
 
-// setResetDay 更新重置日。改动会让下一次 adjust 因 period key 变化而走重建分支，
-// 当期累计从此刻重新起算——这是设计意图（周期定义变了，旧累计无法换算），
-// 所以后台表单上必须提示用户。
+// setResetDay 更新重置日。流量按天存增量，改重置日只是换一个聚合窗口：
+// 当期总量会按新的周期起点从日桶里重新算出，不会清零，也不会丢历史。
 func (t *trafficResetTracker) setResetDay(day int) bool {
 	if t == nil {
 		return false
@@ -2661,19 +2678,19 @@ func applyTrafficResetDayPolicy(policy agentPolicy) {
 	previous := trafficResetDay
 	trafficResetDay = day
 	if trafficTracker.setPolicyResetDay(day) {
-		log.Printf("traffic reset day updated by server policy: %d -> %d (current period restarts)", previous, day)
+		log.Printf("traffic reset day updated by server policy: %d -> %d (current period is re-aggregated from daily history)", previous, day)
 	}
 }
 
 func trafficCounterScope() string {
-	// 统计口径的版本号。scope 一变，adjust 会走「重建」分支重新起基线；
-	// 不变则旧的 traffic-state.json 基线继续有效。
+	// 统计口径的版本号。scope 一变，adjust 会清掉日桶和各网卡的上次读数、按新口径重新起算；
+	// 不变则旧的日桶与网卡读数继续有效。
 	//
 	// 因此**只要参与统计的网卡集合的算法变了，这里就必须跟着变**——
 	// 不只是用户传的 --nic-include/--nic-exclude。v2 收敛到默认路由网卡、
 	// 并把 wg/tun/ipip/warp 等隧道前缀加进内置排除表，raw 计数因此骤降；
 	// 若沿用 v1 的 scope，旧基线会被当成有效值，负 delta 被当作计数器回绕处理，
-	// 把整个物理网卡计数器再加一遍到当期累计上（一次性虚增）。
+	// 把整个物理网卡计数器再加一遍到当天的日桶上（一次性虚增）。
 	const counterBasisVersion = "v2-default-route"
 	return shortHash(counterBasisVersion + "\n" + strings.TrimSpace(nicInclude) + "\n" + strings.TrimSpace(nicExclude))
 }
@@ -2771,6 +2788,84 @@ func trafficCounterDelta(previous, current uint64) int64 {
 	return int64(current - previous)
 }
 
+func trafficDayKey(at time.Time, location *time.Location) string {
+	return at.In(location).Format(time.DateOnly)
+}
+
+// addDayLocked 把增量记到某一天的日桶里。调用方持有 t.mu。
+func (t *trafficResetTracker) addDayLocked(day string, up int64, down int64) {
+	if up == 0 && down == 0 {
+		return
+	}
+	if t.state.Days == nil {
+		t.state.Days = make(map[string]trafficDayState)
+	}
+	entry := t.state.Days[day]
+	entry.Up += up
+	entry.Down += down
+	t.state.Days[day] = entry
+}
+
+// pruneDaysLocked 丢弃超出保留期的日桶。调用方持有 t.mu。
+func (t *trafficResetTracker) pruneDaysLocked(now time.Time) {
+	cutoff := now.AddDate(0, 0, -trafficDayRetentionDays).Format(time.DateOnly)
+	for day := range t.state.Days {
+		if day < cutoff {
+			delete(t.state.Days, day)
+		}
+	}
+}
+
+// periodTotalsLocked 把 [periodStart, today] 内的日桶加总，就是当前计费周期的流量。
+// 日期是 ISO 格式，字典序即时间序。调用方持有 t.mu。
+func (t *trafficResetTracker) periodTotalsLocked(periodStart string, today string) (int64, int64) {
+	var up, down int64
+	for day, entry := range t.state.Days {
+		if day >= periodStart && day <= today {
+			up += entry.Up
+			down += entry.Down
+		}
+	}
+	return up, down
+}
+
+// migrateLegacyStateLocked 把 v0/v1 的「当期累计」状态折算成日桶，返回应作为本轮基线的网卡读数。
+// 旧状态没有逐日数据，只能把已知的当期累计整块记到它所属周期的起始日上：
+// 这保证升级后当期总量不变；之后若把重置日改得比该起始日更晚，这一块才会被排除在外。
+func (t *trafficResetTracker) migrateLegacyStateLocked(current map[string]interfaceCounters, period string, rawUp int64, rawDown int64, rawCoversPeriod bool) map[string]trafficInterfaceState {
+	state := &t.state
+	previous := state.Interfaces
+	lumpUp, lumpDown := state.PeriodUp, state.PeriodDown
+	if state.CounterVersion == 0 {
+		switch {
+		case state.Period == period && state.LastRawUp == 0 && state.LastRawDown == 0 &&
+			(state.BaselineUp != 0 || state.BaselineDown != 0):
+			lumpUp = maxInt64(0, rawUp-state.BaselineUp)
+			lumpDown = maxInt64(0, rawDown-state.BaselineDown)
+		case state.Period == period && rawCoversPeriod && lumpUp == 0 && lumpDown == 0:
+			// 修复历史上「零基线安装」留下的 0 累计，仅在旧格式迁移时做一次。
+			lumpUp, lumpDown = rawUp, rawDown
+		default:
+			if _, singleCounter := current[""]; singleCounter {
+				previous = map[string]trafficInterfaceState{"": {
+					Sent: uint64(maxInt64(0, state.LastRawUp)), Recv: uint64(maxInt64(0, state.LastRawDown)),
+				}}
+			}
+		}
+	}
+	if state.Period != "" {
+		t.addDayLocked(state.Period, lumpUp, lumpDown)
+	}
+	state.BaselineUp, state.BaselineDown = 0, 0
+	log.Printf("traffic state migrated to daily buckets; prior period totals retained on %s", state.Period)
+	return previous
+}
+
+// adjustInterfacesSinceBoot 累计各网卡的计数器增量，记入「今天」的日桶，
+// 并返回按当前重置日聚合出的当期流量。
+//
+// 与旧实现的区别：事实来源是 Days（逐日增量），当期总量只是聚合结果，
+// 所以改重置日、跨周期都不需要清零或重建基线。
 func (t *trafficResetTracker) adjustInterfacesSinceBoot(current map[string]interfaceCounters, now time.Time, bootedAt time.Time) (int64, int64) {
 	var rawUp, rawDown int64
 	snapshot := make(map[string]trafficInterfaceState, len(current))
@@ -2791,71 +2886,69 @@ func (t *trafficResetTracker) adjustInterfacesSinceBoot(current map[string]inter
 
 	periodStart := lastTrafficResetDate(t.resetDay, now)
 	period := periodStart.Format(time.DateOnly)
+	today := trafficDayKey(now, now.Location())
 	rawCoversPeriod := rawTrafficCoversPeriod(periodStart, now, bootedAt)
 	bootUnix := trafficBootUnix(bootedAt)
+
+	hasHistory := t.state.CounterVersion >= 2 || t.state.Period != ""
+	if hasHistory && t.state.Scope != t.scope {
+		// 统计口径（参与统计的网卡集合）变了：旧口径下的日桶与新口径不可比，
+		// 沿用只会一次性虚增或混用口径，所以和以前一样按新口径重新起算。
+		// 注意这只发生在口径变化时；改重置日不走这里，日桶完整保留。
+		log.Printf("traffic counter basis changed; restarting daily history on the new basis")
+		t.state.Days, t.state.Interfaces = nil, nil
+		t.state.Period, t.state.PeriodUp, t.state.PeriodDown = "", 0, 0
+		t.state.LastRawUp, t.state.LastRawDown, t.state.LastBootUnix = 0, 0, 0
+		t.state.BaselineUp, t.state.BaselineDown = 0, 0
+		t.state.CounterVersion = 0
+		hasHistory = false
+	}
 	bootChanged := bootUnix != 0 && t.state.LastBootUnix != 0 && t.state.LastBootUnix != bootUnix
-	if t.state.ResetDay != t.resetDay || t.state.Period == "" || t.state.Scope != t.scope {
-		t.state = trafficResetState{ResetDay: t.resetDay, Period: period, Scope: t.scope, Revision: t.state.Revision, HistoryIncomplete: t.state.HistoryIncomplete}
+
+	// previous 是上一轮各网卡的读数，没有就意味着这一轮只起基线、不记增量。
+	var previous map[string]trafficInterfaceState
+	switch {
+	case hasHistory && t.state.CounterVersion >= 2:
+		previous = t.state.Interfaces
+	case hasHistory:
+		previous = t.migrateLegacyStateLocked(current, period, rawUp, rawDown, rawCoversPeriod)
+	default:
+		// 全新安装（或口径重启）：若本次开机发生在当期之内，开机以来的累计都属于本期，
+		// 记到开机当天；开机早于当期起点时无法拆分，从 0 开始。
 		if rawCoversPeriod {
-			t.state.PeriodUp, t.state.PeriodDown = rawUp, rawDown
+			t.addDayLocked(trafficDayKey(bootedAt, now.Location()), rawUp, rawDown)
 		}
 		log.Printf("traffic tracker initialized for period %s", period)
+	}
+
+	var deltaUp, deltaDown int64
+	if bootChanged {
+		// 重启后内核计数器清零，现有读数全部是新增量。
+		deltaUp, deltaDown = rawUp, rawDown
 	} else {
-		previous := t.state.Interfaces
-		migratedTotals := false
-		if t.state.CounterVersion == 0 {
-			switch {
-			case t.state.Period == period && t.state.LastRawUp == 0 && t.state.LastRawDown == 0 &&
-				(t.state.BaselineUp != 0 || t.state.BaselineDown != 0):
-				t.state.PeriodUp = maxInt64(0, rawUp-t.state.BaselineUp)
-				t.state.PeriodDown = maxInt64(0, rawDown-t.state.BaselineDown)
-				migratedTotals = true
-			case t.state.Period == period && rawCoversPeriod && t.state.PeriodUp == 0 && t.state.PeriodDown == 0:
-				// Repair the historical zero-install baseline only during old-format migration.
-				t.state.PeriodUp, t.state.PeriodDown = rawUp, rawDown
-				migratedTotals = true
-			default:
-				if _, singleCounter := current[""]; singleCounter {
-					previous = map[string]trafficInterfaceState{"": {
-						Sent: uint64(maxInt64(0, t.state.LastRawUp)), Recv: uint64(maxInt64(0, t.state.LastRawDown)),
-					}}
-				}
+		for name, counter := range snapshot {
+			if prior, exists := previous[name]; exists {
+				deltaUp += trafficCounterDelta(prior.Sent, counter.Sent)
+				deltaDown += trafficCounterDelta(prior.Recv, counter.Recv)
 			}
-			log.Printf("traffic state migrated to per-interface counters; prior period totals retained")
-		}
-		var deltaUp, deltaDown int64
-		if !migratedTotals {
-			for name, counter := range snapshot {
-				if prior, exists := previous[name]; exists {
-					deltaUp += trafficCounterDelta(prior.Sent, counter.Sent)
-					deltaDown += trafficCounterDelta(prior.Recv, counter.Recv)
-				}
-			}
-		}
-		if bootChanged && rawCoversPeriod {
-			deltaUp, deltaDown = rawUp, rawDown
-		}
-		if t.state.Period != period {
-			if rawCoversPeriod {
-				deltaUp, deltaDown = rawUp, rawDown
-			}
-			t.state.Period = period
-			t.state.HistoryIncomplete = false
-			t.state.PeriodUp, t.state.PeriodDown = deltaUp, deltaDown
-			log.Printf("traffic period rotated to %s", period)
-		} else {
-			t.state.PeriodUp += deltaUp
-			t.state.PeriodDown += deltaDown
 		}
 	}
+	t.addDayLocked(today, deltaUp, deltaDown)
+	t.pruneDaysLocked(now)
+
+	if t.state.Period != "" && t.state.Period != period {
+		t.state.HistoryIncomplete = false
+		log.Printf("traffic period rotated to %s", period)
+	}
+	t.state.Period = period
+	t.state.PeriodUp, t.state.PeriodDown = t.periodTotalsLocked(period, today)
 	t.state.ResetDay = t.resetDay
 	t.state.Scope = t.scope
 	t.state.LastRawUp, t.state.LastRawDown = rawUp, rawDown
-	t.state.BaselineUp, t.state.BaselineDown = 0, 0
 	if bootUnix != 0 {
 		t.state.LastBootUnix = bootUnix
 	}
-	t.state.CounterVersion = 1
+	t.state.CounterVersion = trafficCounterVersion
 	t.state.Interfaces = snapshot
 	t.state.ResetDaySource = t.resetDaySource
 	t.state.PolicyResetDay = t.policyResetDay

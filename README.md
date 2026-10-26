@@ -3,7 +3,7 @@
 
 CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承载前端、API、实时连接和定时任务，使用 Durable Objects 协调实时状态，使用 Supabase Postgres 保存配置和历史数据，使用 Go Agent 在服务器上采集指标。
 
-本仓库基于 [kadidalax/cf-vps-monitor](https://github.com/kadidalax/cf-vps-monitor) v2.0.3（上游已归档）维护，按自身需求做过大幅裁剪与增强，细节见文末「与上游差异」。
+本仓库基于 [kadidalax/cf-vps-monitor](https://github.com/kadidalax/cf-vps-monitor) v2.0.3 维护，按自身需求做过大幅裁剪与增强，细节见文末「与上游差异」。
 
 ## 特性
 
@@ -24,7 +24,7 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 
 - **移除**：网站监控（页面、API、定时探测、通知与数据库对象全部下线）；后台「一键同步更新 / 版本更新」入口。
 - **新增**：首页探测点（`/api/ping/home` + 首页色块）；Agent `--allow-host-load` / `--host-cpu-cores`（容器上报宿主负载并按核数折算）；`--disable-gpu`（安装器含开关）；Load5/Load15 三元组上报。
-- **行为调整**：Ping 快照按落库间隔全量落库（含丢包/超时事件即时落库）；容器磁盘直接按 statfs 上报（移除目录扫描 / 配额换算 / root 收集器）；记录与 Ping 历史保留上限 168h（默认 168h）；超过 24h 的 GPU 历史自动并入小时桶 `gpu_rollup` 节省存储。
+- **行为调整**：月度流量改为 vnstat 式按天存增量（Agent 本地保存每个自然日的上/下行增量，月度流量 = 当前计费周期内的日增量之和），在后台修改流量重置日只会换聚合窗口，当期流量不再清零，改回去也能原样找回；Ping 快照按落库间隔全量落库（含丢包/超时事件即时落库）；容器磁盘直接按 statfs 上报（移除目录扫描 / 配额换算 / root 收集器）；记录与 Ping 历史保留上限 168h（默认 168h）；超过 24h 的 GPU 历史自动并入小时桶 `gpu_rollup` 节省存储。
 - **安全基线**：Go 1.26.10（GO-2026-6809）、undici 7.30.1、sharp 0.35.5 overrides。
 - **数据库**：迁移收敛为 2 个「全新安装终态」文件，不含旧版本存量数据迁移。
 

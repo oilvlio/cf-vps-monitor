@@ -29,7 +29,7 @@ func decodeTrafficState(data []byte) (trafficResetState, error) {
 	if err := json.Unmarshal(data, &state); err != nil {
 		return state, err
 	}
-	if state.CounterVersion > 1 {
+	if state.CounterVersion > trafficCounterVersion {
 		return state, errTrafficStateNewerFormat
 	}
 	if state.PolicyResetDay != nil && (*state.PolicyResetDay < 1 || *state.PolicyResetDay > 31) {
@@ -37,6 +37,26 @@ func decodeTrafficState(data []byte) (trafficResetState, error) {
 	}
 	if state.LastRawUp < 0 || state.LastRawDown < 0 || state.PeriodUp < 0 || state.PeriodDown < 0 || state.BaselineUp < 0 || state.BaselineDown < 0 || state.LastBootUnix < 0 || state.CounterVersion < 0 {
 		return state, errors.New("invalid saved traffic counters")
+	}
+	if state.CounterVersion >= 2 {
+		// v2：事实来源是逐日增量，Period 只是缓存。
+		if state.ResetDay < 1 || state.ResetDay > 31 {
+			return state, errors.New("invalid saved reset day")
+		}
+		if state.Period != "" {
+			if _, err := time.Parse(time.DateOnly, state.Period); err != nil {
+				return state, err
+			}
+		}
+		for day, entry := range state.Days {
+			if _, err := time.Parse(time.DateOnly, day); err != nil {
+				return state, fmt.Errorf("invalid saved traffic day %q: %w", day, err)
+			}
+			if entry.Up < 0 || entry.Down < 0 {
+				return state, errors.New("invalid saved traffic day counters")
+			}
+		}
+		return state, nil
 	}
 	if state.Period == "" {
 		if state.PolicyResetDay == nil || state.PeriodUp != 0 || state.PeriodDown != 0 {

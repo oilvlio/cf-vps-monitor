@@ -82,7 +82,7 @@ func TestReauditTrafficUnreadableOrNewerGenerationIsNotDiscarded(t *testing.T) {
 						t.Fatal(err)
 					}
 				} else {
-					original = []byte(`{"counter_version":2,"revision":100}`)
+					original = []byte(`{"counter_version":3,"revision":100}`)
 					if err := os.WriteFile(path, original, 0600); err != nil {
 						t.Fatal(err)
 					}

@@ -1633,16 +1633,16 @@ func TestApplyTrafficResetDayPolicy(t *testing.T) {
 	}
 }
 
-// 改重置日必须让当期累计重新起算——周期定义变了，旧累计无法换算。
-// 后台表单上的提示语就是基于这个行为，行为若变了提示语就成了假话。
-func TestChangingResetDayRestartsPeriod(t *testing.T) {
+// 改重置日只是换聚合窗口：流量按天存增量，当期总量从日桶里按新周期起点重新算出，
+// 不会清零，改回去也能原样找回。后台表单上的提示语就是基于这个行为，行为若变了提示语就成了假话。
+func TestChangingResetDayReaggregatesDailyBuckets(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "traffic-state.json")
 	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", statePath)
 
 	tracker := newTrafficResetTracker(1, "token", "scope")
 	now := time.Date(2026, time.August, 20, 12, 0, 0, 0, time.UTC)
 	booted := time.Date(2026, time.August, 1, 0, 0, 0, 0, time.UTC)
-	tracker.adjustSinceBoot(1_000, 2_000, now, booted)
+	tracker.adjustSinceBoot(1_000, 2_000, now, booted) // 开机以来 1000/2000 记在 8/1
 	up, down := tracker.adjustSinceBoot(5_000, 6_000, now.Add(time.Minute), booted)
 	if up != 5_000 || down != 6_000 {
 		t.Fatalf("period totals = %d/%d, want 5000/6000", up, down)
@@ -1651,13 +1651,19 @@ func TestChangingResetDayRestartsPeriod(t *testing.T) {
 	if !tracker.setResetDay(15) {
 		t.Fatal("setResetDay(15) 应报告发生了变化")
 	}
+	// 新周期自 8/15：8/1 的 1000/2000 落在窗口之外，8/20 的 4000/4000 与新增的 100/100 保留。
 	up, down = tracker.adjustSinceBoot(5_100, 6_100, now.Add(2*time.Minute), booted)
-	if up >= 5_000 || down >= 6_000 {
-		t.Fatalf("period totals = %d/%d, want a restarted period well below the old totals", up, down)
+	if up != 4_100 || down != 4_100 {
+		t.Fatalf("period totals = %d/%d, want 4100/4100 (re-aggregated, not zeroed)", up, down)
 	}
 
 	if tracker.setResetDay(15) {
 		t.Fatal("重复设置同一个值不应报告变化")
+	}
+	tracker.setResetDay(1)
+	up, down = tracker.adjustSinceBoot(5_100, 6_100, now.Add(3*time.Minute), booted)
+	if up != 5_100 || down != 6_100 {
+		t.Fatalf("switching back lost history: %d/%d, want 5100/6100", up, down)
 	}
 }
 

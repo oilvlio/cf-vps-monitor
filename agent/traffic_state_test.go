@@ -76,17 +76,15 @@ func TestAUD22PersistedPolicySurvivesProcessRestart(t *testing.T) {
 			if got.FirstUp != 100 || got.FirstDown != 200 {
 				t.Fatalf("first sample erased persisted policy totals: %+v", got)
 			}
-			if day == 15 && (got.AfterUp != 100 || got.AfterDown != 200) {
-				t.Fatalf("unchanged server policy erased history: %+v", got)
-			}
-			if day != 15 && (got.AfterUp != 0 || got.AfterDown != 0) {
-				t.Fatalf("changed server policy did not restart the period: %+v", got)
+			// 按天存增量后，改重置日只换聚合窗口：9 月 6 日的流量对 15/20/1 号都在当期内，不能清零。
+			if got.AfterUp != 100 || got.AfterDown != 200 {
+				t.Fatalf("changing the server reset day to %d lost current-period traffic: %+v", day, got)
 			}
 		})
 	}
 }
 
-func TestAUD22ExplicitLocalDayChangeStillRestartsPeriod(t *testing.T) {
+func TestAUD22ExplicitLocalDayChangeKeepsTraffic(t *testing.T) {
 	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", filepath.Join(t.TempDir(), "traffic-state.json"))
 	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
 	boot := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
@@ -95,8 +93,8 @@ func TestAUD22ExplicitLocalDayChangeStillRestartsPeriod(t *testing.T) {
 	previous.adjustSinceBoot(1000, 2000, now, boot)
 	changed := newTrafficResetTracker(1, "fixture", "local-scope")
 	up, down := changed.adjustSinceBoot(1000, 2000, now.Add(time.Minute), boot)
-	if up != 0 || down != 0 {
-		t.Fatalf("explicit local cycle change must still restart: %d/%d", up, down)
+	if up != 100 || down != 200 {
+		t.Fatalf("explicit local cycle change must keep traffic: %d/%d", up, down)
 	}
 }
 
@@ -243,7 +241,7 @@ func TestAUD36ReplacementFailureRetainsOldOrNewState(t *testing.T) {
 	}
 }
 
-func TestAUD36RevisionSurvivesIntentionalCycleReset(t *testing.T) {
+func TestAUD36RevisionSurvivesCycleChange(t *testing.T) {
 	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", filepath.Join(t.TempDir(), "traffic-state.json"))
 	previousDay, previousTracker := trafficResetDay, trafficTracker
 	t.Cleanup(func() { trafficResetDay, trafficTracker = previousDay, previousTracker })
@@ -261,7 +259,7 @@ func TestAUD36RevisionSurvivesIntentionalCycleReset(t *testing.T) {
 	trafficTracker.adjustSinceBoot(1100, 2200, now.Add(3*time.Minute), boot)
 	restarted := newTrafficResetTracker(1, "fixture", "persist")
 	up, down := restarted.adjustSinceBoot(1100, 2200, now.Add(4*time.Minute), boot)
-	if up != 100 || down != 200 {
+	if up != 200 || down != 400 {
 		t.Fatalf("old backup overrode the new cycle: %d/%d", up, down)
 	}
 }

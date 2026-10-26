@@ -70,7 +70,8 @@ func (s *pingReportState) nextPingLocked() (PingTask, time.Time, bool) {
 	var due time.Time
 	found := false
 	for _, task := range s.tasks {
-		if task.ID <= 0 || s.pendingPing[task.ID] != nil || s.runningPing[task.ID] != nil {
+		// 上一轮结果是否已被服务端确认与是否该探测无关；只避免同一任务的探测重叠。
+		if task.ID <= 0 || s.runningPing[task.ID] != nil {
 			continue
 		}
 		candidate := time.Time{}
@@ -101,12 +102,12 @@ func (s *pingReportState) launchDueProbes(now time.Time) time.Time {
 		s.probeWorkers.Add(1)
 		s.runningPing[ping.ID] = run
 		s.scheduler.lastRunByTaskID[ping.ID] = now
-		go s.runPingProbe(ctx, ping, run)
+		go s.runPingProbe(ctx, ping, run, now)
 	}
 	return time.Time{}
 }
 
-func (s *pingReportState) runPingProbe(ctx context.Context, task PingTask, run *probeRun) {
+func (s *pingReportState) runPingProbe(ctx context.Context, task PingTask, run *probeRun, startedAt time.Time) {
 	defer s.probeWorkers.Done()
 	defer run.cancel()
 	var value float64
@@ -122,7 +123,7 @@ func (s *pingReportState) runPingProbe(ctx context.Context, task PingTask, run *
 	if s.runningPing[task.ID] == run {
 		delete(s.runningPing, task.ID)
 		if ctx.Err() == nil {
-			s.queuePingResultsLocked([]PingResult{{TaskID: task.ID, Value: value}})
+			s.queuePingResultsLocked([]PingResult{{TaskID: task.ID, Value: value, Timestamp: startedAt.UnixMilli()}})
 		}
 	}
 	s.activeProbes--

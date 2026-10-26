@@ -744,7 +744,7 @@ export default function SettingsGeneral() {
               </div>
               <SettingInput
                 label="历史保留时长（小时）"
-                description="超过该时长的历史记录会被定时清理。上限 168 小时（7 天），填更大的值也会被截断；同时作用于监控历史与 Ping 历史；最近 1 天保留原始采样，之后按 1 小时自动降采样"
+                description="历史数据超过这个小时数就自动删除，最多 168 小时（7 天），填更大也按 7 天算。监控历史和 Ping 历史都适用。最近 1 天的数据保留原始精度，更早的会合并成每小时一个点"
                 value={getSettingValue(settings, 'record_preserve_time', getSettingValue(settings, 'ping_record_preserve_time', String(DEFAULT_RETENTION_HOURS)))}
                 onChange={updateRetentionHours}
                 type="number"
@@ -753,7 +753,7 @@ export default function SettingsGeneral() {
               />
               <SettingInput
                 label="每日预计观看时长（分钟）"
-                description="仅用于下方的用量估算，不影响任何实际行为。按你每天大约打开前台看多久填写"
+                description="只用来算下面的用量估算，不影响实际运行。填你每天大概开着页面多久就行"
                 value={getSettingValue(settings, 'capacity_daily_view_minutes', String(DEFAULT_DAILY_VIEW_MINUTES))}
                 onChange={(value) => updateSetting('capacity_daily_view_minutes', value)}
                 type="number"
@@ -763,7 +763,7 @@ export default function SettingsGeneral() {
 
               <SettingInput
                 label="有人观看时 · 上报间隔（秒）"
-                description="前台有访客在看时，Agent 每隔多久采集并上报一次。只在有人看的时候生效，越小越实时"
+                description="有人开着页面时，每台机器多久汇报一次数据。越小页面数字跳得越勤，但越费额度"
                 value={getSettingValue(settings, 'live_poll_active_interval_sec', String(DEFAULT_ACTIVE_SAMPLE_SEC))}
                 onChange={(value) => updateSetting('live_poll_active_interval_sec', value)}
                 type="number"
@@ -772,7 +772,7 @@ export default function SettingsGeneral() {
               />
               <SettingInput
                 label="无人观看时 · 上报间隔（秒）"
-                description="没有访客在看时的上报间隔，最少 60 秒。绝大多数时间跑的是这一档，它才是实际的采集频率；当前每次上报 1 条，不打包"
+                description="没人看页面时，每台机器多久汇报一次资源数据（CPU、内存等），最少 60 秒；积压的 Ping 结果也随这次上报一起发出。平时基本都处在这一档，所以历史曲线上相邻两个点的间隔主要由它决定"
                 value={getSettingValue(settings, 'live_poll_idle_interval_sec', String(DEFAULT_IDLE_UPLOAD_SEC))}
                 onChange={(value) => updateSetting('live_poll_idle_interval_sec', value)}
                 type="number"
@@ -781,7 +781,7 @@ export default function SettingsGeneral() {
               />
               <SettingInput
                 label="观看状态保持时长（秒）"
-                description="访客离开页面后，仍按「有人观看」的高频维持多久才降回低频。避免刷新页面时频繁切换档位，与连接本身的保活无关"
+                description="最后一个访客离开页面后，还要继续按「有人观看」的快频率汇报这么久，之后才降回慢频率。免得刷新一下页面就快慢来回切换"
                 value={getSettingValue(settings, 'live_poll_active_max_duration_sec', String(DEFAULT_VIEWER_TTL_SEC))}
                 onChange={(value) => updateSetting('live_poll_active_max_duration_sec', value)}
                 type="number"
@@ -790,7 +790,7 @@ export default function SettingsGeneral() {
               />
               <SettingInput
                 label="历史落库最小间隔（秒）"
-                description="两次写入历史之间至少要隔多久，是一道节流下限而非固定频率。实际写入频率 = 本项与上方「上报间隔」中较大的那个——比它小的设置不会生效"
+                description="汇报上来的数据不会每条都存进历史，两次存档之间至少要隔这么久。实际存档间隔取「这一项」和上面「上报间隔」中较大的那个，所以设得比上报间隔还小是没用的"
                 value={getSettingValue(settings, 'record_persist_interval_sec', String(DEFAULT_RECORD_PERSIST_SEC))}
                 onChange={(value) => updateSetting('record_persist_interval_sec', value)}
                 type="number"
@@ -799,7 +799,7 @@ export default function SettingsGeneral() {
               />
               <SettingInput
                 label="Ping 探测与落库间隔（秒）"
-                description="Agent 执行延迟探测的间隔，同时也是 Ping 记录写入历史的间隔；最低 60 秒。与上面的监控落库间隔互相独立"
+                description="每隔多久测一次网络延迟（Ping），最少 60 秒。Agent 严格按这个间隔探测，不等服务端确认；测完的结果先在本地积压，随下一次常规上报一起发出，再按各自的探测时间存进历史。所以上报间隔再长，Ping 也不会少存。和监控数据的存档间隔互不影响"
                 value={getSettingValue(settings, 'ping_record_persist_interval_sec', String(DEFAULT_PING_RECORD_PERSIST_SEC))}
                 onChange={(value) => updateSetting('ping_record_persist_interval_sec', value)}
                 type="number"
@@ -808,7 +808,7 @@ export default function SettingsGeneral() {
               />
               <SettingInput
                 label="历史有效数据预算（字节）"
-                description="当前有效历史数据及索引预留的估算达到该值后暂停历史写入，实时展示继续。它不等于物理文件大小；默认 400MiB，给其他数据留余量"
+                description="历史数据（含索引）的估算占用达到这个大小，就暂停往历史里写新数据，页面实时展示不受影响。这是估算值，不等于数据库文件的实际大小。默认 400MiB，给其他数据留出空间"
                 value={getSettingValue(settings, 'record_high_watermark_bytes', String(DEFAULT_RECORD_HIGH_WATERMARK_BYTES))}
                 onChange={(value) => updateSetting('record_high_watermark_bytes', value)}
                 type="number"
@@ -817,7 +817,7 @@ export default function SettingsGeneral() {
               />
               <SettingInput
                 label="历史写入熔断行数（行）"
-                description="次要熔断线，与容量熔断谁先到谁生效。行数只是容量的粗糙代理且不含索引开销，一般不需要改动"
+                description="第二道保险：历史记录条数达到这个数，也会暂停写入历史，和上面那项谁先到谁生效。条数只是粗略估计，一般不用改"
                 value={getSettingValue(settings, 'record_high_watermark_rows', String(DEFAULT_RECORD_HIGH_WATERMARK_ROWS))}
                 onChange={(value) => updateSetting('record_high_watermark_rows', value)}
                 type="number"
@@ -826,7 +826,7 @@ export default function SettingsGeneral() {
               />
               <SettingInput
                 label="离线确认轮数（轮）"
-                description="连续多少轮判定为离线才真正发出告警，任意一轮判定在线立即清零。定时任务每 2 分钟一轮，默认 3 轮约等于持续 6 分钟离线才告警，用于挡掉瞬时抖动造成的误报"
+                description="后台每 2 分钟检查一次机器在不在线。连续这么多次都没连上，才发离线告警；中间只要有一次连上了就重新计数。默认 3 次，约等于持续离线 6 分钟才告警，用来避免网络抖一下就误报"
                 value={getSettingValue(settings, 'offline_confirm_rounds', String(DEFAULT_OFFLINE_CONFIRM_ROUNDS))}
                 onChange={(value) => updateSetting('offline_confirm_rounds', value)}
                 type="number"

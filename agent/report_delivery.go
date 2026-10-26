@@ -6,8 +6,15 @@ import (
 )
 
 const maxPingResultsPerReport = 50
+
+// 单个任务最多积压多少条未确认结果。服务端长时间不可用时，超出的最旧结果会被丢弃，
+// 避免内存无限增长，也避免恢复连接后一次性补发过多历史。
+const maxBufferedPingResultsPerTask = 60
 const maxReportsPerEnvelope = 300
 
+// pingReportState.pendingPing 给每个任务保存一条先进先出的积压队列：探测不等服务端确认，
+// 结果先存在队列里，随后续上报发出，收到确认后才移除。Report.pingResultSeqs 与
+// Report.PingResults 一一对应，记录每条结果在队列里的序号，用于确认 / 重发时识别它。
 type queuedPingResult struct {
 	result   PingResult
 	sequence uint64
@@ -38,7 +45,7 @@ func (s *pingReportState) invalidateResultsForPolicyLocked(pings []PingTask) {
 func (s *pingReportState) pruneResultOrderLocked() {
 	pingOrder := s.pingOrder[:0]
 	for _, id := range s.pingOrder {
-		if _, ok := s.pendingPing[id]; ok {
+		if len(s.pendingPing[id]) > 0 {
 			pingOrder = append(pingOrder, id)
 		}
 	}
@@ -47,30 +54,37 @@ func (s *pingReportState) pruneResultOrderLocked() {
 
 func (s *pingReportState) queuePingResultsLocked(results []PingResult) {
 	for _, result := range results {
-		if _, exists := s.pendingPing[result.TaskID]; exists {
-			continue
+		queue := s.pendingPing[result.TaskID]
+		if len(queue) == 0 {
+			s.pingOrder = append(s.pingOrder, result.TaskID)
 		}
 		s.nextResultID++
-		s.pendingPing[result.TaskID] = &queuedPingResult{result: result, sequence: s.nextResultID}
-		s.pingOrder = append(s.pingOrder, result.TaskID)
+		queue = append(queue, &queuedPingResult{result: result, sequence: s.nextResultID})
+		if len(queue) > maxBufferedPingResultsPerTask {
+			log.Printf("ping task %d: %d results are waiting for delivery; dropping the oldest", result.TaskID, len(queue))
+			queue = append(queue[:0], queue[len(queue)-maxBufferedPingResultsPerTask:]...)
+		}
+		s.pendingPing[result.TaskID] = queue
 	}
 }
 
+// appendPendingResultsLocked 给 report 附上每个任务最旧的一条尚未发出的结果。
+// 一份 report 对同一任务最多带一条，积压的更多结果由 appendPendingReports 分成后续几份发出，
+// 这样接收端每份 report 恰好对应一轮探测。
 func (s *pingReportState) appendPendingResultsLocked(report *Report) {
 	for _, id := range s.pingOrder {
 		if len(report.PingResults) >= maxPingResultsPerReport {
 			break
 		}
-		result := s.pendingPing[id]
-		if result == nil || result.leased {
-			continue
+		for _, queued := range s.pendingPing[id] {
+			if queued.leased {
+				continue
+			}
+			queued.leased = true
+			report.PingResults = append(report.PingResults, queued.result)
+			report.pingResultSeqs = append(report.pingResultSeqs, queued.sequence)
+			break
 		}
-		result.leased = true
-		if report.pingResultLeases == nil {
-			report.pingResultLeases = make(map[int]uint64)
-		}
-		report.pingResultLeases[id] = result.sequence
-		report.PingResults = append(report.PingResults, result.result)
 	}
 }
 
@@ -84,7 +98,7 @@ func (s *pingReportState) appendPendingReports(first Report) []Report {
 	for {
 		next := first
 		next.PingResults = nil
-		next.pingResultLeases = nil
+		next.pingResultSeqs = nil
 		next.BasicInfo = nil
 		next.basicInfoOwner, next.basicInfoRevision = nil, 0
 		s.appendPendingResultsLocked(&next)
@@ -96,16 +110,27 @@ func (s *pingReportState) appendPendingReports(first Report) []Report {
 	return reports
 }
 
+func (s *pingReportState) hasPendingResultLocked(taskID int, sequence uint64) bool {
+	for _, queued := range s.pendingPing[taskID] {
+		if queued.sequence == sequence {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *pingReportState) currentReportResultsLocked(report Report) Report {
 	report = currentReportBasicInfo(report)
-	if len(report.pingResultLeases) > 0 {
+	if len(report.pingResultSeqs) > 0 {
 		results := make([]PingResult, 0, len(report.PingResults))
-		for _, result := range report.PingResults {
-			if pending := s.pendingPing[result.TaskID]; pending != nil && pending.sequence == report.pingResultLeases[result.TaskID] {
+		seqs := make([]uint64, 0, len(report.pingResultSeqs))
+		for index, result := range report.PingResults {
+			if index < len(report.pingResultSeqs) && s.hasPendingResultLocked(result.TaskID, report.pingResultSeqs[index]) {
 				results = append(results, result)
+				seqs = append(seqs, report.pingResultSeqs[index])
 			}
 		}
-		report.PingResults = results
+		report.PingResults, report.pingResultSeqs = results, seqs
 	}
 	return report
 }
@@ -139,9 +164,22 @@ func (s *pingReportState) acknowledgeReports(reports []Report) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, report := range reports {
-		for id, sequence := range report.pingResultLeases {
-			if pending := s.pendingPing[id]; pending != nil && pending.sequence == sequence {
+		for index, sequence := range report.pingResultSeqs {
+			if index >= len(report.PingResults) {
+				break
+			}
+			id := report.PingResults[index].TaskID
+			queue := s.pendingPing[id]
+			for position, queued := range queue {
+				if queued.sequence == sequence {
+					queue = append(queue[:position], queue[position+1:]...)
+					break
+				}
+			}
+			if len(queue) == 0 {
 				delete(s.pendingPing, id)
+			} else {
+				s.pendingPing[id] = queue
 			}
 		}
 	}

@@ -19,7 +19,7 @@ import {
 import { bestEffortRecordHealthEvent, errorDetail, type StoredHealthComponent } from '../utils/observability';
 import { isPublicIpAddress } from '../utils/request-ip';
 import { unwrapMonitorReportEnvelope } from '../utils/report-envelope';
-import { isRecordPersistDue } from '../utils/record-persist';
+import { isRecordPersistDue, recordPersistThresholdMs } from '../utils/record-persist';
 import { toPublicReport } from '../utils/public-report';
 import { projectAgentClientMetadata, projectClientMetadata } from '../utils/client-metadata';
 import { compactLiveReport, serializedBytes } from '../utils/live-report-state';
@@ -50,6 +50,8 @@ const PING_RECORD_PERSIST_INTERVAL_MS = 120_000;
 const MIN_RECORD_PERSIST_INTERVAL_MS = 3_000;
 const MAX_RECORD_PERSIST_INTERVAL_MS = 3_600_000;
 const MIN_PING_RECORD_PERSIST_INTERVAL_MS = 60_000;
+// 积压的 Ping 结果最多允许比收到时间早多久；与历史最长保留期一致。
+const PING_OBSERVED_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_PING_RECORD_PERSIST_INTERVAL_MS = 3_600_000;
 const RECORD_SETTING_CACHE_MS = 30_000;
 const LIVE_VIEWER_WS_PROTOCOL = 'cf-monitor-viewer';
@@ -304,6 +306,8 @@ interface PingPersistenceResult {
   taskId: number;
   value: number;
   intervalSec?: number;
+  /** Agent 记录的探测开始时间；缺省表示老版本 Agent，沿用收到报告的时间。 */
+  observedAtMs?: number;
 }
 
 interface PingResultState {
@@ -2583,10 +2587,11 @@ export class LiveDataDO {
     const updates: Record<string, PingResultState> = {};
     for (const result of results) {
       const key = this.pingResultStateKey(clientId, result.taskId);
-      const previous = this.pingResultStateCache.get(key) || { lastAcceptedMs: nowMs };
+      const acceptedAtMs = result.observedAtMs ?? nowMs;
+      const previous = this.pingResultStateCache.get(key) || { lastAcceptedMs: acceptedAtMs };
       updates[key] = {
         ...previous,
-        lastAcceptedMs: Math.max(previous.lastAcceptedMs, nowMs),
+        lastAcceptedMs: Math.max(previous.lastAcceptedMs, acceptedAtMs),
       };
     }
     // At most 50 results. Commit their interval state together so a failed
@@ -2683,10 +2688,12 @@ export class LiveDataDO {
       const validated = validatePingResults(result, tasks, clientId);
       if (!validated.ok) return;
 
-      const accepted = await this.filterPingResultsByInterval(clientId, validated.results, tasks, nowMs);
+      const accepted = await this.filterPingResultsByInterval(
+        clientId, this.normalizePingObservedAt(validated.results, nowMs), tasks, nowMs,
+      );
       if (accepted.length === 0) return;
 
-      const time = new Date(nowMs).toISOString();
+      const time = new Date(this.pingSnapshotTimeMs(accepted, nowMs)).toISOString();
       await db.insertPingSnapshot(database, clientId, time, accepted);
       await this.markPingResultsPersisted(clientId, accepted, nowMs);
       await this.recordHotPathHealthOk(
@@ -2739,13 +2746,15 @@ export class LiveDataDO {
           if (!validated.ok) {
             return Response.json({ error: validated.error }, { status: validated.status });
           }
-          accepted = await this.filterPingResultsByInterval(clientId, validated.results, tasks, nowMs);
+          accepted = await this.filterPingResultsByInterval(
+            clientId, this.normalizePingObservedAt(validated.results, nowMs), tasks, nowMs,
+          );
         }
         if (accepted.length === 0) {
           return Response.json({ success: true, accepted: 0, rate_limited: true });
         }
 
-        const time = new Date(nowMs).toISOString();
+        const time = new Date(this.pingSnapshotTimeMs(accepted, nowMs)).toISOString();
         await db.insertPingSnapshot(database, clientId, time, accepted);
         await this.markPingResultsPersisted(clientId, accepted, nowMs);
         await this.recordHotPathHealthOk(
@@ -2819,6 +2828,32 @@ export class LiveDataDO {
     })), nowMs);
   }
 
+  /**
+   * Agent 会把探测结果先积压在本地、随下一次上报一起发来，所以带探测时间的结果
+   * 应按它自己的探测时间记录。晚于收到时间的略微钳到收到时间；早于保留期的直接丢弃
+   * （写进去也会马上被清理）。老版本 Agent 不带时间，保持原样。
+   */
+  private normalizePingObservedAt(results: PingPersistenceResult[], nowMs: number): PingPersistenceResult[] {
+    const oldestMs = nowMs - PING_OBSERVED_MAX_AGE_MS;
+    const normalized: PingPersistenceResult[] = [];
+    for (const result of results) {
+      if (result.observedAtMs === undefined) {
+        normalized.push(result);
+        continue;
+      }
+      if (result.observedAtMs < oldestMs) continue;
+      normalized.push({ ...result, observedAtMs: Math.min(result.observedAtMs, nowMs) });
+    }
+    return normalized;
+  }
+
+  /** 一行快照只有一个时间：取这一轮结果里最晚的探测时间。 */
+  private pingSnapshotTimeMs(results: PingPersistenceResult[], nowMs: number): number {
+    let latest = 0;
+    for (const result of results) latest = Math.max(latest, result.observedAtMs ?? nowMs);
+    return latest || nowMs;
+  }
+
   private async filterTrustedPingResultsByInterval(
     clientId: string,
     results: PingPersistenceResult[],
@@ -2829,7 +2864,11 @@ export class LiveDataDO {
       const minIntervalMs = this.pingResultIntervalMs(result.intervalSec);
       const key = this.pingResultStateKey(clientId, result.taskId);
       const state = await this.readPingResultState(key);
-      if (state.lastAcceptedMs && nowMs - state.lastAcceptedMs < minIntervalMs) {
+      // 按探测时间比较时，相邻两次的间隔等于 Agent 的探测间隔，抖动几毫秒就会被零容差误判为过密，
+      // 所以与监控落库一样留一点提前量。
+      const atMs = result.observedAtMs ?? nowMs;
+      const thresholdMs = result.observedAtMs === undefined ? minIntervalMs : recordPersistThresholdMs(minIntervalMs);
+      if (state.lastAcceptedMs && atMs - state.lastAcceptedMs < thresholdMs) {
         continue;
       }
       accepted.push(result);

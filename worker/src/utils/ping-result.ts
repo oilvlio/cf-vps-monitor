@@ -7,6 +7,8 @@ export const PING_LOSS_VALUE = -1;
 export interface ValidatedPingResult {
   taskId: number;
   value: number;
+  /** Agent 上报的探测开始时间（Unix 毫秒）。结果会先在 Agent 本地积压，所以不能用收到报告的时间代替。老版本 Agent 不带该字段。 */
+  observedAtMs?: number;
 }
 
 type ValidationResult =
@@ -66,7 +68,10 @@ export function validatePingResults(
       return { ok: false, status: 403, error: 'Ping 任务不属于当前客户端' };
     }
 
-    deduped.set(taskId, { taskId, value });
+    const observedAtMs = Number(result.timestamp);
+    deduped.set(taskId, Number.isFinite(observedAtMs) && observedAtMs > 0
+      ? { taskId, value, observedAtMs: Math.floor(observedAtMs) }
+      : { taskId, value });
   }
 
   return { ok: true, results: Array.from(deduped.values()) };

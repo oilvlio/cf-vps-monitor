@@ -217,7 +217,7 @@ type Report struct {
 	//（隧道/VPN 接口起来、容器网卡出现），汇总值会跳增该接口的历史累计流量，
 	// 被当成一个采样周期内的增量，算出几百 MB/s 的荒谬速率。
 	netPerInterface   map[string]interfaceCounters
-	pingResultLeases  map[int]uint64
+	pingResultSeqs    []uint64
 	basicInfoOwner    *reportPreparer
 	basicInfoRevision uint64
 }
@@ -259,6 +259,9 @@ type PingTask struct {
 type PingResult struct {
 	TaskID int     `json:"task_id"`
 	Value  float64 `json:"value"`
+	// Timestamp 是这次探测的开始时间（Unix 毫秒）。探测结果会先在本地积压，
+	// 等到下一次常规上报才发送，所以接收端必须按它而不是上报时间记录这条结果。
+	Timestamp int64 `json:"timestamp,omitempty"`
 }
 
 type jsonBool bool
@@ -385,7 +388,7 @@ type pingReportState struct {
 	tasks         []PingTask
 	policyVersion string
 	intervalSec   int
-	pendingPing   map[int]*queuedPingResult
+	pendingPing   map[int][]*queuedPingResult
 	pingOrder     []int
 	nextResultID  uint64
 	retryQueue    []Report
@@ -757,7 +760,7 @@ func newPingReportState() *pingReportState {
 	state := &pingReportState{
 		scheduler:   newPingTaskScheduler(),
 		intervalSec: defaultPingIntervalSec,
-		pendingPing: make(map[int]*queuedPingResult),
+		pendingPing: make(map[int][]*queuedPingResult),
 		ctx:         ctx, cancel: cancel, probeWake: make(chan struct{}, 1), probeDone: make(chan struct{}),
 		runningPing: make(map[int]*probeRun),
 	}

@@ -5976,9 +5976,6 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   font-variant-numeric: tabular-nums;
   color: var(--gray-12);
 }
-.lp-metric-value[data-load='warm'] {
-  color: var(--monitor-warning);
-}
 .lp-metric-value[data-load='hot'] {
   color: var(--monitor-danger);
 }
@@ -6003,9 +6000,6 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   border-radius: inherit;
   background: var(--monitor-secondary);
   transition: width 0.3s ease;
-}
-.lp-bar[data-level='warm'] .lp-bar-fill {
-  background: var(--monitor-warning);
 }
 .lp-bar[data-level='hot'] .lp-bar-fill {
   background: var(--monitor-danger);
@@ -6060,13 +6054,7 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   color: var(--monitor-muted-text);
   font-weight: 600;
 }
-.lp-info-value[data-tone='green'] {
-  color: var(--monitor-success);
-}
-.lp-info-value[data-tone='yellow'] {
-  color: var(--monitor-warning);
-}
-.lp-info-value[data-tone='red'] {
+.lp-info .lp-info-value[data-tone='red'] {
   color: var(--monitor-danger);
 }
 .lp-net-dir {
@@ -6078,6 +6066,25 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
 }
 .lp-net-dir.is-down {
   color: var(--monitor-success);
+}
+
+/* 暗色模式：节点卡里的“在线 / 剩余”标签、数值与累计流量，统一用比纯白淡一点的灰白色。
+   （实例详情页同名的 .lp-info-label / .lp-info-value 全局规则会漏到卡片上，这里按 .lp-info 限定覆盖。） */
+html[data-theme-appearance='dark'] .lp-info .lp-info-label {
+  color: var(--monitor-muted-text);
+}
+html[data-theme-appearance='dark'] .lp-info .lp-info-total,
+html[data-theme-appearance='dark'] .lp-info .lp-info-value:not([data-tone='red']) {
+  color: var(--gray-11);
+}
+@media (prefers-color-scheme: dark) {
+  html:not([data-theme-appearance]) .lp-info .lp-info-label {
+    color: var(--monitor-muted-text);
+  }
+  html:not([data-theme-appearance]) .lp-info .lp-info-total,
+  html:not([data-theme-appearance]) .lp-info .lp-info-value:not([data-tone='red']) {
+    color: var(--gray-11);
+  }
 }
 
 /* 月度流量配额：标签 + 用量 + 连续细条 */

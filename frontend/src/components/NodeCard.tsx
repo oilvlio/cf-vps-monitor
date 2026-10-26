@@ -65,10 +65,9 @@ function clampPercent(value: number) {
   return Math.max(0, Math.min(100, value));
 }
 
+// 只有超过 90% 才标红，其余一律保持正常色（不再有黄色“偏高”档）。
 function getUsageLevel(percent: number) {
-  if (percent >= 85) return 'hot';
-  if (percent >= 65) return 'warm';
-  return 'normal';
+  return percent > 90 ? 'hot' : 'normal';
 }
 
 function formatPercent(value: number | null) {
@@ -77,7 +76,7 @@ function formatPercent(value: number | null) {
   return `${clamped.toFixed(clamped < 10 ? 1 : 0)}%`;
 }
 
-// 连续细条：纯色填充，颜色只随档位（正常 / 偏高 / 过高）切换，不做渐变。
+// 连续细条：纯色填充，颜色只随档位（正常 / 过高）切换，不做渐变。
 function LpBar({ percent, level }: { percent: number | null; level: string }) {
   const width = percent === null ? 0 : clampPercent(percent);
   // 有用量但很小时保留一点可见宽度，免得条看起来是空的。

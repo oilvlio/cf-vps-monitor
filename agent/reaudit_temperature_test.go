@@ -135,7 +135,7 @@ func TestReauditTemperaturePlatformReadBoundary(t *testing.T) {
 }
 
 func TestReauditTemperatureCollectorWiring(t *testing.T) {
-	previousSampler, previousTraffic := nodeTemperatureSampler, trafficTracker
+	previousSampler := nodeTemperatureSampler
 	previousSource := nodeMetrics
 	// This test exercises a supported physical host sensor regardless of
 	// whether the CI process itself happens to run inside a container.
@@ -144,9 +144,8 @@ func TestReauditTemperatureCollectorWiring(t *testing.T) {
 	previousGPU := globalGPUDetails
 	globalGPUDetails = nil
 	gpuDetailsMu.Unlock()
-	trafficTracker = nil
 	t.Cleanup(func() {
-		nodeTemperatureSampler, trafficTracker = previousSampler, previousTraffic
+		nodeTemperatureSampler = previousSampler
 		nodeMetrics = previousSource
 		gpuDetailsMu.Lock()
 		globalGPUDetails = previousGPU

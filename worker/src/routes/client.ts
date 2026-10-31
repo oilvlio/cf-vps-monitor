@@ -16,7 +16,7 @@ import { bestEffortRecordHealthEvent, errorDetail } from '../utils/observability
 import { NOTIFICATION_DISPATCH_SETTING_KEYS, dispatchNotification } from '../utils/notification-dispatch';
 import { getCloudflareClientIp, isPublicIpAddress } from '../utils/request-ip';
 import { hashAgentToken, isAgentTokenShape } from '../utils/client';
-import { readAcceptedCount, readClientReportResult, readRateLimitResult } from '../utils/do-response';
+import { readAcceptedCount, readClientReportResult, readRateLimitResult, type ClientReportResult } from '../utils/do-response';
 import { invalidatePublicMetadataCache } from './public';
 
 const clientRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -615,7 +615,7 @@ async function updateLiveReport(
   hidden: boolean,
   reportOrReports: MonitorReportPayload | MonitorReportPayload[],
   nowMs: number,
-): Promise<boolean> {
+): Promise<ClientReportResult> {
   let report: MonitorReportPayload | undefined;
   let reportBody: { report: MonitorReportPayload } | { reports: MonitorReportPayload[] };
   if (Array.isArray(reportOrReports)) {
@@ -625,7 +625,7 @@ async function updateLiveReport(
     report = reportOrReports;
     reportBody = { report };
   }
-  if (!report) return false;
+  if (!report) return { persisted: false, trafficImported: false };
   const doId = c.env.LIVE_DATA.idFromName('global');
   const stub = c.env.LIVE_DATA.get(doId);
   const response = await stub.fetch(new Request('https://do/client-report', {
@@ -647,7 +647,7 @@ async function updateLiveReport(
     throw new Error('Live report persistence was not acknowledged');
   }
   // History may remain queued or disabled after the durable last report is accepted.
-  return result.persisted;
+  return result;
 }
 
 function buildSafeLiveBasicInfoClient(
@@ -1175,7 +1175,7 @@ clientRoutes.post('/report', clientAuth, async (c) => {
     runClientBackground(c, syncClientIpsFromReport(database, c, uuid, liveName, report, authClient || null));
     await syncBasicInfoFromReportBatch(database, c, uuid, liveName, hidden, authClient || null, reports);
 
-    const persisted = await updateLiveReport(c, uuid, liveName, hidden, reports.length > 1 ? reports : report, nowMs);
+    const { persisted, trafficImported } = await updateLiveReport(c, uuid, liveName, hidden, reports.length > 1 ? reports : report, nowMs);
     if (report.version && clientFieldChanged(authClient?.version, report.version)) {
       runClientBackground(c, (async () => {
         await db.updateClient(database, uuid, {
@@ -1186,7 +1186,8 @@ clientRoutes.post('/report', clientAuth, async (c) => {
       })());
     }
 
-    return c.json({ success: true, persisted });
+    // traffic_imported：旧版 Agent 的本地流量历史已入库，Agent 据此改名旧状态文件（没有旧历史的 Agent 不会收到该字段）。
+    return c.json({ success: true, persisted, ...(trafficImported ? { traffic_imported: true } : {}) });
   } catch (e) {
     return c.json({ error: '上报失败' }, 500);
   }

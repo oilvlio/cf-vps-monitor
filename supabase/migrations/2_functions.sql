@@ -3295,6 +3295,235 @@ begin
 end;
 $$;
 
+-- 流量统计：处理 Agent 上报的网卡累计读数，换算增量并累加到「Agent 本地日期」的日桶里，
+-- 然后返回 [input_from, input_to]（YYYY-MM-DD，含两端）的上 / 下行合计，即当前计费周期的流量。
+--
+-- input_samples: [{"ts": 毫秒, "boot": 开机 Unix 秒, "scope": 口径, "utc_offset": 秒,
+--                  "interfaces": {"eth0": {"up": n, "down": n}}}, ...]，调用方按 ts 升序给出。
+-- input_samples 为空时只返回合计（修改重置日 / 跨周期时用来刷新数字）。
+--
+-- 增量规则（与旧版 Agent 本地实现一致）：
+--   * 没有基线 / 口径变了：只起基线，本次不计增量；
+--   * 开机时间变了（相差 60 秒以上）：重启后内核计数器清零，本次读数整体都是增量；
+--   * 否则逐网卡、逐方向：读数不小于上次则取差值，变小说明计数器回绕 / 清零，取当前读数；
+--   * 上次没有的网卡（新出现）只起基线，不计增量；这次没有的网卡忽略。
+-- 幂等：样本时间不大于已处理的 last_ts 的样本直接忽略，重发 / 乱序都安全。
+-- 同一节点的并发调用靠 traffic_counter_state 的行锁串行化。
+create or replace function public.cfm_traffic_apply_samples(input_client text, input_samples jsonb, input_from text, input_to text)
+returns jsonb
+language plpgsql
+set search_path = public
+as $$
+declare
+  st_scope text;
+  st_boot bigint;
+  st_ifaces jsonb;
+  st_last_ts bigint;
+  sample jsonb;
+  v_ts bigint;
+  v_boot bigint;
+  v_scope text;
+  v_offset integer;
+  v_ifaces jsonb;
+  v_day date;
+  v_name text;
+  v_cur jsonb;
+  v_prev jsonb;
+  cur_up bigint;
+  cur_down bigint;
+  prev_up bigint;
+  prev_down bigint;
+  d_up bigint;
+  d_down bigint;
+  v_reboot boolean;
+  applied integer := 0;
+  now_ms bigint := (extract(epoch from now()) * 1000)::bigint;
+  total_up numeric;
+  total_down numeric;
+begin
+  if input_samples is not null and jsonb_typeof(input_samples) = 'array' and jsonb_array_length(input_samples) > 0 then
+    if jsonb_array_length(input_samples) > 500 then
+      raise exception 'too_many_samples' using errcode = '22023';
+    end if;
+
+    -- 保证状态行存在并加锁：scope = '' 且 last_ts = 0 表示「还没有基线」。
+    insert into traffic_counter_state (client, scope) values (input_client, '')
+    on conflict (client) do nothing;
+    select scope, boot, interfaces, last_ts into st_scope, st_boot, st_ifaces, st_last_ts
+      from traffic_counter_state where client = input_client for update;
+
+    for sample in select value from jsonb_array_elements(input_samples) loop
+      begin
+        if jsonb_typeof(sample) is distinct from 'object'
+          or jsonb_typeof(sample -> 'ts') is distinct from 'number'
+          or jsonb_typeof(sample -> 'scope') is distinct from 'string'
+          or jsonb_typeof(sample -> 'interfaces') is distinct from 'object' then
+          continue;
+        end if;
+        v_ts := floor((sample ->> 'ts')::numeric)::bigint;
+        -- 拒绝非正数和明显在未来的时间：否则一个坏时间戳会把 last_ts 顶上去，之后所有样本都被当成「旧样本」。
+        if v_ts <= 0 or v_ts > now_ms + 3600000 then
+          continue;
+        end if;
+        v_scope := sample ->> 'scope';
+        v_boot := case when jsonb_typeof(sample -> 'boot') = 'number'
+          then greatest(floor((sample ->> 'boot')::numeric), 0)::bigint else 0 end;
+        v_offset := case when jsonb_typeof(sample -> 'utc_offset') = 'number'
+          then least(greatest(floor((sample ->> 'utc_offset')::numeric), -43200), 50400)::integer else 0 end;
+        v_ifaces := sample -> 'interfaces';
+        if (select count(*) from jsonb_object_keys(v_ifaces)) > 128 then
+          continue;
+        end if;
+      exception when others then
+        continue;
+      end;
+      if v_ts <= st_last_ts then
+        continue;
+      end if;
+
+      -- 增量记在样本「Agent 本地日期」上：UTC 时间 + Agent 上报的偏移。
+      v_day := ((to_timestamp(v_ts / 1000.0) at time zone 'UTC') + make_interval(secs => v_offset))::date;
+
+      d_up := 0;
+      d_down := 0;
+      if st_last_ts > 0 and st_scope = v_scope then
+        v_reboot := v_boot > 0 and st_boot > 0 and abs(v_boot - st_boot) > 60;
+        for v_name, v_cur in select key, value from jsonb_each(v_ifaces) loop
+          if jsonb_typeof(v_cur) is distinct from 'object' then
+            continue;
+          end if;
+          cur_up := case when jsonb_typeof(v_cur -> 'up') = 'number'
+            then least(greatest(floor((v_cur ->> 'up')::numeric), 0), 1000000000000000)::bigint end;
+          cur_down := case when jsonb_typeof(v_cur -> 'down') = 'number'
+            then least(greatest(floor((v_cur ->> 'down')::numeric), 0), 1000000000000000)::bigint end;
+          if cur_up is null or cur_down is null then
+            continue;
+          end if;
+          if v_reboot then
+            d_up := d_up + cur_up;
+            d_down := d_down + cur_down;
+          else
+            v_prev := st_ifaces -> v_name;
+            if jsonb_typeof(v_prev) = 'object' then
+              prev_up := case when jsonb_typeof(v_prev -> 'up') = 'number'
+                then least(greatest(floor((v_prev ->> 'up')::numeric), 0), 1000000000000000)::bigint end;
+              prev_down := case when jsonb_typeof(v_prev -> 'down') = 'number'
+                then least(greatest(floor((v_prev ->> 'down')::numeric), 0), 1000000000000000)::bigint end;
+              if prev_up is not null and prev_down is not null then
+                d_up := d_up + case when cur_up >= prev_up then cur_up - prev_up else cur_up end;
+                d_down := d_down + case when cur_down >= prev_down then cur_down - prev_down else cur_down end;
+              end if;
+            end if;
+          end if;
+        end loop;
+      end if;
+
+      if d_up > 0 or d_down > 0 then
+        insert into traffic_daily (client, day, up, down, updated_at)
+        values (input_client, v_day, d_up, d_down, now())
+        on conflict (client, day) do update
+          set up = traffic_daily.up + excluded.up,
+              down = traffic_daily.down + excluded.down,
+              updated_at = now();
+      end if;
+
+      st_scope := v_scope;
+      if v_boot > 0 then
+        st_boot := v_boot;
+      end if;
+      st_ifaces := v_ifaces;
+      st_last_ts := v_ts;
+      applied := applied + 1;
+    end loop;
+
+    if applied > 0 then
+      update traffic_counter_state
+        set scope = st_scope, boot = st_boot, interfaces = st_ifaces, last_ts = st_last_ts, updated_at = now()
+        where client = input_client;
+      -- 顺手清理该节点超出保留窗口（约 400 天）的旧日桶，走主键前缀索引，不需要单独的定时任务。
+      delete from traffic_daily where client = input_client and day < current_date - 400;
+    end if;
+  end if;
+
+  select coalesce(sum(up), 0), coalesce(sum(down), 0) into total_up, total_down
+    from traffic_daily
+    where client = input_client and day >= input_from::date and day <= input_to::date;
+  return jsonb_build_object('up', total_up::bigint, 'down', total_down::bigint, 'applied', applied);
+end;
+$$;
+
+-- 一次性导入旧版 Agent 本地保存的流量历史（升级迁移用）。
+-- input_days: [{"date": "YYYY-MM-DD", "up": n, "down": n}, ...]；同一天重复导入取较大值，所以重发是安全的。
+-- input_baseline: {"scope": 口径, "boot": 开机 Unix 秒, "interfaces": {...}}，旧版最后一次保存的网卡读数；
+--   只在该节点还没有基线时采纳，这样升级瞬间的那段流量不会漏记。
+-- 返回实际处理的日期数。格式不合法的条目跳过，不影响同批其他条目。
+create or replace function public.cfm_traffic_import(input_client text, input_days jsonb, input_baseline jsonb)
+returns jsonb
+language plpgsql
+set search_path = public
+as $$
+declare
+  item jsonb;
+  v_day date;
+  v_up bigint;
+  v_down bigint;
+  handled integer := 0;
+begin
+  if input_days is not null and jsonb_typeof(input_days) = 'array' then
+    if jsonb_array_length(input_days) > 400 then
+      raise exception 'too_many_days' using errcode = '22023';
+    end if;
+    for item in select value from jsonb_array_elements(input_days) loop
+      begin
+        -- is distinct from：缺字段时 jsonb_typeof 是 null，<> 会得到 null 而绕过校验。
+        if jsonb_typeof(item) is distinct from 'object'
+          or jsonb_typeof(item -> 'up') is distinct from 'number'
+          or jsonb_typeof(item -> 'down') is distinct from 'number' then
+          continue;
+        end if;
+        v_day := (item ->> 'date')::date;
+        v_up := least(greatest(floor((item ->> 'up')::numeric), 0), 1000000000000000)::bigint;
+        v_down := least(greatest(floor((item ->> 'down')::numeric), 0), 1000000000000000)::bigint;
+      exception when others then
+        continue;
+      end;
+      if v_day between current_date - 400 and current_date + 2 then
+        insert into traffic_daily (client, day, up, down, updated_at)
+        values (input_client, v_day, v_up, v_down, now())
+        on conflict (client, day) do update
+          set up = greatest(traffic_daily.up, excluded.up),
+              down = greatest(traffic_daily.down, excluded.down),
+              updated_at = now()
+          where traffic_daily.up < excluded.up or traffic_daily.down < excluded.down;
+      end if;
+      handled := handled + 1;
+    end loop;
+  end if;
+
+  if jsonb_typeof(input_baseline) = 'object'
+    and jsonb_typeof(input_baseline -> 'scope') = 'string'
+    and coalesce(input_baseline ->> 'scope', '') <> ''
+    and jsonb_typeof(input_baseline -> 'interfaces') = 'object'
+    and (select count(*) from jsonb_object_keys(input_baseline -> 'interfaces')) <= 128 then
+    insert into traffic_counter_state (client, scope, boot, interfaces, last_ts)
+    values (
+      input_client,
+      input_baseline ->> 'scope',
+      case when jsonb_typeof(input_baseline -> 'boot') = 'number'
+        then greatest(floor((input_baseline ->> 'boot')::numeric), 0)::bigint else 0 end,
+      input_baseline -> 'interfaces',
+      1
+    )
+    on conflict (client) do update
+      set scope = excluded.scope, boot = excluded.boot, interfaces = excluded.interfaces,
+          last_ts = 1, updated_at = now()
+      where traffic_counter_state.last_ts = 0;
+  end if;
+
+  return jsonb_build_object('days', handled);
+end;
+$$;
+
 -- 一次性取出所有已设置首页探测点的节点在 [input_start, input_end] 内最新 N 行原始快照。
 -- ping_snapshots 按落库间隔全量保存，不做「值没变不落库」压缩，
 -- 所以直接倒序取 limit 行再由 Worker 按时间升序排列即可，无需种子与分桶。
@@ -3780,6 +4009,10 @@ grant execute on function public.cfm_set_home_ping_task(text, bigint) to cf_moni
 revoke all on function public.cfm_home_ping_rows(text, text, integer) from public, anon, authenticated;
 grant execute on function public.cfm_home_ping_rows(text, text, integer) to service_role;
 grant execute on function public.cfm_home_ping_rows(text, text, integer) to cf_monitor_app;
+revoke all on function public.cfm_traffic_apply_samples(text, jsonb, text, text) from public, anon, authenticated;
+grant execute on function public.cfm_traffic_apply_samples(text, jsonb, text, text) to service_role;
+revoke all on function public.cfm_traffic_import(text, jsonb, jsonb) from public, anon, authenticated;
+grant execute on function public.cfm_traffic_import(text, jsonb, jsonb) to service_role;
 revoke all on function public.cfm_insert_monitor_record(jsonb) from public, anon, authenticated;
 grant execute on function public.cfm_insert_monitor_record(jsonb) to service_role;
 revoke all on function public.cfm_records_range_paged(text, text, text, integer, integer) from public, anon, authenticated;

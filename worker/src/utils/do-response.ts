@@ -18,6 +18,8 @@ export type RateLimitResult = {
 
 export type ClientReportResult = {
   persisted: boolean;
+  /** 旧版 Agent 的本地流量历史已导入数据库；Agent 收到后才会改名其旧状态文件。 */
+  trafficImported: boolean;
 };
 
 type RateLimitDefaults = {
@@ -77,7 +79,7 @@ export async function readLiveSnapshot(response: Response): Promise<LiveSnapshot
 export async function readClientReportResult(response: Response): Promise<ClientReportResult | null> {
   const value = await readJsonObject(response);
   if (!value || typeof value.persisted !== 'boolean') return null;
-  return { persisted: value.persisted };
+  return { persisted: value.persisted, trafficImported: value.traffic_imported === true };
 }
 
 export async function readAcceptedCount(response: Response): Promise<number | null> {

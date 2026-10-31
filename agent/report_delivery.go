@@ -233,7 +233,7 @@ func (s *pingReportState) takeRetryReports() []Report {
 func deliverHTTPReports(state *pingReportState, reports []Report) error {
 	for len(reports) > 0 {
 		count := min(len(reports), maxReportsPerEnvelope)
-		batch := state.currentReportResults(reports[:count])
+		batch := attachTrafficImport(state.currentReportResults(reports[:count]))
 		if err := sendHTTPReports(batch); err != nil {
 			log.Printf("HTTP report not accepted; probe results retained: %v", err)
 			state.retryReports(reports)

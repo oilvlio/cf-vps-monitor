@@ -259,10 +259,10 @@ func TestContainerMetricsCollectorWiring(t *testing.T) {
 	for _, trustedUptime := range []bool{false, true} {
 		t.Run(fmt.Sprintf("trusted uptime %t", trustedUptime), func(t *testing.T) {
 			preparer, _ := basicInfoDeliveryFixture(t)
-			previousSource, previousSampler, previousTraffic := nodeMetrics, nodeTemperatureSampler, trafficTracker
+			previousSource, previousSampler := nodeMetrics, nodeTemperatureSampler
 			previousInclude, previousExclude := mountInclude, mountExclude
 			t.Cleanup(func() {
-				nodeMetrics, nodeTemperatureSampler, trafficTracker = previousSource, previousSampler, previousTraffic
+				nodeMetrics, nodeTemperatureSampler = previousSource, previousSampler
 				mountInclude, mountExclude = previousInclude, previousExclude
 			})
 			mountinfo := sharedContainerMount
@@ -281,7 +281,7 @@ func TestContainerMetricsCollectorWiring(t *testing.T) {
 				reads.Add(1)
 				return []host.TemperatureStat{{SensorKey: "coretemp", Temperature: 60}}, nil
 			})
-			trafficTracker, mountInclude, mountExclude = nil, "", ""
+			mountInclude, mountExclude = "", ""
 			gpuDetailsMu.Lock()
 			globalGPUDetails = nil
 			gpuDetailsMu.Unlock()

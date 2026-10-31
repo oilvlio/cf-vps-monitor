@@ -19,6 +19,10 @@ import {
 import { bestEffortRecordHealthEvent, errorDetail, type StoredHealthComponent } from '../utils/observability';
 import { isPublicIpAddress } from '../utils/request-ip';
 import { unwrapMonitorReportEnvelope } from '../utils/report-envelope';
+import {
+  collectTrafficSamples, localDateKey, normalizeResetDay, parseTrafficImport, selectDueSamples,
+  TRAFFIC_APPLY_MIN_GAP_MS, trafficPeriodStart,
+} from '../utils/traffic-samples';
 import { isRecordPersistDue, recordPersistThresholdMs } from '../utils/record-persist';
 import { toPublicReport } from '../utils/public-report';
 import { projectAgentClientMetadata, projectClientMetadata } from '../utils/client-metadata';
@@ -444,6 +448,18 @@ export class LiveDataDO {
   private adminClientMetadata = new Map<string, JsonObject>();
   private trafficResetDays = new Map<string, number>();
   private trafficResetDaysAt = 0;
+  // 流量统计：每个节点最近一次由数据库返回的当前周期合计（用来覆盖 report 的 net_total_*），
+  // 以及对数据库故障告警的节流时间戳。仅内存：DO 重启后第一份 report 会立刻重新取一次。
+  private trafficTotals = new Map<string, {
+    up: number;
+    down: number;
+    /** 这份合计对应的周期起始日；null 表示还没有从数据库取到过。 */
+    periodStart: string | null;
+    /** 最近一次成功交给数据库的样本时间（毫秒）。 */
+    lastAppliedTs?: number;
+    inFlight: boolean;
+  }>();
+  private trafficErrorAt = new Map<string, number>();
   private networkMetadataSignatures = new Map<string, { signature: string; syncedAt: number }>();
   private basicInfoSignatures = new Map<string, string>();
   private metadataSyncQueues = new Map<string, Promise<void>>();
@@ -1115,6 +1131,93 @@ export class LiveDataDO {
     return count;
   }
 
+  // 流量统计：Agent 只上报各网卡的累计读数（traffic_sample），不保存任何本地状态。
+  // 这里约每 2 分钟（与 ping record 同节奏）把样本交给数据库，由它换算增量、累加到 Agent 本地日期的日桶，
+  // 并返回当前计费周期 [重置日, 今天] 的合计；用这个合计覆盖 report 的 net_total_up/down，
+  // 下游（实时推送、records 落库、公开接口）看到的就是合成好的月度流量。
+  //   * 两次落库之间沿用上一次的合计，所以月度总量最多滞后约 2 分钟；
+  //   * 落库失败只丢这一次样本（读数是累计的，下一次差值会把空档补上），report 本身照常接收；
+  //   * 不带 traffic_sample 的 report（旧版 Agent）原样放行，其 net_total_* 本来就是 Agent 自己算的。
+  // 同时处理旧版 Agent 的一次性本地历史导入（traffic_import），成功后返回 imported=true，随 ack 回给 Agent。
+  private async applyTraffic(
+    clientId: string,
+    reports: JsonObject[],
+    nowMs: number,
+  ): Promise<{ reports: JsonObject[]; imported: boolean }> {
+    if (!reports.some(report => 'traffic_sample' in report || 'traffic_import' in report)) {
+      return { reports, imported: false };
+    }
+    const database = this.getQueryDatabase();
+    let imported = false;
+    const legacy = parseTrafficImport(reports);
+    if (database && legacy) {
+      try {
+        await db.importTrafficHistory(database, clientId, legacy.days, legacy.baseline);
+        imported = true;
+        // 导入改变了历史：丢掉旧合计，让紧接着的第一个样本立刻重新取一次。
+        this.trafficTotals.delete(clientId);
+      } catch (error) {
+        this.noteTrafficError(database, clientId, 'import', error);
+      }
+    }
+
+    const samples = database ? collectTrafficSamples(reports, report => this.reportTimestamp(report, nowMs)) : [];
+    let state = this.trafficTotals.get(clientId);
+    if (database && samples.length > 0) {
+      const latest = samples[samples.length - 1];
+      const resetDay = normalizeResetDay(await this.trafficResetDayFor(clientId));
+      const dateKey = localDateKey(latest.ts, latest.utc_offset);
+      const periodStart = trafficPeriodStart(resetDay, dateKey);
+      if (!state) {
+        state = { up: 0, down: 0, periodStart: null, inFlight: false };
+        this.trafficTotals.set(clientId, state);
+      }
+      const current = state;
+      const due = selectDueSamples(samples, current.lastAppliedTs, TRAFFIC_APPLY_MIN_GAP_MS);
+      // 重置日被修改 / 跨过周期边界：即使没有到期的样本也要立刻刷新合计（空样本只读不写）。
+      const periodChanged = current.periodStart !== periodStart;
+      if (!current.inFlight && (due.length > 0 || periodChanged)) {
+        current.inFlight = true;
+        const task = db.applyTrafficSamples(database, clientId, due, periodStart, dateKey)
+          .then(totals => {
+            current.up = totals.up;
+            current.down = totals.down;
+            current.periodStart = periodStart;
+            if (due.length > 0) current.lastAppliedTs = due[due.length - 1].ts;
+          })
+          .catch(error => this.noteTrafficError(database, clientId, 'apply', error))
+          .finally(() => { current.inFlight = false; });
+        // 还没有可用合计（首次 / 周期变了）时等结果，让这份 report 就带上正确的数字；否则放到后台，不拖慢上报。
+        if (periodChanged) await task;
+        else this.runBackground('do_record_persistence', task);
+      }
+    }
+
+    const totals = this.trafficTotals.get(clientId);
+    const prepared = reports.map(report => {
+      const { traffic_sample: sample, traffic_import: _legacy, ...rest } = report;
+      if (sample !== undefined && totals && totals.periodStart !== null) {
+        return { ...rest, net_total_up: totals.up, net_total_down: totals.down };
+      }
+      return rest;
+    });
+    return { reports: prepared, imported };
+  }
+
+  private noteTrafficError(database: db.QueryDatabase, clientId: string, phase: 'import' | 'apply', error: unknown): void {
+    const key = `${clientId}:${phase}`;
+    const now = Date.now();
+    if (now - (this.trafficErrorAt.get(key) ?? 0) < 10 * 60_000) return;
+    this.trafficErrorAt.set(key, now);
+    this.runBackground('do_record_persistence', bestEffortRecordHealthEvent(
+      database,
+      'do_record_persistence',
+      'error',
+      `traffic ${phase} failed for ${clientId}: ${errorDetail(error)}`,
+      { auditAction: 'traffic_error' },
+    ));
+  }
+
   // 节点的流量重置日来自后台快照。返回 undefined 表示「后台没有这个节点的记录」，
   // 此时不下发该字段，让探针保留安装时的取值。
   private async trafficResetDayFor(clientId?: string): Promise<number | undefined> {
@@ -1693,7 +1796,7 @@ export class LiveDataDO {
     const parsed = await parseJsonRequestWithLimit(request, HTTP_CLIENT_REPORT_MAX_BODY_BYTES);
     if ('response' in parsed) return parsed.response;
     const payload = parsed.body;
-    const reports = Array.isArray(payload?.reports)
+    let reports = Array.isArray(payload?.reports)
       ? payload.reports.slice(0, AGENT_REPORT_MAX_BATCH).filter(isObjectPayload)
       : isObjectPayload(payload?.report)
         ? [payload.report]
@@ -1719,6 +1822,9 @@ export class LiveDataDO {
       this.assertReportCurrent(lifecycle);
       const clientName = control.name;
       const hidden = control.hidden;
+      const traffic = await this.applyTraffic(clientId, reports, now);
+      reports = traffic.reports;
+      this.assertReportCurrent(lifecycle);
       const reportsToPersist: Array<{ report: JsonObject; reportTime: number }> = [];
       for (let index = 0; index < reports.length; index += 1) {
         this.assertReportCurrent(lifecycle);
@@ -1746,7 +1852,12 @@ export class LiveDataDO {
       }
       this.runBackground('do_record_persistence', this.persistReportsSequential(clientId, reportsToPersist));
 
-      return Response.json({ success: true, persisted: false, queued: true });
+      return Response.json({
+        success: true,
+        persisted: false,
+        queued: true,
+        ...(traffic.imported ? { traffic_imported: true } : {}),
+      });
     }).catch(() => Response.json({ error: 'Report was not accepted; retry this report' }, { status: 503 }));
   }
 
@@ -2094,9 +2205,12 @@ export class LiveDataDO {
       this.assertReportCurrent(lifecycle);
       clientName = control.name;
       hidden = control.hidden;
-      const reports = data?.type === 'reports' && Array.isArray(data.reports)
+      const received = data?.type === 'reports' && Array.isArray(data.reports)
         ? data.reports.slice(0, AGENT_REPORT_MAX_BATCH).filter(isObjectPayload)
         : [unwrapMonitorReportEnvelope(data)];
+      const traffic = await this.applyTraffic(clientId, received, now);
+      const reports = traffic.reports;
+      this.assertReportCurrent(lifecycle);
       const reportsToPersist: Array<{ report: JsonObject; reportTime: number }> = [];
       for (let index = 0; index < reports.length; index += 1) {
         this.assertReportCurrent(lifecycle);
@@ -2120,7 +2234,11 @@ export class LiveDataDO {
       this.assertReportCurrent(lifecycle);
       if (this.sessions.get(clientId) === ws && ws.readyState === WebSocket.READY_STATE_OPEN) {
         try {
-          ws.send(JSON.stringify({ type: 'ack', timestamp: now }));
+          ws.send(JSON.stringify({
+            type: 'ack',
+            timestamp: now,
+            ...(traffic.imported ? { traffic_imported: true } : {}),
+          }));
         } catch {
           // 忽略 ack 发送错误
         }

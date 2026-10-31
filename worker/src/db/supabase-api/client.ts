@@ -799,6 +799,64 @@ export function setSupabaseHomePingTask(
   });
 }
 
+/** Agent 上报的一次网卡读数样本（已由调用方校验、限幅）。 */
+export interface TrafficSamplePayload {
+  ts: number;
+  boot: number;
+  scope: string;
+  utc_offset: number;
+  interfaces: Record<string, { up: number; down: number }>;
+}
+
+/** 旧版 Agent 本地保存的一个日增量（升级迁移用）。 */
+export interface TrafficImportDay {
+  date: string;
+  up: number;
+  down: number;
+}
+
+export interface TrafficImportBaseline {
+  scope: string;
+  boot: number;
+  interfaces: Record<string, { up: number; down: number }>;
+}
+
+/**
+ * 处理一批网卡读数样本（换算增量、累加到当日、更新读数），并返回 [from, to]（YYYY-MM-DD，含两端）
+ * 的流量合计，即当前计费周期的流量。samples 为空时只返回合计。
+ */
+export async function applySupabaseTrafficSamples(
+  env: SupabaseApiEnv,
+  client: string,
+  samples: TrafficSamplePayload[],
+  from: string,
+  to: string,
+): Promise<{ up: number; down: number; applied: number }> {
+  const result = await callSupabaseRpc<{ up?: unknown; down?: unknown; applied?: unknown } | null>(env, 'cfm_traffic_apply_samples', {
+    input_client: client,
+    input_samples: samples,
+    input_from: from,
+    input_to: to,
+  });
+  const toCount = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0);
+  return { up: toCount(result?.up), down: toCount(result?.down), applied: toCount(result?.applied) };
+}
+
+/** 一次性导入旧版 Agent 的本地流量历史；幂等。返回处理的日期数。 */
+export async function importSupabaseTrafficHistory(
+  env: SupabaseApiEnv,
+  client: string,
+  days: TrafficImportDay[],
+  baseline: TrafficImportBaseline | null,
+): Promise<number> {
+  const result = await callSupabaseRpc<{ days?: unknown } | null>(env, 'cfm_traffic_import', {
+    input_client: client,
+    input_days: days,
+    input_baseline: baseline,
+  });
+  return typeof result?.days === 'number' ? result.days : 0;
+}
+
 export function getSupabaseHomePingRows(
   env: SupabaseApiEnv,
   start: string,

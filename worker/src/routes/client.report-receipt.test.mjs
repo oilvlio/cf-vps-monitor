@@ -22,9 +22,19 @@ for (const status of [409, 503]) {
 }
 
 test('a valid live receipt is accepted while ordinary history remains asynchronous', async () => {
-  const persisted = await updateLiveReport(context(async () => Response.json({ success: true, persisted: false, queued: true })),
+  const result = await updateLiveReport(context(async () => Response.json({ success: true, persisted: false, queued: true })),
     'node', 'Fixture', false, normalizeMonitorReport({ cpu: 23 }), Date.now());
-  assert.equal(persisted, false);
+  assert.equal(result.persisted, false);
+  assert.equal(result.trafficImported, false, 'an agent without legacy history receives no import confirmation');
+});
+
+test('a confirmed legacy traffic import is returned to the caller', async () => {
+  const result = await updateLiveReport(context(async () => Response.json({ success: true, persisted: false, queued: true, traffic_imported: true })),
+    'node', 'Fixture', false, normalizeMonitorReport({ cpu: 23 }), Date.now());
+  assert.equal(result.trafficImported, true);
+  const ignored = await updateLiveReport(context(async () => Response.json({ success: true, persisted: false, queued: true, traffic_imported: 'yes' })),
+    'node', 'Fixture', false, normalizeMonitorReport({ cpu: 23 }), Date.now());
+  assert.equal(ignored.trafficImported, false, 'only a literal true confirms the import');
 });
 
 test('the authenticated ordinary HTTP route fails an unpersisted report and accepts its saved retry', async () => {

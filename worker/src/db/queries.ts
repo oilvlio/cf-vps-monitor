@@ -500,6 +500,29 @@ export async function setHomePingTask(
   return sba.setSupabaseHomePingTask(database.env, client, taskId);
 }
 
+export type TrafficSamplePayload = sba.TrafficSamplePayload;
+export type TrafficImportDay = sba.TrafficImportDay;
+export type TrafficImportBaseline = sba.TrafficImportBaseline;
+
+export async function applyTrafficSamples(
+  database: QueryDatabase,
+  client: string,
+  samples: TrafficSamplePayload[],
+  from: string,
+  to: string,
+): Promise<{ up: number; down: number; applied: number }> {
+  return sba.applySupabaseTrafficSamples(database.env, client, samples, from, to);
+}
+
+export async function importTrafficHistory(
+  database: QueryDatabase,
+  client: string,
+  days: TrafficImportDay[],
+  baseline: TrafficImportBaseline | null,
+): Promise<number> {
+  return sba.importSupabaseTrafficHistory(database.env, client, days, baseline);
+}
+
 export async function getHomePingRows(
   database: QueryDatabase,
   start: string,

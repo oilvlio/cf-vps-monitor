@@ -659,6 +659,60 @@ comment on column public.records.load15 is 'CPU 1/5/15 分钟负载中的 15 分
 -- policy 是 for all 整表的，不用动。
 grant select, insert, update, delete on table public.records to cf_monitor_app, service_role;
 
+-- 流量统计（vnstat 式按天累计）。
+--
+-- Agent 只上报各网卡的内核累计计数器，不保存任何本地状态；换算增量、分日、按重置日聚合都在这里：
+--   traffic_counter_state  每个节点上一次的网卡读数（用来换算下一次的增量）
+--   traffic_daily          每个节点每个「Agent 本地自然日」的上 / 下行增量
+-- 月度流量 = traffic_daily 在 [重置日, 今天] 的和。重置日只是求和区间，修改它不会改写任何历史。
+-- 写入走 cfm_traffic_apply_samples（同一事务内换算增量、累加当日、更新读数）；
+-- 不放进备份：与 records 一样属于运行数据，随节点删除级联清理。
+create table if not exists public.traffic_daily (
+  client text not null references public.clients(uuid) on delete cascade,
+  day date not null,
+  up bigint not null default 0 check (up >= 0),
+  down bigint not null default 0 check (down >= 0),
+  updated_at timestamptz not null default now(),
+  primary key (client, day)
+);
+
+create table if not exists public.traffic_counter_state (
+  client text primary key references public.clients(uuid) on delete cascade,
+  -- 统计口径：与新样本不一致时丢弃旧读数、重新起基线
+  scope text not null,
+  -- 上次读到的开机时间（Unix 秒），0 表示未知
+  boot bigint not null default 0,
+  -- {"eth0": {"up": n, "down": n}, ...}
+  interfaces jsonb not null default '{}'::jsonb,
+  -- 上次处理的样本时间（毫秒）。0 表示还没有基线；样本时间不大于它的一律忽略（重发 / 乱序幂等）
+  last_ts bigint not null default 0,
+  updated_at timestamptz not null default now()
+);
+
+alter table public.traffic_daily enable row level security;
+
+alter table public.traffic_daily force row level security;
+
+revoke all on public.traffic_daily from public, anon, authenticated;
+
+grant select, insert, update, delete on table public.traffic_daily to cf_monitor_app, service_role;
+
+drop policy if exists cf_monitor_app_all on public.traffic_daily;
+
+create policy cf_monitor_app_all on public.traffic_daily for all to cf_monitor_app using (true) with check (true);
+
+alter table public.traffic_counter_state enable row level security;
+
+alter table public.traffic_counter_state force row level security;
+
+revoke all on public.traffic_counter_state from public, anon, authenticated;
+
+grant select, insert, update, delete on table public.traffic_counter_state to cf_monitor_app, service_role;
+
+drop policy if exists cf_monitor_app_all on public.traffic_counter_state;
+
+create policy cf_monitor_app_all on public.traffic_counter_state for all to cf_monitor_app using (true) with check (true);
+
 insert into settings (key, value) values ('schema_bootstrap_version', 'postgres-2026-07-squashed')
   on conflict (key) do update set value = excluded.value;
 

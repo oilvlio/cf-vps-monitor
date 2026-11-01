@@ -124,6 +124,22 @@ export function buildLoadNotification(input: {
   });
 }
 
+export function buildTokenSourceIpChangeNotification(input: {
+  nodeName: string;
+  uuid: string;
+  previousIp: string;
+  newIp: string;
+  eventTime?: string | Date;
+}): NotificationMessage {
+  return eventMessage({
+    emoji: '🛰️',
+    event: 'Token 来源 IP 变化',
+    clients: input.nodeName,
+    message: `UUID ${input.uuid}；来源 IP ${input.previousIp} → ${input.newIp}`,
+    time: input.eventTime,
+  });
+}
+
 export function buildIpChangeNotification(input: {
   nodeName: string;
   parts: string[];

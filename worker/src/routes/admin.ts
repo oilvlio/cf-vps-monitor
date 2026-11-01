@@ -156,6 +156,7 @@ const SETTINGS_SCOPE_KEYS = {
     'webhook_password',
     'webhook_retry_count',
     'enable_ip_change_notification',
+    'enable_token_source_ip_notification',
     'offline_notify_never_reported',
   ],
 } as const satisfies Record<string, readonly (keyof typeof SETTING_SCHEMA)[]>;

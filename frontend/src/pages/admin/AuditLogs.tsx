@@ -50,7 +50,7 @@ function SummaryCards({
 }) {
   const userCount = new Set(logs.map((log) => log.user).filter(Boolean)).size;
   const highRiskCount = logs.filter((log) =>
-    ['client_remove', 'record_clear', 'record_clear_all', 'backup_restore', 'ping_delete', 'agent_token_source_ip_change'].includes(log.action || ''),
+    ['client_remove', 'record_clear', 'record_clear_all', 'backup_restore', 'ping_delete'].includes(log.action || ''),
   ).length;
   const todayCount = logs.filter((log) => {
     const now = new Date();

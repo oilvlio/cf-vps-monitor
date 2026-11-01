@@ -11,7 +11,7 @@ import { getDatabase } from '../db/provider';
 import { buildAdminSettings } from '../settings/schema';
 import { normalizeMonitorReport, type MonitorReportPayload } from '../utils/monitor-report';
 import { validatePingResults } from '../utils/ping-result';
-import { buildIpChangeNotification } from '../utils/notification-templates';
+import { buildIpChangeNotification, buildTokenSourceIpChangeNotification } from '../utils/notification-templates';
 import { bestEffortRecordHealthEvent, errorDetail } from '../utils/observability';
 import { NOTIFICATION_DISPATCH_SETTING_KEYS, dispatchNotification } from '../utils/notification-dispatch';
 import { getCloudflareClientIp, isPublicIpAddress } from '../utils/request-ip';
@@ -50,6 +50,10 @@ const AGENT_REPORT_RATE_LIMIT_MAX = 120;
 const AGENT_PING_RESULT_RATE_LIMIT_MAX = 180;
 const IP_CHANGE_NOTIFICATION_SETTING_KEYS = [
   'enable_ip_change_notification',
+  ...NOTIFICATION_DISPATCH_SETTING_KEYS,
+];
+const TOKEN_SOURCE_IP_NOTIFICATION_SETTING_KEYS = [
+  'enable_token_source_ip_notification',
   ...NOTIFICATION_DISPATCH_SETTING_KEYS,
 ];
 const AGENT_POLICY_SETTING_KEYS = [
@@ -259,13 +263,6 @@ async function upsertLiveAgentAuthClient(env: Bindings, client: db.Client): Prom
   }));
 }
 
-async function sourceIpFingerprint(ip: string): Promise<string> {
-  const normalized = ip.trim().toLowerCase();
-  if (!normalized) return '';
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(normalized));
-  return `sha256:${Array.from(new Uint8Array(digest)).slice(0, 8).map(byte => byte.toString(16).padStart(2, '0')).join('')}`;
-}
-
 async function recordAgentTokenSourceIpChange(
   database: db.QueryDatabase,
   client: Pick<db.Client, 'uuid' | 'name' | 'token_last_used_ip'>,
@@ -275,17 +272,20 @@ async function recordAgentTokenSourceIpChange(
   const nextIp = ip.trim();
   if (!previousIp || !nextIp || previousIp === nextIp) return;
 
-  const [previousIpFingerprint, nextIpFingerprint] = await Promise.all([
-    sourceIpFingerprint(previousIp),
-    sourceIpFingerprint(nextIp),
-  ]);
-  await db.insertAuditLog(
-    database,
-    'system',
-    'agent_token_source_ip_change',
-    `Agent token source IP changed: uuid=${client.uuid}; name=${client.name || '-'}; previous_ip_fp=${previousIpFingerprint}; new_ip_fp=${nextIpFingerprint}`,
-    'warning',
-  );
+  // 可选功能：默认关闭，在「通知管理 → 来源 IP 通知」中开启。
+  // 通过全局通知渠道发送明文 IP，不再写入审计日志。
+  const settings = await db.getSettingsByKeys(database, TOKEN_SOURCE_IP_NOTIFICATION_SETTING_KEYS);
+  if (settings['enable_token_source_ip_notification'] !== 'true') return;
+
+  const notification = buildTokenSourceIpChangeNotification({
+    nodeName: client.name || '-',
+    uuid: client.uuid,
+    previousIp,
+    newIp: nextIp,
+  });
+  await dispatchNotification(database, buildAdminSettings(settings), notification, {
+    deps: { recordHealth: bestEffortRecordHealthEvent },
+  });
 }
 
 export async function getAgentClientByToken(

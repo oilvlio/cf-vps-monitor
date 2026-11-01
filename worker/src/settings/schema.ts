@@ -315,6 +315,11 @@ export const SETTING_SCHEMA = {
     defaultValue: 'false',
     public: false,
   },
+  enable_token_source_ip_notification: {
+    type: 'boolean',
+    defaultValue: 'false',
+    public: false,
+  },
   offline_notify_never_reported: {
     type: 'boolean',
     defaultValue: 'true',

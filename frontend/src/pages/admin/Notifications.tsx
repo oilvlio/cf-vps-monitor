@@ -4,17 +4,17 @@ import {
   Dialog, Badge, Switch, Table, Tabs, Select,
   Box, Checkbox, TextArea,
 } from '@radix-ui/themes';
-import { Plus, Pencil, Trash2, Search, Send, Save, Unplug, TrendingUp, Bell, CalendarClock } from 'lucide-react';
+import { Plus, Pencil, Trash2, Search, Send, Save, Unplug, TrendingUp, Bell, CalendarClock, Globe } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
 import { useApi } from '../../contexts/AuthContext';
 import { useAdminAction } from '../../hooks/useAdminAction';
-import { SettingCard, SettingInput, SettingTextarea } from '../../components/admin/SettingCard';
+import { SettingCard, SettingInput, SettingTextarea, SettingToggle } from '../../components/admin/SettingCard';
 import { summarizeSelectionValue } from '../../utils/batchPrefill';
 import { getChangedSettings, type SettingsMap } from '../../utils/settingsDiff';
 
-const notificationTabValues = ['settings', 'offline', 'expiry', 'load'] as const;
+const notificationTabValues = ['settings', 'offline', 'expiry', 'load', 'sourceip'] as const;
 
 /**
  * 默认离线通知宽限期（秒）。
@@ -66,6 +66,7 @@ const emptyTabState: Record<NotificationTab, boolean> = {
   offline: false,
   expiry: false,
   load: false,
+  sourceip: false,
 };
 
 function toNotificationTab(value?: string): NotificationTab {
@@ -264,6 +265,8 @@ export default function AdminNotifications() {
     if (tab === 'settings') return loadSettingsTab(force);
     if (tab === 'offline') return loadOfflineTab(force);
     if (tab === 'expiry') return loadExpiryTab(force);
+    // 来源 IP 通知只是一个开关，与「通知设置」共用同一份设置数据。
+    if (tab === 'sourceip') return loadSettingsTab(force);
     return loadLoadTab(force);
   }, [loadExpiryTab, loadLoadTab, loadOfflineTab, loadSettingsTab]);
 
@@ -713,7 +716,7 @@ export default function AdminNotifications() {
         ? 'gray'
         : 'green';
   const showClientSearch = activeTab === 'offline' || activeTab === 'expiry';
-  const headerAction = activeTab === 'settings' ? (
+  const headerAction = activeTab === 'settings' || activeTab === 'sourceip' ? (
     <Button onClick={saveNotificationSettings} disabled={settingsSaving || tabLoading.settings}>
       <Save size={14} /> {settingsSaving ? '保存中…' : '保存设置'}
     </Button>
@@ -760,6 +763,9 @@ export default function AdminNotifications() {
             </Tabs.Trigger>
             <Tabs.Trigger value="load">
               <TrendingUp size={14} /> {loadedTabs.load ? `负载通知 (${loadNotifications.length} 条)` : '负载通知'}
+            </Tabs.Trigger>
+            <Tabs.Trigger value="sourceip">
+              <Globe size={14} /> 来源 IP 通知
             </Tabs.Trigger>
           </Tabs.List>
           {!showClientSearch && (
@@ -1388,6 +1394,25 @@ export default function AdminNotifications() {
                 </Table.Body>
               </Table.Root>
               </div>
+            )}
+          </Tabs.Content>
+
+          {/* ─── Token Source IP Tab ─── */}
+          <Tabs.Content value="sourceip">
+            {tabLoading.settings ? (
+              <Loading />
+            ) : (
+              <SettingCard
+                title="Agent Token 来源 IP 变化通知"
+                description="可选功能，默认关闭；通过「通知设置」中选择的全局渠道发送"
+              >
+                <SettingToggle
+                  label="启用来源 IP 变化通知"
+                  description="当同一个 Agent Token 的请求来源 IP 发生变化时发送通知，内容包含变化前后的完整 IP（明文），不再写入审计日志。修改后需点击右上角「保存设置」。"
+                  checked={settings.enable_token_source_ip_notification === 'true'}
+                  onCheckedChange={(checked) => updateSetting('enable_token_source_ip_notification', checked ? 'true' : 'false')}
+                />
+              </SettingCard>
             )}
           </Tabs.Content>
         </Box>

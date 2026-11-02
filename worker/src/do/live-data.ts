@@ -20,8 +20,8 @@ import { bestEffortRecordHealthEvent, errorDetail, type StoredHealthComponent } 
 import { isPublicIpAddress } from '../utils/request-ip';
 import { unwrapMonitorReportEnvelope } from '../utils/report-envelope';
 import {
-  collectTrafficSamples, localDateKey, normalizeResetDay, parseTrafficImport, selectDueSamples,
-  TRAFFIC_APPLY_MIN_GAP_MS, trafficPeriodStart,
+  collectTrafficSamples, estimateTrafficDelta, localDateKey, nextTrafficBase, normalizeResetDay, parseTrafficImport,
+  parseTrafficSample, selectDueSamples, TRAFFIC_APPLY_MIN_GAP_MS, trafficPeriodStart, type TrafficSample,
 } from '../utils/traffic-samples';
 import { isRecordPersistDue, recordPersistThresholdMs } from '../utils/record-persist';
 import { toPublicReport } from '../utils/public-report';
@@ -457,6 +457,8 @@ export class LiveDataDO {
     periodStart: string | null;
     /** 最近一次成功交给数据库的样本时间（毫秒）。 */
     lastAppliedTs?: number;
+    /** 与 up/down 同时更新的基线样本：up/down 对应「数据库已记到这个样本为止」的合计。 */
+    base?: TrafficSample;
     inFlight: boolean;
   }>();
   private trafficErrorAt = new Map<string, number>();
@@ -1135,7 +1137,8 @@ export class LiveDataDO {
   // 这里约每 2 分钟（与 ping record 同节奏）把样本交给数据库，由它换算增量、累加到 Agent 本地日期的日桶，
   // 并返回当前计费周期 [重置日, 今天] 的合计；用这个合计覆盖 report 的 net_total_up/down，
   // 下游（实时推送、records 落库、公开接口）看到的就是合成好的月度流量。
-  //   * 两次落库之间沿用上一次的合计，所以月度总量最多滞后约 2 分钟；
+  //   * 两次落库之间，合计 = 数据库上次返回的合计 + 本份样本相对上次落库样本的增量（只在内存里估算，规则与 SQL 一致），
+  //     所以月度总量随每份 report 刷新；写库节奏不变；
   //   * 落库失败只丢这一次样本（读数是累计的，下一次差值会把空档补上），report 本身照常接收；
   //   * 不带 traffic_sample 的 report（旧版 Agent）原样放行，其 net_total_* 本来就是 Agent 自己算的。
   // 同时处理旧版 Agent 的一次性本地历史导入（traffic_import），成功后返回 imported=true，随 ack 回给 Agent。
@@ -1183,7 +1186,10 @@ export class LiveDataDO {
             current.up = totals.up;
             current.down = totals.down;
             current.periodStart = periodStart;
-            if (due.length > 0) current.lastAppliedTs = due[due.length - 1].ts;
+            if (due.length > 0) {
+              current.lastAppliedTs = due[due.length - 1].ts;
+              current.base = nextTrafficBase(current.base, due[due.length - 1]);
+            }
           })
           .catch(error => this.noteTrafficError(database, clientId, 'apply', error))
           .finally(() => { current.inFlight = false; });
@@ -1197,11 +1203,28 @@ export class LiveDataDO {
     const prepared = reports.map(report => {
       const { traffic_sample: sample, traffic_import: _legacy, ...rest } = report;
       if (sample !== undefined && totals && totals.periodStart !== null) {
-        return { ...rest, net_total_up: totals.up, net_total_down: totals.down };
+        // 落库仍是约 2 分钟一次，但展示不必跟着停：合计 = 数据库已记的合计 + 本份样本相对基线的未入库增量。
+        // 这样流量少、实时网速在动时，累计流量也随每份 report 一起走；落库后由数据库的精确值接管。
+        const pending = this.pendingTraffic(totals, sample, report, nowMs);
+        return { ...rest, net_total_up: totals.up + pending.up, net_total_down: totals.down + pending.down };
       }
       return rest;
     });
     return { reports: prepared, imported };
+  }
+
+  private pendingTraffic(
+    totals: { periodStart: string | null; base?: TrafficSample },
+    rawSample: unknown,
+    report: JsonObject,
+    nowMs: number,
+  ): { up: number; down: number } {
+    const base = totals.base;
+    if (!base || totals.periodStart === null) return { up: 0, down: 0 };
+    // 基线还停在上一个计费周期（刚跨周期、只读刷新过）：此时的差值有一部分属于旧周期，不能加进新周期的合计。
+    if (localDateKey(base.ts, base.utc_offset) < totals.periodStart) return { up: 0, down: 0 };
+    const sample = parseTrafficSample(rawSample, this.reportTimestamp(report, nowMs));
+    return sample ? estimateTrafficDelta(base, sample) : { up: 0, down: 0 };
   }
 
   private noteTrafficError(database: db.QueryDatabase, clientId: string, phase: 'import' | 'apply', error: unknown): void {

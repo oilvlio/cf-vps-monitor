@@ -3,8 +3,10 @@ import test from 'node:test';
 
 const {
   collectTrafficSamples,
+  estimateTrafficDelta,
   isValidDateKey,
   localDateKey,
+  nextTrafficBase,
   parseTrafficImport,
   parseTrafficSample,
   selectDueSamples,
@@ -149,4 +151,31 @@ test('a legacy import is parsed strictly: bad days are dropped, an unusable base
   const baselineOnly = parseTrafficImport([{ traffic_import: { baseline: { scope: 'abc', interfaces: { eth0: { up: 1, down: 1 } } } } }]);
   assert.deepEqual(baselineOnly.days, []);
   assert.equal(baselineOnly.baseline.boot, 0);
+});
+
+const mk = (ts, up, down, extra = {}) => ({ ts, boot: 1780000000, scope: 's', utc_offset: 0, interfaces: { eth0: { up, down } }, ...extra });
+
+test('estimateTrafficDelta mirrors the SQL rules: diff, wrap, reboot, new nic, scope change', () => {
+  const base = mk(1000, 500, 800, { interfaces: { eth0: { up: 500, down: 800 }, eth1: { up: 10, down: 10 } } });
+  // 普通差值；eth1 消失被忽略
+  assert.deepEqual(estimateTrafficDelta(base, mk(2000, 560, 900)), { up: 60, down: 100 });
+  // 计数器变小：视为回绕 / 清零，取当前读数
+  assert.deepEqual(estimateTrafficDelta(base, mk(2000, 30, 900)), { up: 30, down: 100 });
+  // 重启（boot 相差 > 60 秒）：整体都是增量
+  assert.deepEqual(estimateTrafficDelta(base, mk(2000, 40, 50, { boot: 1780000500 })), { up: 40, down: 50 });
+  // boot 只差几秒：不算重启
+  assert.deepEqual(estimateTrafficDelta(base, mk(2000, 560, 900, { boot: 1780000005 })), { up: 60, down: 100 });
+  // 新出现的网卡只起基线
+  assert.deepEqual(estimateTrafficDelta(base, mk(2000, 560, 900, { interfaces: { eth0: { up: 560, down: 900 }, eth9: { up: 999, down: 999 } } })), { up: 60, down: 100 });
+  // scope 变化 / 没有基线 / 样本不比基线新：0
+  assert.deepEqual(estimateTrafficDelta(base, mk(2000, 560, 900, { scope: 'other' })), { up: 0, down: 0 });
+  assert.deepEqual(estimateTrafficDelta(undefined, mk(2000, 560, 900)), { up: 0, down: 0 });
+  assert.deepEqual(estimateTrafficDelta(base, mk(1000, 560, 900)), { up: 0, down: 0 });
+});
+
+test('nextTrafficBase keeps the last valid boot when the applied sample has none (same as the SQL state)', () => {
+  const previous = mk(1000, 1, 1);
+  assert.equal(nextTrafficBase(previous, mk(2000, 2, 2, { boot: 0 })).boot, 1780000000);
+  assert.equal(nextTrafficBase(previous, mk(2000, 2, 2, { boot: 1780000999 })).boot, 1780000999);
+  assert.equal(nextTrafficBase(undefined, mk(2000, 2, 2, { boot: 0 })).boot, 0);
 });

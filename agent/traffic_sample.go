@@ -18,7 +18,7 @@ import (
 //	       修改重置日只是换一个求和区间。
 //
 // 好处是 Agent 重装、容器无持久卷、状态目录没有写权限都不再影响流量统计。
-// 代价见 README：月度总量的刷新节奏与 ping record 相近（约 2 分钟），而不是每次上报。
+// 写库节奏见 README：约 2 分钟一次；两次落库之间 Worker 在内存里按增量估算展示值，随每次上报刷新。
 
 // TrafficCounter 是某块网卡自开机以来的累计字节数。
 type TrafficCounter struct {

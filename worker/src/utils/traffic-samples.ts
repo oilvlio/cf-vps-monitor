@@ -4,7 +4,7 @@
 //   1. 校验并限幅这些读数；
 //   2. 按约 2 分钟一次的节奏把样本交给 Supabase（cfm_traffic_apply_samples），由数据库在一个事务里
 //      换算增量、累加到 Agent 本地日期的日桶、更新读数，并返回当前计费周期 [重置日, 今天] 的合计；
-//   3. 用这个合计覆盖 report 的 net_total_up/down，下游（实时推送、records、公开接口）无需感知。
+//   3. 用这个合计（加上两次落库之间的内存估算增量）覆盖 report 的 net_total_up/down，下游（实时推送、records、公开接口）无需感知。
 // 这里只放不依赖 DO / 数据库的部分，便于单测。
 
 type JsonObject = Record<string, unknown>;
@@ -173,6 +173,42 @@ export function selectDueSamples(samples: TrafficSample[], lastAppliedTs: number
     }
   }
   return due;
+}
+
+/**
+ * 估算「当前样本」相对「已落库的基线样本」还没入库的增量，规则与 cfm_traffic_apply_samples 逐条一致：
+ *   * scope 不同 / 没有基线：只起基线，增量为 0（数据库同样不记）；
+ *   * 开机时间相差 60 秒以上：视为重启，当前读数整体都是增量；
+ *   * 否则逐网卡逐方向：读数不小于基线取差值，变小视为回绕 / 清零，取当前读数；
+ *   * 基线里没有的网卡（新出现）不计；当前样本里没有的网卡忽略。
+ * 只用于展示：两次落库之间让月度总量跟着每份 report 一起走，不写库，落库后由数据库的精确合计取代。
+ */
+export function estimateTrafficDelta(base: TrafficSample | undefined, current: TrafficSample): TrafficCounterPair {
+  const zero = { up: 0, down: 0 };
+  if (!base || base.scope !== current.scope || current.ts <= base.ts) return zero;
+  const reboot = current.boot > 0 && base.boot > 0 && Math.abs(current.boot - base.boot) > 60;
+  let up = 0;
+  let down = 0;
+  for (const [name, now] of Object.entries(current.interfaces)) {
+    if (reboot) {
+      up += now.up;
+      down += now.down;
+      continue;
+    }
+    const prev = base.interfaces[name];
+    if (!prev) continue;
+    up += now.up >= prev.up ? now.up - prev.up : now.up;
+    down += now.down >= prev.down ? now.down - prev.down : now.down;
+  }
+  return { up, down };
+}
+
+/**
+ * 把刚交给数据库的样本记为新基线。数据库只在样本 boot > 0 时才更新已存的开机时间，
+ * 这里同样保留上一个有效的 boot，保证两边对「是否重启」的判断一致。
+ */
+export function nextTrafficBase(previous: TrafficSample | undefined, applied: TrafficSample): TrafficSample {
+  return applied.boot > 0 || !previous ? applied : { ...applied, boot: previous.boot };
 }
 
 /** 取一批 report 里第一个 traffic_import（Agent 只把它挂在信封的第一份 report 上）。 */

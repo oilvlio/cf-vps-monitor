@@ -239,3 +239,54 @@ test('websocket: the ack confirms a legacy import and otherwise stays exactly as
   assert.deepEqual(Object.keys(ack).sort(), ['timestamp', 'type']);
   assert.equal(g.calls.apply.length, 1);
 });
+
+test('between applies the total keeps moving with every report (committed total + not-yet-applied delta)', async () => {
+  const f = fixture({ totals: { up: 10_000, down: 20_000, applied: 1 } });
+  await post(f, [sampleAt(T0, 1000, 2000)]); // 落库，基线 = 1000/2000
+  assert.equal(f.storedReport().net_total_up, 10_000);
+
+  await post(f, [sampleAt(T0 + 3_000, 1300, 2500)]); // 没到落库间隔：不查库，但合计跟着走
+  assert.equal(f.calls.apply.length, 1);
+  assert.equal(f.storedReport().net_total_up, 10_300);
+  assert.equal(f.storedReport().net_total_down, 20_500);
+
+  await post(f, [sampleAt(T0 + 6_000, 1350, 2600)]);
+  assert.equal(f.calls.apply.length, 1);
+  assert.equal(f.storedReport().net_total_up, 10_350);
+  assert.equal(f.storedReport().net_total_down, 20_600);
+});
+
+test('after the next apply the database total takes over and the estimate restarts from the new baseline', async () => {
+  // 数据库返回的合计 = 已记到该样本为止；这里模拟「到 T0+130s 时库里记了 +400 / +700」。
+  let call = 0;
+  const f = fixture({ applyImpl: samples => ({ up: call++ === 0 ? 10_000 : 10_400, down: call === 1 ? 20_000 : 20_700, applied: samples.length }) });
+  await post(f, [sampleAt(T0, 1000, 2000)]);
+  await post(f, [sampleAt(T0 + 130_000, 1400, 2700)]); // 后台落库，本份 report 仍用旧合计 + 增量
+  assert.equal(f.storedReport().net_total_up, 10_400, 'old committed 10_000 + (1400 - 1000)');
+  await post(f, [sampleAt(T0 + 133_000, 1450, 2800)]); // 新合计 10_400 已到位，基线 = 1400/2700
+  assert.equal(f.calls.apply.length, 2);
+  assert.equal(f.storedReport().net_total_up, 10_450, 'no double counting across the handover');
+  assert.equal(f.storedReport().net_total_down, 20_800);
+});
+
+test('a reboot or counter reset between applies is shown as the fresh counter value, like the database will record it', async () => {
+  const f = fixture({ totals: { up: 10_000, down: 20_000, applied: 1 } });
+  await post(f, [sampleAt(T0, 1000, 2000)]);
+  await post(f, [sampleAt(T0 + 3_000, 40, 70, { boot: 1790000000 })]);
+  assert.equal(f.storedReport().net_total_up, 10_040);
+  assert.equal(f.storedReport().net_total_down, 20_070);
+});
+
+test('no estimate is added when the baseline is still in the previous billing period', async () => {
+  const f = fixture({ resetDay: 15, totals: { up: 0, down: 0, applied: 0 } });
+  await post(f, [sampleAt(Date.UTC(2027, 0, 14, 23, 59), 1000)]); // 周期 12-15 起
+  await post(f, [sampleAt(Date.UTC(2027, 0, 15, 0, 0, 2), 1500)]); // 跨周期，只读刷新，基线仍是 01-14
+  assert.equal(f.storedReport().net_total_up, 0, 'the 500 bytes mostly belong to the old period; wait for the next apply');
+});
+
+test('a failed apply never shows an invented estimate', async () => {
+  const f = fixture({ applyImpl: () => { throw new Error('database unavailable'); } });
+  await post(f, [sampleAt(T0, 1000)]);
+  await post(f, [sampleAt(T0 + 3_000, 1500)]);
+  assert.equal(f.storedReport().net_total_up, 111, 'the agent raw value stays; there is no baseline to estimate from');
+});

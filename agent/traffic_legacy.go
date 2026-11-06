@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -181,7 +180,7 @@ func loadLegacyTrafficImport(path string, now time.Time) *legacyTrafficImport {
 		existing = append(existing, candidate)
 		state, err := decodeLegacyState(data)
 		if err != nil {
-			log.Printf("legacy traffic state %s ignored: %v", filepath.Base(candidate), err)
+			logWarnf("legacy traffic state %s ignored: %v", filepath.Base(candidate), err)
 			continue
 		}
 		if !found || state.Revision > best.Revision {
@@ -202,7 +201,7 @@ func loadLegacyTrafficImport(path string, now time.Time) *legacyTrafficImport {
 		}
 		return nil
 	}
-	log.Printf("legacy traffic history found: %d day(s) will be imported to the server", len(imported.payload.Days))
+	logInfof("legacy traffic history found: %d day(s) will be imported to the server", len(imported.payload.Days))
 	return imported
 }
 
@@ -234,10 +233,10 @@ func (l *legacyTrafficImport) finish() {
 	l.done = true
 	for _, file := range l.files {
 		if err := os.Rename(file, file+".imported"); err != nil && !errors.Is(err, os.ErrNotExist) {
-			log.Printf("legacy traffic state %s could not be renamed after import: %v", filepath.Base(file), err)
+			logWarnf("legacy traffic state %s could not be renamed after import: %v", filepath.Base(file), err)
 		}
 	}
-	log.Printf("legacy traffic history imported; old state files renamed to *.imported")
+	logInfof("legacy traffic history imported; old state files renamed to *.imported")
 }
 
 func attachTrafficImport(reports []Report) []Report {

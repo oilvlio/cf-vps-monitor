@@ -4,13 +4,13 @@ import { productionModule } from './helpers/production-module.mjs';
 
 const { buildAgentInstallCommand, defaultAgentInstallOptions } = productionModule('src/utils/agentInstallCommand.ts');
 
-function build(platform, disableGpu) {
+function build(platform, enableGpu, logLevel = 'info') {
   return buildAgentInstallCommand({
     platform,
     serverUrl: 'https://synthetic.invalid',
     token: 'synthetic-token',
     instanceId: 'synthetic-node',
-    options: { ...defaultAgentInstallOptions, disableGpu },
+    options: { ...defaultAgentInstallOptions, enableGpu, logLevel },
   });
 }
 
@@ -20,14 +20,23 @@ function encodedPowerShell(command) {
   return Buffer.from(match[1], 'base64').toString('utf16le');
 }
 
-test('GPU collection stays enabled by default and can be disabled for Unix installs', () => {
-  assert.equal(build('unix', false).includes('--disable-gpu'), false);
-  assert.match(build('unix', true), / '--disable-gpu'/);
+test('GPU collection is off by default and can be enabled for Unix installs', () => {
+  assert.equal(build('unix', false).includes('--enable-gpu'), false);
+  assert.match(build('unix', true), / '--enable-gpu'/);
 });
 
-test('GPU collection can be disabled for Windows installs with an unquoted switch', () => {
-  assert.equal(encodedPowerShell(build('windows', false)).includes('-DisableGpu'), false);
+test('GPU collection can be enabled for Windows installs with an unquoted switch', () => {
+  assert.equal(encodedPowerShell(build('windows', false)).includes('-EnableGpu'), false);
   const script = encodedPowerShell(build('windows', true));
-  assert.match(script, /(?:^|\s)-DisableGpu(?:$|\s)/);
-  assert.equal(script.includes("'-DisableGpu'"), false);
+  assert.match(script, /(?:^|\s)-EnableGpu(?:$|\s)/);
+  assert.equal(script.includes("'-EnableGpu'"), false);
+});
+
+test('log level is passed to both installers only when it differs from the default', () => {
+  assert.equal(build('unix', false).includes('--log-level'), false);
+  assert.match(build('unix', false, 'debug'), / '--log-level' 'debug'/);
+  assert.equal(encodedPowerShell(build('windows', false)).includes('-LogLevel'), false);
+  const script = encodedPowerShell(build('windows', true, 'warn'));
+  assert.match(script, /(?:^|\s)-LogLevel 'warn'(?:\s)/);
+  assert.match(script, /(?:^|\s)-EnableGpu(?:$|\s)/);
 });

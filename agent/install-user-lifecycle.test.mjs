@@ -30,7 +30,7 @@ TMPDIR="$ROOT/temp"; export TMPDIR; mkdir -p "$TMPDIR"
 SERVICE_MODE=user; DRY_RUN=0; YES=1; KEEP_FILES=0; INSTALL_DIR=''; SERVICE_NAME=''; INSTANCE_ID=one
 SERVER=https://monitor.example.test; TOKEN=old-token; NODE_NAME=fixture; MODE=websocket
 MOUNT_INCLUDE=''; MOUNT_EXCLUDE=''; NIC_INCLUDE=''; NIC_EXCLUDE=''
-INTERVAL=3; PING_INTERVAL=120; TRAFFIC_RESET_DAY=1
+INTERVAL=3; PING_INTERVAL=120
 apply_defaults
 test_pids=''
 cleanup_fixture() {

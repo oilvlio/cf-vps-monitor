@@ -6,7 +6,6 @@ TOKEN=""
 NODE_NAME="$(hostname)"
 INTERVAL="3"
 PING_INTERVAL="120"
-TRAFFIC_RESET_DAY="1"
 MODE="websocket"
 INSTALL_DIR=""
 SERVICE_NAME=""
@@ -33,8 +32,9 @@ MOUNT_INCLUDE=""
 MOUNT_EXCLUDE=""
 NIC_INCLUDE=""
 NIC_EXCLUDE=""
-ALLOW_HOST_LOAD="0"
-DISABLE_GPU="0"
+ALLOW_HOST_LOAD="1"
+ENABLE_GPU="0"
+LOG_LEVEL="info"
 HOST_CPU_CORES="0"
 DISABLE_WEB_SSH="0"
 DISABLE_AUTO_UPDATE="0"
@@ -53,7 +53,6 @@ Options:
   --name NAME               Node name, default: hostname.
   --interval SECONDS        Report interval, default: 3.
   --ping-interval SECONDS   Ping task poll interval, default: 120.
-  --traffic-reset-day DAY   Monthly traffic reset day, default: 1.
   --mode MODE               websocket or http, default: websocket.
   --instance-id ID          Instance id used for default service and install directory.
   --install-dir DIR         Install directory, default: /opt/cf-vps-monitor/<instance-id>.
@@ -72,8 +71,10 @@ Options:
   --mount-exclude LIST      Comma-separated mountpoint/device patterns excluded from disk totals.
   --nic-include LIST        Comma-separated network interface patterns included in traffic totals.
   --nic-exclude LIST        Comma-separated network interface patterns excluded from traffic totals.
-  --allow-host-load         In containers, report the host load average instead of leaving load unavailable.
-  --disable-gpu             Skip GPU detection and reporting entirely (no nvidia-smi / rocm-smi probes).
+  --allow-host-load         In containers, report the host load average (default).
+  --no-host-load            Leave load unavailable in containers whose /proc/loadavg is the host's.
+  --enable-gpu              Probe and report GPUs via nvidia-smi / rocm-smi (off by default).
+  --log-level LEVEL         Agent log level: debug, info, warn or error. Default: info.
   --host-cpu-cores N        Host CPU core count; scales host load to this container's cores (0 = no scaling).
   --disable-web-ssh         Accepted as a legacy no-op option.
   --disable-auto-update     Accepted as a legacy no-op option.
@@ -798,7 +799,6 @@ while [[ $# -gt 0 ]]; do
     -n|--name) NODE_NAME="${2:-}"; shift 2 ;;
     --interval) INTERVAL="${2:-}"; shift 2 ;;
     --ping-interval) PING_INTERVAL="${2:-}"; shift 2 ;;
-    -r|--traffic-reset-day) TRAFFIC_RESET_DAY="${2:-}"; shift 2 ;;
     --mode) MODE="${2:-}"; shift 2 ;;
     -i|--instance-id) INSTANCE_ID="${2:-}"; shift 2 ;;
     --install-dir) INSTALL_DIR="${2:-}"; shift 2 ;;
@@ -816,7 +816,9 @@ while [[ $# -gt 0 ]]; do
     --nic-include) NIC_INCLUDE="${2:-}"; shift 2 ;;
     --nic-exclude) NIC_EXCLUDE="${2:-}"; shift 2 ;;
     --allow-host-load) ALLOW_HOST_LOAD="1"; shift ;;
-    --disable-gpu) DISABLE_GPU="1"; shift ;;
+    --no-host-load) ALLOW_HOST_LOAD="0"; shift ;;
+    --enable-gpu) ENABLE_GPU="1"; shift ;;
+    --log-level) LOG_LEVEL="${2:-}"; shift 2 ;;
     --host-cpu-cores) HOST_CPU_CORES="${2:-}"; shift 2 ;;
     --disable-web-ssh) DISABLE_WEB_SSH="1"; shift ;;
     --disable-auto-update) DISABLE_AUTO_UPDATE="1"; shift ;;
@@ -885,10 +887,10 @@ if [[ "$MODE" != "websocket" && "$MODE" != "http" ]]; then
   exit 1
 fi
 
-if ! [[ "$TRAFFIC_RESET_DAY" =~ ^[0-9]+$ ]] || (( TRAFFIC_RESET_DAY < 1 || TRAFFIC_RESET_DAY > 31 )); then
-  echo "--traffic-reset-day must be a number from 1 to 31." >&2
-  exit 1
-fi
+case "$LOG_LEVEL" in
+  debug|info|warn|error) ;;
+  *) echo "--log-level must be debug, info, warn or error." >&2; exit 1 ;;
+esac
 
 SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
@@ -1017,7 +1019,6 @@ reject_env_value "mount-include" "$MOUNT_INCLUDE"
 reject_env_value "mount-exclude" "$MOUNT_EXCLUDE"
 reject_env_value "nic-include" "$NIC_INCLUDE"
 reject_env_value "nic-exclude" "$NIC_EXCLUDE"
-reject_env_value "traffic-reset-day" "$TRAFFIC_RESET_DAY"
 if ! [[ "$HOST_CPU_CORES" =~ ^[0-9]+$ ]] || (( HOST_CPU_CORES > 65535 )); then
   echo "--host-cpu-cores must be a number from 0 to 65535." >&2
   exit 1
@@ -1041,11 +1042,11 @@ export CF_MONITOR_MOUNT_EXCLUDE=$(shell_quote "$MOUNT_EXCLUDE")
 export CF_MONITOR_NIC_INCLUDE=$(shell_quote "$NIC_INCLUDE")
 export CF_MONITOR_NIC_EXCLUDE=$(shell_quote "$NIC_EXCLUDE")
 export CF_MONITOR_ALLOW_HOST_LOAD=$(shell_quote "$ALLOW_HOST_LOAD")
-export CF_MONITOR_DISABLE_GPU=$(shell_quote "$DISABLE_GPU")
+export CF_MONITOR_ENABLE_GPU=$(shell_quote "$ENABLE_GPU")
+export CF_MONITOR_LOG_LEVEL=$(shell_quote "$LOG_LEVEL")
 export CF_MONITOR_HOST_CPU_CORES=$(shell_quote "$HOST_CPU_CORES")
-export CF_MONITOR_TRAFFIC_RESET_DAY=$(shell_quote "$TRAFFIC_RESET_DAY")
 export CF_MONITOR_TRAFFIC_STATE_FILE=$(shell_quote "${STATE_DIR}/traffic-state.json")
-exec $(shell_quote "${INSTALL_DIR}/cf-vps-monitor-agent") --interval ${INTERVAL} --ping-interval ${PING_INTERVAL} --traffic-reset-day ${TRAFFIC_RESET_DAY}
+exec $(shell_quote "${INSTALL_DIR}/cf-vps-monitor-agent") --interval ${INTERVAL} --ping-interval ${PING_INTERVAL}
 EOF
 )
   write_file "$RUNNER_FILE" "700" "$RUNNER_CONTENT"
@@ -1095,9 +1096,9 @@ CF_MONITOR_MOUNT_EXCLUDE=$(systemd_env_quote "$MOUNT_EXCLUDE")
 CF_MONITOR_NIC_INCLUDE=$(systemd_env_quote "$NIC_INCLUDE")
 CF_MONITOR_NIC_EXCLUDE=$(systemd_env_quote "$NIC_EXCLUDE")
 CF_MONITOR_ALLOW_HOST_LOAD=$(systemd_env_quote "$ALLOW_HOST_LOAD")
-CF_MONITOR_DISABLE_GPU=$(systemd_env_quote "$DISABLE_GPU")
+CF_MONITOR_ENABLE_GPU=$(systemd_env_quote "$ENABLE_GPU")
+CF_MONITOR_LOG_LEVEL=$(systemd_env_quote "$LOG_LEVEL")
 CF_MONITOR_HOST_CPU_CORES=$(systemd_env_quote "$HOST_CPU_CORES")
-CF_MONITOR_TRAFFIC_RESET_DAY=$(systemd_env_quote "$TRAFFIC_RESET_DAY")
 CF_MONITOR_TRAFFIC_STATE_FILE=$(systemd_env_quote "$STATE_DIR/traffic-state.json")
 EOF
 )
@@ -1115,7 +1116,7 @@ User=cf-vps-monitor-agent
 Group=cf-vps-monitor-agent
 EnvironmentFile=$(systemd_path "$ENV_FILE")
 WorkingDirectory=$(systemd_path "$INSTALL_DIR/")
-ExecStart=$(systemd_exec "$INSTALL_DIR/cf-vps-monitor-agent") --interval ${INTERVAL} --ping-interval ${PING_INTERVAL} --traffic-reset-day ${TRAFFIC_RESET_DAY}
+ExecStart=$(systemd_exec "$INSTALL_DIR/cf-vps-monitor-agent") --interval ${INTERVAL} --ping-interval ${PING_INTERVAL}
 Restart=always
 RestartSec=5
 # Allow ICMP ping for the unprivileged service user without granting broad root privileges.

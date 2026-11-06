@@ -11,9 +11,6 @@ param(
   [Alias("Interval")]
   [int]$ReportInterval = 3,
   [int]$PingInterval = 120,
-  [Alias("r")]
-  [ValidateRange(1, 31)]
-  [int]$TrafficResetDay = 1,
   [ValidateSet("websocket", "http")]
   [string]$Mode = "websocket",
   [Alias("i")]
@@ -35,7 +32,9 @@ param(
   [switch]$DisableWebSsh,
   [switch]$DisableAutoUpdate,
   [switch]$IgnoreUnsafeCert,
-  [switch]$DisableGpu,
+  [switch]$EnableGpu,
+  [ValidateSet("debug", "info", "warn", "error")]
+  [string]$LogLevel = "info",
   [string]$InstallGhproxy = "",
   [switch]$DryRun,
   [switch]$Uninstall,
@@ -803,8 +802,8 @@ $runnerContent = @"
 `$env:CF_MONITOR_MOUNT_EXCLUDE = $(ConvertTo-PowerShellLiteral $MountExclude)
 `$env:CF_MONITOR_NIC_INCLUDE = $(ConvertTo-PowerShellLiteral $NicInclude)
 `$env:CF_MONITOR_NIC_EXCLUDE = $(ConvertTo-PowerShellLiteral $NicExclude)
-`$env:CF_MONITOR_TRAFFIC_RESET_DAY = $(ConvertTo-PowerShellLiteral ([string]$TrafficResetDay))
-`$env:CF_MONITOR_DISABLE_GPU = $(ConvertTo-PowerShellLiteral $(if ($DisableGpu) { 'true' } else { 'false' }))
+`$env:CF_MONITOR_ENABLE_GPU = $(ConvertTo-PowerShellLiteral $(if ($EnableGpu) { 'true' } else { 'false' }))
+`$env:CF_MONITOR_LOG_LEVEL = $(ConvertTo-PowerShellLiteral $LogLevel)
 `$env:CF_MONITOR_TRAFFIC_STATE_FILE = Join-Path `$PSScriptRoot "state\traffic-state.json"
 `$logPath = Join-Path `$PSScriptRoot "state\agent.log"
 `$runnerLogPath = Join-Path `$PSScriptRoot "state\runner.log"
@@ -812,7 +811,7 @@ Set-Location `$PSScriptRoot
 
 try {
   `$agentPath = Join-Path `$PSScriptRoot "cf-vps-monitor-agent.exe"
-  `$command = '"' + `$agentPath + '" --interval $ReportInterval --ping-interval $PingInterval --traffic-reset-day $TrafficResetDay >> "' + `$logPath + '" 2>&1'
+  `$command = '"' + `$agentPath + '" --interval $ReportInterval --ping-interval $PingInterval >> "' + `$logPath + '" 2>&1'
   & `$env:ComSpec /d /c `$command
   `$exitCode = `$LASTEXITCODE
 } catch {

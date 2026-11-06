@@ -91,14 +91,3 @@ func buildTrafficSample(perInterface map[string]interfaceCounters, now time.Time
 	}
 	return sample
 }
-
-// normalizeTrafficResetDay 只用于解析已弃用的 --traffic-reset-day 参数：流量重置日现在只在服务端生效。
-func normalizeTrafficResetDay(day int) int {
-	if day < 1 {
-		return 1
-	}
-	if day > 31 {
-		return 31
-	}
-	return day
-}

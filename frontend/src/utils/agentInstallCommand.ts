@@ -2,6 +2,9 @@ import { CF_MONITOR_AGENT_REPOSITORY } from './projectLinks';
 
 export type AgentInstallPlatform = 'unix' | 'windows';
 
+export type AgentLogLevel = 'debug' | 'info' | 'warn' | 'error';
+export const agentLogLevels: AgentLogLevel[] = ['debug', 'info', 'warn', 'error'];
+
 export type AgentInstallOptions = {
   ghproxy: string;
   downloadProxy: string;
@@ -12,17 +15,18 @@ export type AgentInstallOptions = {
   checksumUrl?: string;
   releaseTag?: string;
   scriptRef?: string;
-  trafficResetDay: string;
   mountInclude: string;
   mountExclude: string;
   nicInclude: string;
   nicExclude: string;
-  // 仅 Unix 安装脚本支持：容器内 /proc/loadavg 是宿主机口径时，仍上报宿主机负载。
+  // 仅 Unix 安装脚本支持：容器内 /proc/loadavg 是宿主机口径时，默认仍上报宿主机负载；关闭后留空。
   allowHostLoad: boolean;
   // 宿主机 CPU 核数，配合 allowHostLoad 把宿主机负载折算到本容器核数口径；空 = 不折算。
   hostCpuCores: string;
-  // 关闭后 Agent 完全跳过 GPU 探测（不执行 nvidia-smi / rocm-smi），也不上报 GPU 字段。
-  disableGpu: boolean;
+  // 默认关闭：开启后 Agent 才探测并上报 GPU（执行 nvidia-smi / rocm-smi）。
+  enableGpu: boolean;
+  // Agent 日志等级；常规的上报 / ack 行属于 debug，默认 info 不会写入。
+  logLevel: AgentLogLevel;
 };
 
 export const defaultAgentInstallOptions: AgentInstallOptions = {
@@ -35,14 +39,14 @@ export const defaultAgentInstallOptions: AgentInstallOptions = {
   checksumUrl: '',
   releaseTag: '',
   scriptRef: '',
-  trafficResetDay: '1',
   mountInclude: '',
   mountExclude: '',
   nicInclude: '',
   nicExclude: '',
-  allowHostLoad: false,
+  allowHostLoad: true,
   hostCpuCores: '',
-  disableGpu: false,
+  enableGpu: false,
+  logLevel: 'info',
 };
 
 export const CF_MONITOR_BRANCH = 'main';
@@ -168,10 +172,8 @@ function powershellCommand(script: string): string {
   return `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${btoa(bytes)}`;
 }
 
-function normalizeTrafficResetDay(value: string) {
-  const day = Number.parseInt(value.trim(), 10);
-  if (!Number.isFinite(day)) return '1';
-  return String(Math.min(31, Math.max(1, day)));
+function normalizeLogLevel(value: string | undefined): AgentLogLevel {
+  return agentLogLevels.includes(value as AgentLogLevel) ? (value as AgentLogLevel) : 'info';
 }
 
 function normalizeHostCpuCores(value: string) {
@@ -222,15 +224,14 @@ export function buildAgentInstallCommand({
   const mountExclude = options.mountExclude.trim();
   const nicInclude = options.nicInclude.trim();
   const nicExclude = options.nicExclude.trim();
-  const trafficResetDay = normalizeTrafficResetDay(options.trafficResetDay);
   const allowHostLoad = Boolean(options.allowHostLoad);
   const hostCpuCores = allowHostLoad ? normalizeHostCpuCores(options.hostCpuCores || '') : '';
-  const disableGpu = Boolean(options.disableGpu);
+  const enableGpu = Boolean(options.enableGpu);
+  const logLevel = normalizeLogLevel(options.logLevel);
 
   switch (platform) {
     case 'unix': {
       const args = ['-s', serverUrl, '-t', token || '<TOKEN>'];
-      if (trafficResetDay !== '1') args.push('-r', trafficResetDay);
       if (effectiveNodeName) args.push('-n', effectiveNodeName);
       args.push('-i', effectiveInstanceId);
       if (installMode) args.push('--install-mode', installMode);
@@ -245,9 +246,10 @@ export function buildAgentInstallCommand({
       if (mountExclude) args.push('--mount-exclude', mountExclude);
       if (nicInclude) args.push('--nic-include', nicInclude);
       if (nicExclude) args.push('--nic-exclude', nicExclude);
-      if (allowHostLoad) args.push('--allow-host-load');
+      if (!allowHostLoad) args.push('--no-host-load');
       if (hostCpuCores) args.push('--host-cpu-cores', hostCpuCores);
-      if (disableGpu) args.push('--disable-gpu');
+      if (logLevel !== 'info') args.push('--log-level', logLevel);
+      if (enableGpu) args.push('--enable-gpu');
       return shPipe(
         `wget -qO- ${shellQuote(cfMonitorAgentScriptUrl('install.sh', ghproxy, releaseTag, scriptRef))}`,
         args,
@@ -255,7 +257,6 @@ export function buildAgentInstallCommand({
     }
     case 'windows': {
       const args = ['-s', serverUrl, '-t', token || '<TOKEN>'];
-      if (trafficResetDay !== '1') args.push('-r', trafficResetDay);
       if (effectiveNodeName) args.push('-n', effectiveNodeName);
       args.push('-i', effectiveInstanceId);
       if (binaryUrl) args.push('-BinaryUrl', binaryUrl);
@@ -269,7 +270,9 @@ export function buildAgentInstallCommand({
       if (mountExclude) args.push('-MountExclude', mountExclude);
       if (nicInclude) args.push('-NicInclude', nicInclude);
       if (nicExclude) args.push('-NicExclude', nicExclude);
-      if (disableGpu) args.push('-DisableGpu');
+      if (logLevel !== 'info') args.push('-LogLevel', logLevel);
+      // 开关参数必须排在最后：下面按奇偶位置给取值加引号。
+      if (enableGpu) args.push('-EnableGpu');
       return powershellCommand(
         `iwr ${psQuote(cfMonitorAgentScriptUrl('install-windows.ps1', ghproxy, releaseTag, scriptRef))} -UseBasicParsing -OutFile 'install-windows.ps1'; & '.\\install-windows.ps1' ${args.map((arg, index) => index % 2 === 0 ? arg : psQuote(arg)).join(' ')}`,
       );

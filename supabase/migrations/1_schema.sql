@@ -374,11 +374,6 @@ declare
 begin
   foreach table_name in array app_tables loop
     execute format('grant select, insert, update, delete on table public.%I to cf_monitor_app, service_role', table_name);
-    execute format('drop policy if exists cf_monitor_app_all on public.%I', table_name);
-    execute format(
-      'create policy cf_monitor_app_all on public.%I for all to cf_monitor_app using (true) with check (true)',
-      table_name
-    );
   end loop;
   for sequence_oid, sequence_table_name in
     select distinct sequence.oid, owner_table.relname
@@ -429,34 +424,6 @@ alter table public.load_notifications force row level security;
 alter table public.audit_logs force row level security;
 
 do $$
-declare
-  table_name text;
-begin
-  foreach table_name in array array[
-    'clients',
-    'records',
-    'gpu_records',
-    'gpu_snapshots',
-    'users',
-    'login_rate_limits',
-    'settings',
-    'ping_tasks',
-    'ping_records',
-    'ping_snapshots',
-    'offline_notifications',
-    'expiry_notifications',
-    'load_notifications',
-    'audit_logs'
-  ] loop
-    execute format('drop policy if exists cf_monitor_app_all on public.%I', table_name);
-    execute format(
-      'create policy cf_monitor_app_all on public.%I for all to cf_monitor_app using (true) with check (true)',
-      table_name
-    );
-  end loop;
-end $$;
-
-do $$
 begin
   if to_regrole('cf_monitor_worker') is null then
     create role cf_monitor_worker
@@ -503,40 +470,32 @@ grant select, insert, update, delete on public.themes to cf_monitor_app;
 
 grant select, insert, update, delete on public.theme_assets to cf_monitor_app;
 
-drop policy if exists cf_monitor_app_all on public.themes;
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'users_recovery_code_hashes_array' and conrelid = 'public.users'::regclass) then
+    alter table users add constraint users_recovery_code_hashes_array
+      check (
+        jsonb_typeof(recovery_code_hashes) = 'array'
+        and jsonb_array_length(recovery_code_hashes) <= 8
+      );
+  end if;
+end $$;
 
-create policy cf_monitor_app_all on public.themes for all to cf_monitor_app using (true) with check (true);
-
-drop policy if exists cf_monitor_app_all on public.theme_assets;
-
-create policy cf_monitor_app_all on public.theme_assets for all to cf_monitor_app using (true) with check (true);
-
-alter table users drop constraint if exists users_recovery_code_hashes_array;
-
-alter table users add constraint users_recovery_code_hashes_array
-  check (
-    jsonb_typeof(recovery_code_hashes) = 'array'
-    and jsonb_array_length(recovery_code_hashes) <= 8
-  );
-
-alter table users drop constraint if exists users_totp_state_consistent;
-
-alter table users add constraint users_totp_state_consistent
-  check (
-    (totp_enabled_at is null and totp_secret_enc is null and recovery_code_hashes = '[]'::jsonb)
-    or (totp_enabled_at is not null and nullif(totp_secret_enc, '') is not null)
-  );
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'users_totp_state_consistent' and conrelid = 'public.users'::regclass) then
+    alter table users add constraint users_totp_state_consistent
+      check (
+        (totp_enabled_at is null and totp_secret_enc is null and recovery_code_hashes = '[]'::jsonb)
+        or (totp_enabled_at is not null and nullif(totp_secret_enc, '') is not null)
+      );
+  end if;
+end $$;
 
 -- ⚠️ 所有表 / 列的 DDL 都在本文件，函数在 2_functions.sql，执行顺序保证列先于引用它的函数存在。
 -- language sql 的函数体在 CREATE 时就做完整语义校验，列不存在会当场报 42703；
 -- 因此新增列的 DDL 只能加在本文件，不能放进 2_functions.sql。
 -- 每月流量重置日：节点级配置，经 agent policy 下发。被 cfm_admin_clients 与
 -- cfm_create_client（均为 language sql）引用，故必须留在这里，不能放进下方 DDL 块。
-alter table clients add column if not exists traffic_reset_day smallint not null default 1;
-
-alter table clients drop constraint if exists clients_traffic_reset_day_check;
-
-alter table clients add constraint clients_traffic_reset_day_check check (traffic_reset_day between 1 and 31);
+alter table clients add column if not exists traffic_reset_day smallint not null default 1 constraint clients_traffic_reset_day_check check (traffic_reset_day between 1 and 31);
 
 -- Delivery state contains identities/timestamps only, never notification bodies
 -- or channel credentials. One row per event source/target bounds active state.
@@ -623,18 +582,10 @@ revoke all on public.client_home_ping from public, anon, authenticated;
 -- 两项，导致 Worker 经 PostgREST 调用时报 42501 permission denied，
 -- PostgREST 回 403，Worker 侧表现为 500（cfm_home_ping_assignments、
 -- cfm_home_ping_rows、cfm_build_history_rollup 均受影响）。
--- 幂等：grant / drop policy if exists 可重复执行。
+-- 幂等：grant 可重复执行；policy 统一在文件末尾按需创建。
 grant select, insert, update, delete on table public.client_home_ping to cf_monitor_app, service_role;
 
 grant select, insert, update, delete on table public.gpu_rollup to cf_monitor_app, service_role;
-
-drop policy if exists cf_monitor_app_all on public.client_home_ping;
-
-drop policy if exists cf_monitor_app_all on public.gpu_rollup;
-
-create policy cf_monitor_app_all on public.client_home_ping for all to cf_monitor_app using (true) with check (true);
-
-create policy cf_monitor_app_all on public.gpu_rollup for all to cf_monitor_app using (true) with check (true);
 
 -- CPU 负载三元组：records.load（Load1）之外新增 load5/load15。
 --
@@ -697,10 +648,6 @@ revoke all on public.traffic_daily from public, anon, authenticated;
 
 grant select, insert, update, delete on table public.traffic_daily to cf_monitor_app, service_role;
 
-drop policy if exists cf_monitor_app_all on public.traffic_daily;
-
-create policy cf_monitor_app_all on public.traffic_daily for all to cf_monitor_app using (true) with check (true);
-
 alter table public.traffic_counter_state enable row level security;
 
 alter table public.traffic_counter_state force row level security;
@@ -709,9 +656,29 @@ revoke all on public.traffic_counter_state from public, anon, authenticated;
 
 grant select, insert, update, delete on table public.traffic_counter_state to cf_monitor_app, service_role;
 
-drop policy if exists cf_monitor_app_all on public.traffic_counter_state;
-
-create policy cf_monitor_app_all on public.traffic_counter_state for all to cf_monitor_app using (true) with check (true);
+-- 所有业务表统一的 RLS policy：只在缺失时创建，可重复执行。
+do $$
+declare
+  table_name text;
+begin
+  foreach table_name in array array[
+    'clients', 'records', 'gpu_records', 'gpu_snapshots', 'users',
+    'login_rate_limits', 'settings', 'themes', 'theme_assets', 'ping_tasks',
+    'ping_records', 'ping_snapshots',
+    'offline_notifications', 'expiry_notifications', 'load_notifications', 'audit_logs',
+    'client_home_ping', 'gpu_rollup', 'traffic_daily', 'traffic_counter_state'
+  ] loop
+    if not exists (
+      select 1 from pg_policies
+      where schemaname = 'public' and tablename = table_name and policyname = 'cf_monitor_app_all'
+    ) then
+      execute format(
+        'create policy cf_monitor_app_all on public.%I for all to cf_monitor_app using (true) with check (true)',
+        table_name
+      );
+    end if;
+  end loop;
+end $$;
 
 insert into settings (key, value) values ('schema_bootstrap_version', 'postgres-2026-07-squashed')
   on conflict (key) do update set value = excluded.value;

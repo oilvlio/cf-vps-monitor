@@ -17,15 +17,13 @@ func TestReauditExplicitModePrecedence(t *testing.T) {
 	previousToken, previousServer, previousName := token, serverURL, clientName
 	previousMountInclude, previousMountExclude := mountInclude, mountExclude
 	previousNICInclude, previousNICExclude := nicInclude, nicExclude
-	previousReset := trafficResetDay
 	t.Cleanup(func() {
 		flag.CommandLine, reportMode = previousFlags, previousMode
 		token, serverURL, clientName = previousToken, previousServer, previousName
 		mountInclude, mountExclude = previousMountInclude, previousMountExclude
 		nicInclude, nicExclude = previousNICInclude, previousNICExclude
-		trafficResetDay = previousReset
 	})
-	for _, name := range []string{"TOKEN", "SERVER", "NAME", "MOUNT_INCLUDE", "MOUNT_EXCLUDE", "NIC_INCLUDE", "NIC_EXCLUDE", "TRAFFIC_RESET_DAY"} {
+	for _, name := range []string{"TOKEN", "SERVER", "NAME", "MOUNT_INCLUDE", "MOUNT_EXCLUDE", "NIC_INCLUDE", "NIC_EXCLUDE"} {
 		t.Setenv("CF_MONITOR_"+name, "")
 	}
 	for _, tt := range []struct {
@@ -78,7 +76,7 @@ func TestReauditExplicitModeRejectsInvalid(t *testing.T) {
 			command.Env = append(os.Environ(), "REAUDIT_MODE_MAIN=1", "REAUDIT_CLI_MODE="+cli, "CF_MONITOR_MODE=invalid",
 				"CF_MONITOR_TRAFFIC_STATE_FILE="+filepath.Join(t.TempDir(), "traffic-state.json"),
 				"CF_MONITOR_NAME=synthetic", "CF_MONITOR_MOUNT_INCLUDE=", "CF_MONITOR_MOUNT_EXCLUDE=",
-				"CF_MONITOR_NIC_INCLUDE=", "CF_MONITOR_NIC_EXCLUDE=", "CF_MONITOR_TRAFFIC_RESET_DAY=1")
+				"CF_MONITOR_NIC_INCLUDE=", "CF_MONITOR_NIC_EXCLUDE=")
 			output, err := command.CombinedOutput()
 			if ctx.Err() != nil || err == nil || !strings.Contains(string(output), `unsupported mode "invalid"`) {
 				t.Fatalf("invalid selected mode did not fail at validation: err=%v deadline=%v output=%s", err, ctx.Err(), output)

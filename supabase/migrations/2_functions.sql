@@ -2,12 +2,6 @@
 -- 每个函数只保留一份定义；历史上的重复 create or replace 已合并。
 set local search_path = public;
 
--- 清理历史遗留的旧签名，必须先于下面的 create 执行。
-drop function if exists public.cfm_mark_offline_notification_sent(text, text);
-drop function if exists public.cfm_mark_expiry_notification_sent(text, text);
-drop function if exists public.cfm_rotate_client_token(text, text);
-drop function if exists public.cfm_set_client_install_token(text, text);
-
 -- Phase 1 Worker Data API RPC. These functions are called only by the Worker
 -- with Supabase service_role; browsers still talk only to the Worker.
 create or replace function public.cfm_public_settings()
@@ -4022,24 +4016,16 @@ grant execute on function public.cfm_records_range_cursor(text, text, text, text
 revoke all on function public.cfm_records_range_bucketed(text, text, text, integer, integer) from public, anon, authenticated;
 grant execute on function public.cfm_records_range_bucketed(text, text, text, integer, integer) to service_role;
 
-drop trigger if exists cfm_client_delivery_retirement on public.clients;
-
-create trigger cfm_client_delivery_retirement after delete or update of expired_at on public.clients
+create or replace trigger cfm_client_delivery_retirement after delete or update of expired_at on public.clients
 for each row execute function cfm_internal.retire_entity_notification_deliveries();
 
-drop trigger if exists cfm_offline_delivery_retirement on public.offline_notifications;
-
-create trigger cfm_offline_delivery_retirement after delete or update on public.offline_notifications
+create or replace trigger cfm_offline_delivery_retirement after delete or update on public.offline_notifications
 for each row execute function cfm_internal.retire_entity_notification_deliveries();
 
-drop trigger if exists cfm_expiry_delivery_retirement on public.expiry_notifications;
-
-create trigger cfm_expiry_delivery_retirement after delete or update on public.expiry_notifications
+create or replace trigger cfm_expiry_delivery_retirement after delete or update on public.expiry_notifications
 for each row execute function cfm_internal.retire_entity_notification_deliveries();
 
-drop trigger if exists cfm_load_delivery_retirement on public.load_notifications;
-
-create trigger cfm_load_delivery_retirement after delete or update on public.load_notifications
+create or replace trigger cfm_load_delivery_retirement after delete or update on public.load_notifications
 for each row execute function cfm_internal.retire_entity_notification_deliveries();
 
 notify pgrst, 'reload schema';

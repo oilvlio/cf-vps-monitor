@@ -303,6 +303,8 @@ esac
 printf 'systemctl:%s\\n' "$*" >> "$ROOT/service-events"
 `,
     'rc-service': `
+# The installer confirms the supervised Agent stayed up; model a healthy service.
+[ "$#" -eq 2 ] && [ "$1" = cf-vps-monitor-agent ] && [ "$2" = status ] && exit 0
 [ "$#" -eq 2 ] && [ "$1" = cf-vps-monitor-agent ] && [ "$2" = restart ] || {
   echo '[fixture-error] unexpected rc-service arguments' >&2; exit 92
 }
@@ -343,11 +345,11 @@ for (const manager of ['systemd', 'openrc']) {
   test(`compat ${manager} default paths allow the service user under umask 077`, nativeOptions, t => {
     const { result, installDir } = nativeSystemFixture(t, manager);
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-    const access = spawnSync('sh', ['-c', 'test -x "$1" && test -r "$1" && test -w "$2"', 'fixture', join(installDir, 'cf-vps-monitor-agent'), join(installDir, 'state')], {
+    const access = spawnSync('sh', ['-c', 'test -x "$1" && test -r "$1"', 'fixture', join(installDir, 'cf-vps-monitor-agent')], {
       encoding: 'utf8', uid: Number(nobodyUid.stdout.trim()), gid: Number(nobodyGid.stdout.trim()),
     });
     assert.ifError(access.error);
-    assert.equal(access.status, 0, 'the actual unprivileged service user cannot execute the Agent or write its state');
+    assert.equal(access.status, 0, 'the actual unprivileged service user cannot execute the Agent');
   });
   test(`compat ${manager} must not open permissions on a private custom parent`, nativeOptions, t => {
     const { privateParent } = nativeSystemFixture(t, manager, true);

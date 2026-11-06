@@ -1,7 +1,6 @@
 package main
 
 import (
-	"log"
 	"strings"
 )
 
@@ -61,7 +60,7 @@ func (s *pingReportState) queuePingResultsLocked(results []PingResult) {
 		s.nextResultID++
 		queue = append(queue, &queuedPingResult{result: result, sequence: s.nextResultID})
 		if len(queue) > maxBufferedPingResultsPerTask {
-			log.Printf("ping task %d: %d results are waiting for delivery; dropping the oldest", result.TaskID, len(queue))
+			logWarnf("ping task %d: %d results are waiting for delivery; dropping the oldest", result.TaskID, len(queue))
 			queue = append(queue[:0], queue[len(queue)-maxBufferedPingResultsPerTask:]...)
 		}
 		s.pendingPing[result.TaskID] = queue
@@ -235,7 +234,7 @@ func deliverHTTPReports(state *pingReportState, reports []Report) error {
 		count := min(len(reports), maxReportsPerEnvelope)
 		batch := attachTrafficImport(state.currentReportResults(reports[:count]))
 		if err := sendHTTPReports(batch); err != nil {
-			log.Printf("HTTP report not accepted; probe results retained: %v", err)
+			logWarnf("HTTP report not accepted; probe results retained: %v", err)
 			state.retryReports(reports)
 			return err
 		}

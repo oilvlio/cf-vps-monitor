@@ -6,7 +6,6 @@ TOKEN=""
 NODE_NAME="$(hostname 2>/dev/null || echo node)"
 INTERVAL="3"
 PING_INTERVAL="120"
-TRAFFIC_RESET_DAY="1"
 MODE="websocket"
 INSTALL_MODE="auto"
 INSTALL_DIR=""
@@ -34,9 +33,10 @@ MOUNT_INCLUDE=""
 MOUNT_EXCLUDE=""
 NIC_INCLUDE=""
 NIC_EXCLUDE=""
-ALLOW_HOST_LOAD="0"
+ALLOW_HOST_LOAD="1"
 HOST_CPU_CORES="0"
-DISABLE_GPU="0"
+ENABLE_GPU="0"
+LOG_LEVEL="info"
 AGENT_USER="cf-vps-monitor-agent"
 OS_NAME="$(uname -s | tr '[:upper:]' '[:lower:]')"
 
@@ -61,7 +61,6 @@ Options:
   --name NAME               Node name, default: hostname.
   --interval SECONDS        Report interval, default: 3.
   --ping-interval SECONDS   Ping task poll interval, default: 120.
-  --traffic-reset-day DAY   Monthly traffic reset day, default: 1.
   --mode MODE               websocket or http, default: websocket.
   --instance-id ID          Instance id used for default names and paths.
   --install-mode MODE       auto, system, or user. Default: auto.
@@ -81,9 +80,11 @@ Options:
   --mount-exclude LIST      Comma-separated mountpoint/device patterns excluded from disk totals.
   --nic-include LIST        Comma-separated network interface patterns included in traffic totals.
   --nic-exclude LIST        Comma-separated network interface patterns excluded from traffic totals.
-  --allow-host-load         In containers, report the host load average instead of leaving load unavailable.
+  --allow-host-load         In containers, report the host load average (default).
+  --no-host-load            Leave load unavailable in containers whose /proc/loadavg is the host's.
   --host-cpu-cores N        Host CPU core count; scales host load to this container's cores (0 = no scaling).
-  --disable-gpu             Skip GPU detection and reporting entirely (no nvidia-smi / rocm-smi probes).
+  --enable-gpu              Probe and report GPUs via nvidia-smi / rocm-smi (off by default).
+  --log-level LEVEL         Agent log level: debug, info, warn or error. Default: info.
   --disable-web-ssh         Accepted as a legacy no-op option.
   --disable-auto-update     Accepted as a legacy no-op option.
   --ignore-unsafe-cert      Accepted as a legacy no-op option.
@@ -853,6 +854,8 @@ apply_defaults() {
       ;;
     launchctl)
       [ -n "$INSTALL_DIR" ] || INSTALL_DIR="/usr/local/cf-vps-monitor/${BASE_ID}"
+      # System modes no longer create or use STATE_DIR; the path is kept only so the ownership
+      # marker of existing installs still matches and uninstall still cleans a leftover directory.
       STATE_DIR="${INSTALL_DIR}/state"
       ENV_FILE=""
       PLIST_FILE="/Library/LaunchDaemons/${SERVICE_NAME}.plist"
@@ -888,27 +891,23 @@ CF_MONITOR_MOUNT_EXCLUDE=$($env_quote "$MOUNT_EXCLUDE")
 CF_MONITOR_NIC_INCLUDE=$($env_quote "$NIC_INCLUDE")
 CF_MONITOR_NIC_EXCLUDE=$($env_quote "$NIC_EXCLUDE")
 CF_MONITOR_ALLOW_HOST_LOAD=$($env_quote "$ALLOW_HOST_LOAD")
-CF_MONITOR_DISABLE_GPU=$($env_quote "$DISABLE_GPU")
+CF_MONITOR_ENABLE_GPU=$($env_quote "$ENABLE_GPU")
 CF_MONITOR_HOST_CPU_CORES=$($env_quote "$HOST_CPU_CORES")
-CF_MONITOR_TRAFFIC_RESET_DAY=$($env_quote "$TRAFFIC_RESET_DAY")
-CF_MONITOR_TRAFFIC_STATE_FILE=$($env_quote "${STATE_DIR}/traffic-state.json")
+CF_MONITOR_LOG_LEVEL=$($env_quote "$LOG_LEVEL")
 EOF
 }
 
 validate_common() {
   [ -n "$SERVICE_NAME" ] || die "--service-name cannot be empty."
   [ "$MODE" = "websocket" ] || [ "$MODE" = "http" ] || die "--mode must be websocket or http."
-  if ! printf '%s' "$TRAFFIC_RESET_DAY" | grep -Eq '^[0-9]+$' || [ "$TRAFFIC_RESET_DAY" -lt 1 ] || [ "$TRAFFIC_RESET_DAY" -gt 31 ]; then
-    die "--traffic-reset-day must be a number from 1 to 31."
-  fi
+  case "$LOG_LEVEL" in debug|info|warn|error) ;; *) die "--log-level must be debug, info, warn or error." ;; esac
   if ! printf '%s' "$HOST_CPU_CORES" | grep -Eq '^[0-9]+$' || [ "$HOST_CPU_CORES" -gt 65535 ]; then
     die "--host-cpu-cores must be a number from 0 to 65535."
   fi
   for pair in \
     "server:$SERVER" "token:$TOKEN" "name:$NODE_NAME" "mode:$MODE" \
     "mount-include:$MOUNT_INCLUDE" "mount-exclude:$MOUNT_EXCLUDE" \
-    "nic-include:$NIC_INCLUDE" "nic-exclude:$NIC_EXCLUDE" \
-    "traffic-reset-day:$TRAFFIC_RESET_DAY"
+    "nic-include:$NIC_INCLUDE" "nic-exclude:$NIC_EXCLUDE"
   do
     reject_newline "${pair%%:*}" "${pair#*:}"
   done
@@ -988,10 +987,9 @@ install_systemd() {
   ensure_agent_user
   (
     umask 022
-    run mkdir -p "$INSTALL_DIR" "$STATE_DIR"
+    run mkdir -p "$INSTALL_DIR"
   ) || return 1
   copy_binary_to "$WORK_BIN" "$INSTALL_DIR/cf-vps-monitor-agent"
-  run chown -R "$AGENT_USER:$AGENT_USER" "$STATE_DIR"
   write_file "$ENV_FILE" "600" "$(env_content)"
   UNIT_CONTENT=$(cat <<EOF
 [Unit]
@@ -1005,7 +1003,7 @@ User=${AGENT_USER}
 Group=${AGENT_USER}
 EnvironmentFile=$(systemd_path "$ENV_FILE")
 WorkingDirectory=$(systemd_path "$INSTALL_DIR/")
-ExecStart=$(systemd_exec "$INSTALL_DIR/cf-vps-monitor-agent") --interval ${INTERVAL} --ping-interval ${PING_INTERVAL} --traffic-reset-day ${TRAFFIC_RESET_DAY}
+ExecStart=$(systemd_exec "$INSTALL_DIR/cf-vps-monitor-agent") --interval ${INTERVAL} --ping-interval ${PING_INTERVAL}
 Restart=always
 RestartSec=5
 AmbientCapabilities=CAP_NET_RAW
@@ -1019,7 +1017,6 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
-ReadWritePaths=$(systemd_word "$STATE_DIR")
 
 [Install]
 WantedBy=multi-user.target
@@ -1041,21 +1038,20 @@ install_openrc() {
   ensure_agent_user
   (
     umask 022
-    run mkdir -p "$INSTALL_DIR" "$STATE_DIR" /etc/conf.d /etc/init.d
+    run mkdir -p "$INSTALL_DIR" /etc/conf.d /etc/init.d
   ) || return 1
   copy_binary_to "$WORK_BIN" "$INSTALL_DIR/cf-vps-monitor-agent"
-  run chown -R "$AGENT_USER:$AGENT_USER" "$STATE_DIR"
   write_file "$ENV_FILE" "600" "$(env_content)"
   INIT_CONTENT=$(cat <<EOF
 #!/sbin/openrc-run
 name="CF VPS Monitor Agent"
 description="CF VPS Monitor Agent"
 command=$(shell_quote "$INSTALL_DIR/cf-vps-monitor-agent")
-command_args="--interval ${INTERVAL} --ping-interval ${PING_INTERVAL} --traffic-reset-day ${TRAFFIC_RESET_DAY}"
+command_args="--interval ${INTERVAL} --ping-interval ${PING_INTERVAL}"
 command_user="${AGENT_USER}:${AGENT_USER}"
-command_background=true
-start_stop_daemon_args="--wait 1000"
-pidfile="/run/\${RC_SVCNAME}.pid"
+supervisor=supervise-daemon
+respawn_delay=5
+respawn_max=0
 directory=$(shell_quote "$INSTALL_DIR")
 output_log="/var/log/\${RC_SVCNAME}.log"
 error_log="/var/log/\${RC_SVCNAME}.log"
@@ -1067,8 +1063,7 @@ depend() {
 start_pre() {
   export CF_MONITOR_SERVER CF_MONITOR_TOKEN CF_MONITOR_NAME CF_MONITOR_MODE
   export CF_MONITOR_MOUNT_INCLUDE CF_MONITOR_MOUNT_EXCLUDE CF_MONITOR_NIC_INCLUDE CF_MONITOR_NIC_EXCLUDE
-  export CF_MONITOR_TRAFFIC_RESET_DAY CF_MONITOR_TRAFFIC_STATE_FILE CF_MONITOR_ALLOW_HOST_LOAD CF_MONITOR_DISABLE_GPU CF_MONITOR_HOST_CPU_CORES
-  checkpath -d -m 0755 -o ${AGENT_USER}:${AGENT_USER} $(shell_quote "$STATE_DIR") || return 1
+  export CF_MONITOR_ALLOW_HOST_LOAD CF_MONITOR_ENABLE_GPU CF_MONITOR_HOST_CPU_CORES CF_MONITOR_LOG_LEVEL
   _cf_log_path="\$output_log"
   while [ -n "\$_cf_log_path" ]; do
     if [ -L "\$_cf_log_path" ]; then
@@ -1091,6 +1086,9 @@ EOF
   agent_write_marker
   run rc-update add "$SERVICE_NAME" default || die "Failed to enable ${SERVICE_NAME}."
   run rc-service "$SERVICE_NAME" restart || die "Failed to start ${SERVICE_NAME}; inspect /var/log/${SERVICE_NAME}.log and rc-service ${SERVICE_NAME} status."
+  # supervise-daemon respawns a crashing Agent, so a successful start does not prove it stays up.
+  sleep 1
+  run rc-service "$SERVICE_NAME" status >/dev/null 2>&1 || die "${SERVICE_NAME} exited right after starting; inspect /var/log/${SERVICE_NAME}.log and rc-service ${SERVICE_NAME} status."
   echo "Installed ${SERVICE_NAME}."
   echo "Status: rc-service ${SERVICE_NAME} status"
   echo "Logs:   tail -f /var/log/${SERVICE_NAME}.log"
@@ -1099,13 +1097,13 @@ EOF
 
 install_launchctl() {
   agent_assert_instance 0 || return 1
-  run mkdir -p "$INSTALL_DIR" "$STATE_DIR"
+  run mkdir -p "$INSTALL_DIR"
   copy_binary_to "$WORK_BIN" "$INSTALL_DIR/cf-vps-monitor-agent"
   RUNNER_CONTENT=$(cat <<EOF
 #!/bin/sh
 set -eu
 $(env_content | sed 's/^/export /')
-exec $(shell_quote "${INSTALL_DIR}/cf-vps-monitor-agent") --interval ${INTERVAL} --ping-interval ${PING_INTERVAL} --traffic-reset-day ${TRAFFIC_RESET_DAY}
+exec $(shell_quote "${INSTALL_DIR}/cf-vps-monitor-agent") --interval ${INTERVAL} --ping-interval ${PING_INTERVAL}
 EOF
 )
   write_file "$RUNNER_FILE" "700" "$RUNNER_CONTENT"
@@ -1292,8 +1290,8 @@ set -eu
 . $(shell_quote "$ENV_FILE")
 export CF_MONITOR_SERVER CF_MONITOR_TOKEN CF_MONITOR_NAME CF_MONITOR_MODE
 export CF_MONITOR_MOUNT_INCLUDE CF_MONITOR_MOUNT_EXCLUDE CF_MONITOR_NIC_INCLUDE CF_MONITOR_NIC_EXCLUDE
-export CF_MONITOR_TRAFFIC_RESET_DAY CF_MONITOR_TRAFFIC_STATE_FILE CF_MONITOR_ALLOW_HOST_LOAD CF_MONITOR_DISABLE_GPU CF_MONITOR_HOST_CPU_CORES
-exec $(shell_quote "${INSTALL_DIR}/cf-vps-monitor-agent") --interval ${INTERVAL} --ping-interval ${PING_INTERVAL} --traffic-reset-day ${TRAFFIC_RESET_DAY}
+export CF_MONITOR_ALLOW_HOST_LOAD CF_MONITOR_ENABLE_GPU CF_MONITOR_HOST_CPU_CORES CF_MONITOR_LOG_LEVEL
+exec $(shell_quote "${INSTALL_DIR}/cf-vps-monitor-agent") --interval ${INTERVAL} --ping-interval ${PING_INTERVAL}
 EOF
 )
   write_file "$RUNNER_FILE" "700" "$RUNNER_CONTENT"
@@ -1471,7 +1469,6 @@ while [ "$#" -gt 0 ]; do
     -n|--name) NODE_NAME="${2:-}"; shift 2 ;;
     --interval) INTERVAL="${2:-}"; shift 2 ;;
     --ping-interval) PING_INTERVAL="${2:-}"; shift 2 ;;
-    -r|--traffic-reset-day) TRAFFIC_RESET_DAY="${2:-}"; shift 2 ;;
     --mode) MODE="${2:-}"; shift 2 ;;
     -i|--instance-id) INSTANCE_ID="${2:-}"; shift 2 ;;
     --install-mode) INSTALL_MODE="${2:-}"; shift 2 ;;
@@ -1490,7 +1487,9 @@ while [ "$#" -gt 0 ]; do
     --nic-include) NIC_INCLUDE="${2:-}"; shift 2 ;;
     --nic-exclude) NIC_EXCLUDE="${2:-}"; shift 2 ;;
     --allow-host-load) ALLOW_HOST_LOAD="1"; shift ;;
-    --disable-gpu) DISABLE_GPU="1"; shift ;;
+    --no-host-load) ALLOW_HOST_LOAD="0"; shift ;;
+    --enable-gpu) ENABLE_GPU="1"; shift ;;
+    --log-level) LOG_LEVEL="${2:-}"; shift 2 ;;
     --host-cpu-cores) HOST_CPU_CORES="${2:-}"; shift 2 ;;
     --disable-web-ssh|--disable-auto-update|--ignore-unsafe-cert) shift ;;
     --install-ghproxy) INSTALL_GHPROXY="${2:-}"; shift 2 ;;

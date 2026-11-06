@@ -60,7 +60,7 @@ ENV_FILE="$ROOT/fixture.env"; UNIT_FILE="$ROOT/resource.service"; INIT_FILE="$RO
 [ "$SERVICE_MODE" != launchctl ] || ENV_FILE=''
 DRY_RUN=0; KEEP_FILES=0; AGENT_USER=fixture; WORK_BIN="$ROOT/never-executed"
 SERVER=https://monitor.example.test; TOKEN=synthetic-token; NODE_NAME=synthetic-node; MODE=websocket
-INTERVAL=3; PING_INTERVAL=120; TRAFFIC_RESET_DAY=1
+INTERVAL=3; PING_INTERVAL=120
 run() { :; }
 ensure_agent_user() { :; }
 copy_binary_to() { :; }
@@ -166,10 +166,12 @@ test('R-A06 systemd generated paths decode without splitting or expansion', asyn
         env: { ...process.env, CF_AGENT_LITERAL: 'unexpected expansion' },
       });
       assert.equal(called.status, 0, called.stderr);
-      assert.deepEqual(called.stdout.trimEnd().split('\n'), ['7', specialInstallDir + '/cf-vps-monitor-agent',
-        '--interval', '3', '--ping-interval', '120', '--traffic-reset-day', '1']);
+      assert.deepEqual(called.stdout.trimEnd().split('\n'), ['5', specialInstallDir + '/cf-vps-monitor-agent',
+        '--interval', '3', '--ping-interval', '120']);
       assert.equal(systemdSpecifiers(settings.WorkingDirectory).replace(/\/$/, ''), specialInstallDir);
-      assert.deepEqual(systemdWords(settings.ReadWritePaths), [specialInstallDir + '/state']);
+      // install.sh no longer creates or writes a state directory; install-linux.sh still does.
+      if (script === 'install.sh') assert.equal(settings.ReadWritePaths, undefined);
+      else assert.deepEqual(systemdWords(settings.ReadWritePaths), [specialInstallDir + '/state']);
       assert.equal(systemdSpecifiers(settings.EnvironmentFile), posix(join(root, 'fixture.env')));
       const environment = spawnSync('sh', ['-c', '. "$1"; printf "%s\\n" "$CF_MONITOR_TRAFFIC_STATE_FILE"',
         'fixture', posix(join(root, 'generated.env'))], {
@@ -177,7 +179,7 @@ test('R-A06 systemd generated paths decode without splitting or expansion', asyn
         env: { ...process.env, CF_AGENT_LITERAL: 'unexpected expansion' },
       });
       assert.equal(environment.status, 0, environment.stderr);
-      assert.equal(environment.stdout.trimEnd(), specialInstallDir + '/state/traffic-state.json');
+      assert.equal(environment.stdout.trimEnd(), script === 'install.sh' ? '' : specialInstallDir + '/state/traffic-state.json');
     });
   }
 });
@@ -258,7 +260,7 @@ ENV_FILE="$ROOT/env/$SERVICE_NAME${mode === 'systemd' ? '.env' : ''}"
 UNIT_FILE="$ROOT/systemd/$SERVICE_NAME.service"; INIT_FILE="$ROOT/init/$SERVICE_NAME"; PLIST_FILE="$ROOT/launchd/$SERVICE_NAME.plist"
 DRY_RUN=0; AGENT_USER=fixture; KEEP_FILES=${keepFiles ? '1' : '0'}; WORK_BIN="$ROOT/synthetic-binary"
 SERVER=https://monitor.example.test; TOKEN=synthetic-token; NODE_NAME=synthetic-node; MODE=websocket
-INTERVAL=3; PING_INTERVAL=120; TRAFFIC_RESET_DAY=1
+INTERVAL=3; PING_INTERVAL=120
 run() {
   if [ "$1" = mkdir ] || [ "$1" = install ]; then "$@"; else
     printf 'ACTION'; for arg in "$@"; do printf ' <%s>' "$arg"; done; printf '\\n'

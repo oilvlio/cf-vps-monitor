@@ -41,6 +41,7 @@ import {
 import { ClientInfo, LiveDataMap } from '../../types';
 import {
   AgentInstallOptions,
+  AgentLogLevel,
   AgentInstallPlatform,
   buildAgentInstallCommand,
   buildAgentUninstallAllCommand,
@@ -389,12 +390,7 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: Command
   useEffect(() => {
     let cancelled = false;
     if (open) {
-      // 重置日以后台记录为准：装机命令与节点配置从一开始就一致，
-      // 否则装完立刻会被 policy 改回后台的值，探针侧的计费周期窗口会随之来回切换。
-      setInstallOptions({
-        ...defaultAgentInstallOptions,
-        trafficResetDay: String(client.traffic_reset_day || 1),
-      });
+      setInstallOptions({ ...defaultAgentInstallOptions });
       setAgentToken(client.token || '');
       fetchPublicSettings()
         .then(d => {
@@ -498,15 +494,26 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: Command
             <FieldInput label="网卡排除" value={installOptions.nicExclude} onChange={(v) => setOption('nicExclude', v)} placeholder="例如 lo,docker*,veth*" />
             <label>
               <Text size="2" weight="bold" style={{ display: 'block', marginBottom: 4 }}>GPU 采集</Text>
-              <Select.Root value={installOptions.disableGpu ? 'off' : 'on'} onValueChange={(v) => setOption('disableGpu', v === 'off')}>
+              <Select.Root value={installOptions.enableGpu ? 'on' : 'off'} onValueChange={(v) => setOption('enableGpu', v === 'on')}>
                 <Select.Trigger style={{ width: '100%' }} />
                 <Select.Content>
-                  <Select.Item value="on">开启（自动探测 nvidia-smi / rocm-smi）</Select.Item>
-                  <Select.Item value="off">关闭（不探测、不上报 GPU）</Select.Item>
+                  <Select.Item value="off">关闭（默认，不探测、不上报 GPU）</Select.Item>
+                  <Select.Item value="on">开启（探测 nvidia-smi / rocm-smi）</Select.Item>
                 </Select.Content>
               </Select.Root>
             </label>
-            <FieldInput label="流量重置日期" value={installOptions.trafficResetDay} onChange={(v) => setOption('trafficResetDay', v)} type="number" min={1} step={1} placeholder="1" />
+            <label>
+              <Text size="2" weight="bold" style={{ display: 'block', marginBottom: 4 }}>日志等级</Text>
+              <Select.Root value={installOptions.logLevel} onValueChange={(v) => setOption('logLevel', v as AgentLogLevel)}>
+                <Select.Trigger style={{ width: '100%' }} />
+                <Select.Content>
+                  <Select.Item value="info">info（默认，仅记录启动、连接与异常）</Select.Item>
+                  <Select.Item value="debug">debug（含每次上报与 ack）</Select.Item>
+                  <Select.Item value="warn">warn</Select.Item>
+                  <Select.Item value="error">error</Select.Item>
+                </Select.Content>
+              </Select.Root>
+            </label>
             {platform === 'unix' && (
               <>
                 <label>
@@ -514,8 +521,8 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: Command
                   <Select.Root value={installOptions.allowHostLoad ? 'on' : 'off'} onValueChange={(v) => setOption('allowHostLoad', v === 'on')}>
                     <Select.Trigger style={{ width: '100%' }} />
                     <Select.Content>
+                      <Select.Item value="on">上报宿主机负载（默认）</Select.Item>
                       <Select.Item value="off">不上报（LXC/Incus 等容器无法获得本机负载时留空）</Select.Item>
-                      <Select.Item value="on">上报宿主机负载</Select.Item>
                     </Select.Content>
                   </Select.Root>
                 </label>

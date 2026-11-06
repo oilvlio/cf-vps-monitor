@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -101,14 +100,14 @@ var (
 	reportMode          string
 	reconnectInterval   int
 	pingInterval        int
-	trafficResetDay     int
 	mountInclude        string
 	mountExclude        string
 	nicInclude          string
 	nicExclude          string
 	allowHostLoad       bool
 	hostCPUCores        int
-	disableGPU          bool
+	enableGPU           bool
+	logLevelName        string
 	publicIPv4ProbeURLs = []string{
 		"https://api.ipify.org",
 		"https://ipv4.icanhazip.com",
@@ -365,8 +364,6 @@ type serverMessage struct {
 	ViewerTTLSec      int        `json:"viewer_ttl_sec,omitempty"`
 	PolicyTTL         int        `json:"policy_ttl_sec,omitempty"`
 	IdlePolicyTTL     int        `json:"idle_policy_ttl_sec,omitempty"`
-	// TrafficResetDay 仅为兼容旧服务端 / 旧 Agent 而保留解码：流量重置日现在只在服务端生效。
-	TrafficResetDay *int `json:"traffic_reset_day,omitempty"`
 	// TrafficImported 出现在 ack / HTTP 响应里：服务端已入库旧版本地流量历史，可以改名旧状态文件。
 	TrafficImported bool `json:"traffic_imported,omitempty"`
 }
@@ -421,19 +418,24 @@ func init() {
 	flag.StringVar(&reportMode, "mode", "websocket", "Report mode: websocket or http")
 	flag.IntVar(&reconnectInterval, "reconnect-interval", 5, "WebSocket reconnect interval in seconds")
 	flag.IntVar(&pingInterval, "ping-interval", defaultPingIntervalSec, "Ping task poll interval in seconds")
-	flag.IntVar(&trafficResetDay, "traffic-reset-day", 1, "Monthly traffic reset day for network totals, from 1 to 31")
 	flag.StringVar(&mountInclude, "mount-include", "", "Comma-separated mountpoint/device patterns to include in disk totals, for example /,/data,/dev/sd*")
 	flag.StringVar(&mountExclude, "mount-exclude", "", "Comma-separated mountpoint/device patterns to exclude from disk totals, for example /boot,tmpfs,/run")
 	flag.StringVar(&nicInclude, "nic-include", "", "Comma-separated network interface patterns to include in traffic totals, for example eth*,ens*")
-	flag.BoolVar(&allowHostLoad, "allow-host-load", false, "In containers whose /proc/loadavg is the host's (no lxcfs loadavg), report the host load average instead of leaving load unavailable")
+	flag.BoolVar(&allowHostLoad, "allow-host-load", true, "In containers whose /proc/loadavg is the host's (no lxcfs loadavg), report the host load average; pass --allow-host-load=false to leave load unavailable there")
 	flag.IntVar(&hostCPUCores, "host-cpu-cores", 0, "Host CPU core count; with --allow-host-load, host load is scaled to this container's core count so load/cores reflects host utilization (0 = report the raw host load)")
 	flag.StringVar(&nicExclude, "nic-exclude", "", "Comma-separated network interface patterns to exclude from traffic totals, for example lo,docker*,veth*")
-	flag.BoolVar(&disableGPU, "disable-gpu", false, "Skip GPU detection and reporting entirely (no nvidia-smi / rocm-smi subprocesses)")
+	flag.StringVar(&logLevelName, "log-level", "info", "Log level: debug, info, warn or error (routine report/ack lines are debug; debug/info go to stdout, warn/error to stderr)")
+	flag.BoolVar(&enableGPU, "enable-gpu", false, "Probe and report GPUs (runs nvidia-smi / rocm-smi); off by default")
 }
 
 func main() {
 	flag.Parse()
 	applyEnvDefaults()
+	if level, err := parseLogLevel(logLevelName); err != nil {
+		logFatalf("%v", err)
+	} else {
+		currentLogLevel.Store(level)
+	}
 
 	if reportInterval < int(minReportInterval/time.Second) {
 		reportInterval = int(minReportInterval / time.Second)
@@ -444,32 +446,31 @@ func main() {
 	if pingInterval < 1 {
 		pingInterval = defaultPingIntervalSec
 	}
-	trafficResetDay = normalizeTrafficResetDay(trafficResetDay)
 
 	normalizedServer, err := normalizeServerURL(serverURL)
 	if err != nil {
-		log.Fatalf("invalid server URL: %v", err)
+		logFatalf("invalid server URL: %v", err)
 	}
 	serverURL = normalizedServer
 	reportMode = strings.ToLower(strings.TrimSpace(reportMode))
 
 	if token == "" {
-		log.Fatal("missing token: pass --token or set CF_MONITOR_TOKEN")
+		logFatalf("missing token: pass --token or set CF_MONITOR_TOKEN")
 	}
 	legacyImport = loadLegacyTrafficImport(trafficStatePath(), time.Now())
 
-	log.Printf("CF VPS Monitor Agent %s", Version)
-	log.Printf("server: %s", serverURL)
-	log.Printf("interval: %ds", reportInterval)
-	log.Printf("mode: %s", reportMode)
-	log.Printf("ping interval: every %ds", pingInterval)
-	log.Printf("traffic: counters are reported as-is; daily totals and the reset day are kept on the server (--traffic-reset-day=%d is ignored)", trafficResetDay)
+	logInfof("CF VPS Monitor Agent %s", Version)
+	logInfof("server: %s", serverURL)
+	logInfof("interval: %ds", reportInterval)
+	logInfof("mode: %s", reportMode)
+	logInfof("ping interval: every %ds", pingInterval)
+	logInfof("traffic: counters are reported as-is; daily totals and the reset day are kept on the server")
 	logFilter("disk include", mountInclude)
 	logFilter("disk exclude", mountExclude)
 	logFilter("network include", nicInclude)
 	logFilter("network exclude", nicExclude)
-	if disableGPU {
-		log.Printf("GPU collection disabled (--disable-gpu); no nvidia-smi / rocm-smi probes")
+	if enableGPU {
+		logInfof("GPU collection enabled (--enable-gpu)")
 	}
 
 	switch reportMode {
@@ -478,7 +479,7 @@ func main() {
 	case "http":
 		runHTTPReporter()
 	default:
-		log.Fatalf("unsupported mode %q, expected websocket or http", reportMode)
+		logFatalf("unsupported mode %q, expected websocket or http", reportMode)
 	}
 }
 
@@ -491,6 +492,9 @@ func applyEnvDefaults() {
 	}
 	if clientName == "" {
 		clientName = os.Getenv("CF_MONITOR_NAME")
+	}
+	if level := os.Getenv("CF_MONITOR_LOG_LEVEL"); !flagWasSet("log-level") && level != "" {
+		logLevelName = level
 	}
 	if mode := os.Getenv("CF_MONITOR_MODE"); !flagWasSet("mode") && mode != "" {
 		reportMode = mode
@@ -511,25 +515,22 @@ func applyEnvDefaults() {
 		switch strings.ToLower(strings.TrimSpace(os.Getenv("CF_MONITOR_ALLOW_HOST_LOAD"))) {
 		case "1", "true", "yes", "on":
 			allowHostLoad = true
+		case "0", "false", "no", "off":
+			allowHostLoad = false
 		}
 	}
-	if !flagWasSet("disable-gpu") {
-		switch strings.ToLower(strings.TrimSpace(os.Getenv("CF_MONITOR_DISABLE_GPU"))) {
+	if !flagWasSet("enable-gpu") {
+		switch strings.ToLower(strings.TrimSpace(os.Getenv("CF_MONITOR_ENABLE_GPU"))) {
 		case "1", "true", "yes", "on":
-			disableGPU = true
+			enableGPU = true
+		case "0", "false", "no", "off":
+			enableGPU = false
 		}
 	}
 	if !flagWasSet("host-cpu-cores") {
 		if value := strings.TrimSpace(os.Getenv("CF_MONITOR_HOST_CPU_CORES")); value != "" {
 			if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
 				hostCPUCores = parsed
-			}
-		}
-	}
-	if !flagWasSet("traffic-reset-day") {
-		if value := strings.TrimSpace(os.Getenv("CF_MONITOR_TRAFFIC_RESET_DAY")); value != "" {
-			if parsed, err := strconv.Atoi(value); err == nil {
-				trafficResetDay = parsed
 			}
 		}
 	}
@@ -548,7 +549,7 @@ func flagWasSet(name string) bool {
 func logFilter(label string, value string) {
 	value = strings.TrimSpace(value)
 	if value != "" {
-		log.Printf("%s: %s", label, value)
+		logInfof("%s: %s", label, value)
 	}
 }
 
@@ -634,13 +635,13 @@ func detectNvidiaGPU() ([]string, []GPUInfo) {
 		"--format=csv,noheader,nounits",
 	)
 	if err != nil {
-		log.Printf("nvidia-smi query failed: %v", err)
+		logWarnf("nvidia-smi query failed: %v", err)
 		return nil, nil
 	}
 
 	names, details := parseNvidiaGPUOutput(string(output))
 	for _, detail := range details {
-		log.Printf("GPU[%d] %s: util=%.1f%% mem=%d/%dMiB temp=%dC",
+		logDebugf("GPU[%d] %s: util=%.1f%% mem=%d/%dMiB temp=%dC",
 			detail.DeviceIndex,
 			detail.DeviceName,
 			detail.Utilization,
@@ -750,7 +751,7 @@ func detectAMDGPU() ([]string, []GPUInfo) {
 
 	output, err := runBoundedCommand(context.Background(), auxiliaryCommandTimeout, rocmSmi, "--showproductname", "--showmeminfo", "vram", "--showuse", "--showtemp")
 	if err != nil {
-		log.Printf("rocm-smi query failed: %v", err)
+		logWarnf("rocm-smi query failed: %v", err)
 		return nil, nil
 	}
 
@@ -796,7 +797,7 @@ func (s *pingReportState) applyPolicy(policy agentPolicy) {
 	s.policyVersion = policy.PingPolicyVersion
 	s.signalProbeScheduler()
 	if len(tasks) > 0 {
-		log.Printf("policy updated: %d ping task(s), interval=%ds, version=%s", len(tasks), s.intervalSec, s.policyVersion)
+		logInfof("policy updated: %d ping task(s), interval=%ds, version=%s", len(tasks), s.intervalSec, s.policyVersion)
 	}
 }
 
@@ -937,18 +938,18 @@ func executeICMPPingWithContext(parent context.Context, target string) float64 {
 	defer cancel()
 	ips, err := resolvePublicIPsForPing(ctx, target)
 	if err != nil {
-		log.Printf("ICMP target resolution failed for %q: %v", target, err)
+		logWarnf("ICMP target resolution failed for %q: %v", target, err)
 		return -1
 	}
 	program, args, err := icmpPingCommand(runtime.GOOS, ips[0])
 	if err != nil {
-		log.Printf("ICMP command unavailable for %q: %v", target, err)
+		logWarnf("ICMP command unavailable for %q: %v", target, err)
 		return -1
 	}
 	started := time.Now()
 	output, err := runBoundedCommand(ctx, 2*time.Second, program, args...)
 	if err != nil {
-		log.Printf("ICMP ping failed for %q: %v: %s", target, err, strings.TrimSpace(string(output)))
+		logWarnf("ICMP ping failed for %q: %v: %s", target, err, strings.TrimSpace(string(output)))
 		return -1
 	}
 	return float64(time.Since(started).Milliseconds())
@@ -973,7 +974,7 @@ func executeTCPPingWithContext(ctx context.Context, target string) float64 {
 		return v
 	})
 	if result < 0 && ctx.Err() == nil {
-		log.Printf("TCP ping failed for %q", target)
+		logWarnf("TCP ping failed for %q", target)
 	}
 	return result
 }
@@ -1071,7 +1072,7 @@ func publicHTTPTransport(timeout time.Duration) *http.Transport {
 // ==================== Original Functions (Enhanced) ====================
 
 func runHTTPReporter() {
-	log.Println("HTTP reporter started")
+	logInfof("HTTP reporter started")
 	preparer := &reportPreparer{}
 	pingState := newPingReportState()
 	defer pingState.close()
@@ -1108,7 +1109,7 @@ func runHTTPReporter() {
 					currentUploadInterval = nextUploadInterval
 					reportInterval = int(currentSampleInterval / time.Second)
 					nextUploadAt = time.Now().Add(currentUploadInterval)
-					log.Printf("HTTP policy: mode=%s sample=%s upload=%s viewers=%d ttl=%ds cache=%ds",
+					logInfof("HTTP policy: mode=%s sample=%s upload=%s viewers=%d ttl=%ds cache=%ds",
 						policy.Mode,
 						currentSampleInterval,
 						currentUploadInterval,
@@ -1124,7 +1125,7 @@ func runHTTPReporter() {
 					nextUploadAt = time.Now().Add(currentUploadInterval)
 				}
 			} else {
-				log.Printf("HTTP policy fetch failed: %v", err)
+				logWarnf("HTTP policy fetch failed: %v", err)
 				// Keep current policy but force a short retry.
 				if policyExpiresAt.IsZero() {
 					policyExpiresAt = time.Now().Add(30 * time.Second)
@@ -1147,10 +1148,10 @@ func runHTTPReporter() {
 func runWebSocketReporter() {
 	endpoint, err := webSocketEndpoint(serverURL, token)
 	if err != nil {
-		log.Fatalf("invalid WebSocket endpoint: %v", err)
+		logFatalf("invalid WebSocket endpoint: %v", err)
 	}
 
-	log.Printf("WebSocket reporter started: %s", endpoint)
+	logInfof("WebSocket reporter started: %s", endpoint)
 	preparer := &reportPreparer{}
 	pingState := newPingReportState()
 	defer pingState.close()
@@ -1159,12 +1160,12 @@ func runWebSocketReporter() {
 		conn, err := connectWebSocket(endpoint, token)
 		if err != nil {
 			delay := webSocketReconnectDelay(err)
-			log.Printf("WebSocket connect failed: %v; reconnecting in %s", err, delay)
+			logWarnf("WebSocket connect failed: %v; reconnecting in %s", err, delay)
 			time.Sleep(delay)
 			continue
 		}
 
-		log.Println("WebSocket connected")
+		logInfof("WebSocket connected")
 		err = runWebSocketSession(
 			conn,
 			preparer,
@@ -1173,9 +1174,9 @@ func runWebSocketReporter() {
 			30*time.Second,
 		)
 		if err != nil {
-			log.Printf("WebSocket session ended: %v", err)
+			logWarnf("WebSocket session ended: %v", err)
 		}
-		log.Printf("reconnecting in %ds", reconnectInterval)
+		logInfof("reconnecting in %ds", reconnectInterval)
 		time.Sleep(time.Duration(reconnectInterval) * time.Second)
 	}
 }
@@ -1573,10 +1574,10 @@ func getBasicInfo() BasicInfo {
 		info.DiskTotal = *diskTotal
 	}
 
-	// GPU detection（--disable-gpu 时完全跳过：不出子进程，也不上报 GPU 字段）
+	// GPU detection（默认关闭，--enable-gpu 才探测；关闭时完全跳过：不出子进程，也不上报 GPU 字段）
 	var gpuName string
 	var gpuDetails []GPUInfo
-	if !disableGPU {
+	if enableGPU {
 		gpuName, gpuDetails = detectGPU()
 	}
 	info.GPUName = gpuName
@@ -2188,9 +2189,9 @@ func trafficInterfaceSelection(counters []gnet.IOCountersStat) map[string]bool {
 
 	if changed {
 		if fingerprint == "" {
-			log.Printf("traffic interfaces: none matched (check --nic-include/--nic-exclude)")
+			logInfof("traffic interfaces: none matched (check --nic-include/--nic-exclude)")
 		} else {
-			log.Printf("traffic interfaces: %s", fingerprint)
+			logInfof("traffic interfaces: %s", fingerprint)
 		}
 	}
 	return selected
@@ -2393,9 +2394,9 @@ func loadAverageTrusted() bool {
 	if !trusted && !loadAverageTrustLogged {
 		loadAverageTrustLogged = true
 		if allowHostLoad {
-			log.Printf("load average is not container-local (%s); --allow-host-load is set, reporting host load", detail)
+			logInfof("load average is not container-local (%s); --allow-host-load is set, reporting host load", detail)
 		} else {
-			log.Printf("load average is not container-local (%s); reporting load as unavailable", detail)
+			logWarnf("load average is not container-local (%s); reporting load as unavailable", detail)
 		}
 	}
 	if trusted {
@@ -2585,7 +2586,7 @@ func collectReportWithInterval(intervalSec int) Report {
 
 	// GPU details
 	gpuDetailsMu.Lock()
-	if !disableGPU && len(globalGPUDetails) > 0 {
+	if enableGPU && len(globalGPUDetails) > 0 {
 		// Refresh GPU data for each report
 		_, gpuDetails := detectGPU()
 		r.GPUs = gpuDetails
@@ -2751,7 +2752,7 @@ func sendHTTPReports(reports []Report) error {
 	defer cancel()
 	resp, err := postJSONResponse(ctx, endpoint, payload, token)
 	if err != nil {
-		log.Printf("HTTP report failed: %v", err)
+		logWarnf("HTTP report failed: %v", err)
 		return err
 	}
 	defer resp.Body.Close()
@@ -2774,7 +2775,7 @@ func sendHTTPReports(reports []Report) error {
 	if len(reports) == 1 {
 		logReport("HTTP report accepted", reports[0])
 	} else {
-		log.Printf("HTTP report batch accepted: %d reports", len(reports))
+		logDebugf("HTTP report batch accepted: %d reports", len(reports))
 	}
 	return nil
 }
@@ -2828,12 +2829,12 @@ func sendWebSocketReports(conn *safeWebSocketConn, reports []Report) error {
 	if err := conn.WriteJSON(reportsEnvelope{Type: "reports", Reports: reports}); err != nil {
 		return err
 	}
-	log.Printf("WebSocket report batch sent: %d reports", len(reports))
+	logDebugf("WebSocket report batch sent: %d reports", len(reports))
 	return nil
 }
 
 func logReport(prefix string, report Report) {
-	log.Printf("%s: CPU %.1f%%, RAM %s/%s, Net in=%dB/s out=%dB/s",
+	logDebugf("%s: CPU %.1f%%, RAM %s/%s, Net in=%dB/s out=%dB/s",
 		prefix,
 		report.CPU,
 		formatMemoryBytes(report.RAM),
@@ -3007,7 +3008,7 @@ func readWebSocketMessages(conn *safeWebSocketConn, done chan<- error, policies 
 
 		var message serverMessage
 		if err := json.Unmarshal(raw, &message); err != nil {
-			log.Printf("WebSocket message: %s", string(raw))
+			logWarnf("WebSocket message: %s", string(raw))
 			continue
 		}
 		if message.Type == "ack" || message.Type == "policy" {
@@ -3017,7 +3018,7 @@ func readWebSocketMessages(conn *safeWebSocketConn, done chan<- error, policies 
 			}
 		}
 		if message.Type == "ack" {
-			log.Printf("WebSocket ack received: %d", message.Timestamp)
+			logDebugf("WebSocket ack received: %d", message.Timestamp)
 			if message.TrafficImported {
 				legacyImport.finish()
 			}
@@ -3033,10 +3034,10 @@ func readWebSocketMessages(conn *safeWebSocketConn, done chan<- error, policies 
 			select {
 			case policies <- message:
 			default:
-				log.Printf("WebSocket policy dropped: queue full")
+				logWarnf("WebSocket policy dropped: queue full")
 			}
 			continue
 		}
-		log.Printf("WebSocket message type=%s", message.Type)
+		logDebugf("WebSocket message type=%s", message.Type)
 	}
 }

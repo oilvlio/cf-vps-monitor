@@ -6,46 +6,73 @@ import (
 	"testing"
 )
 
-func TestDisableGPUPrecedence(t *testing.T) {
-	previousFlags, previousDisable := flag.CommandLine, disableGPU
+func TestEnableGPUPrecedence(t *testing.T) {
+	previousFlags, previousEnable := flag.CommandLine, enableGPU
 	t.Cleanup(func() {
-		flag.CommandLine, disableGPU = previousFlags, previousDisable
+		flag.CommandLine, enableGPU = previousFlags, previousEnable
 	})
-	t.Setenv("CF_MONITOR_TOKEN", "")
-	t.Setenv("CF_MONITOR_SERVER", "")
-	t.Setenv("CF_MONITOR_NAME", "")
-	t.Setenv("CF_MONITOR_MODE", "")
-	t.Setenv("CF_MONITOR_MOUNT_INCLUDE", "")
-	t.Setenv("CF_MONITOR_MOUNT_EXCLUDE", "")
-	t.Setenv("CF_MONITOR_NIC_INCLUDE", "")
-	t.Setenv("CF_MONITOR_NIC_EXCLUDE", "")
-	t.Setenv("CF_MONITOR_ALLOW_HOST_LOAD", "")
-	t.Setenv("CF_MONITOR_HOST_CPU_CORES", "")
-	t.Setenv("CF_MONITOR_TRAFFIC_RESET_DAY", "")
+	for _, name := range []string{"TOKEN", "SERVER", "NAME", "MODE", "MOUNT_INCLUDE", "MOUNT_EXCLUDE", "NIC_INCLUDE", "NIC_EXCLUDE", "ALLOW_HOST_LOAD", "HOST_CPU_CORES", "LOG_LEVEL"} {
+		t.Setenv("CF_MONITOR_"+name, "")
+	}
 
 	for _, tt := range []struct {
 		name, environment string
 		args              []string
 		want              bool
 	}{
-		{"explicit flag wins over environment on", "1", []string{"--disable-gpu=false"}, false},
+		{"explicit flag wins over environment on", "1", []string{"--enable-gpu=false"}, false},
+		{"explicit flag wins over environment off", "0", []string{"--enable-gpu"}, true},
 		{"environment on", "true", nil, true},
 		{"environment numeric on", "1", nil, true},
 		{"environment off", "0", nil, false},
 		{"default off", "", nil, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			flags := flag.NewFlagSet("disable-gpu", flag.ContinueOnError)
+			flags := flag.NewFlagSet("enable-gpu", flag.ContinueOnError)
 			flags.SetOutput(io.Discard)
-			flags.BoolVar(&disableGPU, "disable-gpu", false, "")
+			flags.BoolVar(&enableGPU, "enable-gpu", false, "")
 			flag.CommandLine = flags
-			t.Setenv("CF_MONITOR_DISABLE_GPU", tt.environment)
+			t.Setenv("CF_MONITOR_ENABLE_GPU", tt.environment)
 			if err := flags.Parse(tt.args); err != nil {
 				t.Fatal(err)
 			}
 			applyEnvDefaults()
-			if disableGPU != tt.want {
-				t.Fatalf("disableGPU=%v, want %v", disableGPU, tt.want)
+			if enableGPU != tt.want {
+				t.Fatalf("enableGPU=%v, want %v", enableGPU, tt.want)
+			}
+		})
+	}
+}
+
+func TestAllowHostLoadEnvironment(t *testing.T) {
+	previousFlags, previousAllow := flag.CommandLine, allowHostLoad
+	t.Cleanup(func() { flag.CommandLine, allowHostLoad = previousFlags, previousAllow })
+	for _, name := range []string{"TOKEN", "SERVER", "NAME", "MODE", "MOUNT_INCLUDE", "MOUNT_EXCLUDE", "NIC_INCLUDE", "NIC_EXCLUDE", "HOST_CPU_CORES", "LOG_LEVEL", "ENABLE_GPU"} {
+		t.Setenv("CF_MONITOR_"+name, "")
+	}
+	for _, tt := range []struct {
+		name, environment string
+		args              []string
+		want              bool
+	}{
+		{"default on", "", nil, true},
+		{"environment off", "0", nil, false},
+		{"environment false", "false", nil, false},
+		{"environment on", "1", nil, true},
+		{"explicit flag wins over environment", "1", []string{"--allow-host-load=false"}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			flags := flag.NewFlagSet("allow-host-load", flag.ContinueOnError)
+			flags.SetOutput(io.Discard)
+			flags.BoolVar(&allowHostLoad, "allow-host-load", true, "")
+			flag.CommandLine = flags
+			t.Setenv("CF_MONITOR_ALLOW_HOST_LOAD", tt.environment)
+			if err := flags.Parse(tt.args); err != nil {
+				t.Fatal(err)
+			}
+			applyEnvDefaults()
+			if allowHostLoad != tt.want {
+				t.Fatalf("allowHostLoad=%v, want %v", allowHostLoad, tt.want)
 			}
 		})
 	}

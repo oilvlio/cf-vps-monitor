@@ -853,14 +853,6 @@ func TestTrafficAndRateCallSitesUseOneSelection(t *testing.T) {
 	}
 }
 
-func TestNormalizeTrafficResetDay(t *testing.T) {
-	for input, want := range map[int]int{-1: 1, 0: 1, 1: 1, 15: 15, 31: 31, 32: 31} {
-		if got := normalizeTrafficResetDay(input); got != want {
-			t.Fatalf("normalizeTrafficResetDay(%d) = %d, want %d", input, got, want)
-		}
-	}
-}
-
 func TestPostJSONWithContextSendsBearerJSON(t *testing.T) {
 	var received map[string]string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

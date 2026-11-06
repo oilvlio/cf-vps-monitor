@@ -11,21 +11,17 @@ assert.ok(generated);
 for (const source of [migration, generated]) {
   assert.match(source, /last_notified\s*=\s*case\s+when\s+excluded\.enable\s*=\s*0\s+then\s+null/i);
   assert.match(source, /set\s+last_notified\s*=\s*nullif\(input_time,\s*''\)::timestamptz/i);
-  assert.match(source, /drop function if exists public\.cfm_mark_offline_notification_sent\(text, text\);/i);
+  assert.doesNotMatch(source, /drop function/i);
   assert.match(source, /revoke all on function public\.cfm_mark_offline_notification_sent\(text, text, text\) from public, anon, authenticated;/i);
   assert.match(source, /grant execute on function public\.cfm_mark_offline_notification_sent\(text, text, text\) to service_role/i);
 }
 
-test('offline marker upgrade removes the old overload and preserves effective RPC privileges on replay', async () => {
+test('offline marker RPC keeps its effective privileges when the migrations are replayed', async () => {
   const database = await createTestDatabase({ migrate: false });
   try {
-    // Simulate the legacy, tokenless overload before applying the real migrations.
-    await database.exec(`create function public.cfm_mark_offline_notification_sent(text, text)
-      returns boolean language sql as $$ select true $$;`);
     for (let install = 0; install < 2; install++) {
       await applyApplicationMigrations(database);
       const { rows } = await database.query(`select
-        to_regprocedure('public.cfm_mark_offline_notification_sent(text,text)') is null as old_removed,
         has_function_privilege('anon', p.oid, 'execute') as anon_execute,
         has_function_privilege('authenticated', p.oid, 'execute') as authenticated_execute,
         has_function_privilege('service_role', p.oid, 'execute') as service_execute,
@@ -33,7 +29,7 @@ test('offline marker upgrade removes the old overload and preserves effective RP
           where grantee = 0 and privilege_type = 'EXECUTE') as public_execute
         from pg_proc p
         where p.oid = to_regprocedure('public.cfm_mark_offline_notification_sent(text,text,text)')`);
-      assert.deepEqual(rows, [{ old_removed: true, anon_execute: false,
+      assert.deepEqual(rows, [{ anon_execute: false,
         authenticated_execute: false, service_execute: true, public_execute: false }]);
     }
     for (const role of ['anon', 'authenticated']) {

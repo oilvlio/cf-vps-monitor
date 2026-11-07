@@ -39,6 +39,7 @@ import Loading from '../../components/Loading';
 import { useApi } from '../../contexts/AuthContext';
 import { useAdminAction } from '../../hooks/useAdminAction';
 import { sortClientsByAdminOrder } from '../../utils/adminNodeOrder';
+import { lockXClampYToBounds, type DragBounds } from '../../utils/dragModifiers';
 
 interface PingTask {
   id: number;
@@ -648,6 +649,15 @@ export default function AdminPingTasks() {
   }, [apiFetch]);
 
   const taskOrderRef = useRef(0);
+  // 拖拽范围 = 任务列表主体（拖拽开始时测一次）。把被拖的行夹在里面，否则它会撑大外层可滚动的 Card，
+  // 触发 dnd-kit 自动滚动并越滚越长（无限下拉）。
+  const taskBodyRef = useRef<HTMLTableSectionElement | null>(null);
+  const taskDragBoundsRef = useRef<DragBounds | null>(null);
+  const taskDragModifiers = useMemo(() => [lockXClampYToBounds(() => taskDragBoundsRef.current)], []);
+  const handleTaskDragStart = useCallback(() => {
+    const rect = taskBodyRef.current?.getBoundingClientRect();
+    taskDragBoundsRef.current = rect ? { top: rect.top, bottom: rect.bottom } : null;
+  }, []);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -777,6 +787,7 @@ export default function AdminPingTasks() {
   const taskDragDisabled = Boolean(taskSearch.trim()) || scopeFilter !== 'all';
 
   const handleTaskDragEnd = async (event: DragEndEvent) => {
+    taskDragBoundsRef.current = null;
     const { active, over } = event;
     if (!over || active.id === over.id || taskDragDisabled) return;
 
@@ -875,7 +886,14 @@ export default function AdminPingTasks() {
 
       {viewMode === 'task' ? (
         <Card style={{ overflowX: 'auto' }}>
-          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleTaskDragEnd}>
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            modifiers={taskDragModifiers}
+            onDragStart={handleTaskDragStart}
+            onDragCancel={() => { taskDragBoundsRef.current = null; }}
+            onDragEnd={handleTaskDragEnd}
+          >
           <Table.Root>
             <Table.Header>
               <Table.Row>
@@ -887,7 +905,7 @@ export default function AdminPingTasks() {
                 <Table.ColumnHeaderCell width="180px">操作</Table.ColumnHeaderCell>
               </Table.Row>
             </Table.Header>
-            <Table.Body>
+            <Table.Body ref={taskBodyRef}>
               <SortableContext items={filteredTasks.map((task) => task.id)} strategy={verticalListSortingStrategy}>
               {filteredTasks.length === 0 ? (
                 <Table.Row>

@@ -30,6 +30,8 @@ export interface Client {
   group: string;
   tags: string;
   hidden: boolean;
+  // 对游客隐藏价格：节点仍对游客可见，但价格/周期/币种/自动续费不下发。
+  hide_price: boolean;
   traffic_limit: number;
   traffic_limit_type: string;
   // 每月流量重置日（1~31）。经 agent policy 下发；改它会让探针重建当期统计。

@@ -21,6 +21,8 @@ export interface ClientInfo {
   group: string;
   tags: string;
   hidden: boolean;
+  // 仅管理员视角会收到该字段；游客侧永远不下发（价格字段被置零）。
+  hide_price?: boolean;
   price: number;
   billing_cycle: number;
   currency: string;

@@ -274,6 +274,7 @@ function normalizeAgentAuthSnapshot(value: unknown): AgentAuthSnapshot | null {
     group: stringField(value, 'group'),
     tags: stringField(value, 'tags'),
     hidden: booleanField(value, 'hidden'),
+    hide_price: booleanField(value, 'hide_price'),
     traffic_limit: numberField(value, 'traffic_limit'),
     traffic_limit_type: stringField(value, 'traffic_limit_type') || 'sum',
     created_at: stringField(value, 'created_at'),
@@ -373,6 +374,7 @@ interface AgentAuthSnapshot extends JsonObject {
   group: string;
   tags: string;
   hidden: boolean;
+  hide_price: boolean;
   traffic_limit: number;
   traffic_limit_type: string;
   sort_order?: number;
@@ -1414,7 +1416,14 @@ export class LiveDataDO {
           clients: {
             ...(Array.isArray(patch.upsert) ? {
               upsert: upserts.filter(client => target === 'admin' || !client.hidden)
-                .map(client => projectClientMetadata(client, target === 'admin')),
+                .map(client => projectClientMetadata(
+                  client,
+                  target === 'admin',
+                  // 补丁没带 hide_price 时，用 DO 已缓存的管理端元数据兜底，避免漏价。
+                  Object.hasOwn(client, 'hide_price') || typeof client.uuid !== 'string'
+                    ? undefined
+                    : booleanField(this.adminClientMetadata.get(client.uuid) ?? {}, 'hide_price'),
+                )),
             } : {}),
             ...(remove.size ? { remove: [...remove] } : {}),
           },

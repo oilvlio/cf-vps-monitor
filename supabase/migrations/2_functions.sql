@@ -54,7 +54,7 @@ as $$
       uuid, name, cpu_name, virtualization, arch, cpu_cores, os,
       kernel_version, gpu_name, ipv4, ipv6, region, public_remark,
       mem_total, swap_total, disk_total, version, price, billing_cycle,
-      auto_renewal, currency, expired_at, "group", tags, hidden,
+      auto_renewal, currency, expired_at, "group", tags, hidden, hide_price,
       traffic_limit, traffic_limit_type, sort_order, created_at, updated_at
     from clients
     order by sort_order asc, lower(name) asc, created_at asc
@@ -75,7 +75,7 @@ as $$
       name, cpu_name, virtualization, arch, cpu_cores, os,
       kernel_version, gpu_name, ipv4, ipv6, region, remark, public_remark,
       mem_total, swap_total, disk_total, version, price, billing_cycle,
-      auto_renewal, currency, expired_at, "group", tags, hidden,
+      auto_renewal, currency, expired_at, "group", tags, hidden, hide_price,
       traffic_limit, traffic_limit_type, traffic_reset_day, sort_order, created_at, updated_at
     from clients
     order by sort_order asc, lower(name) asc, created_at asc
@@ -345,6 +345,7 @@ begin
     "group" = case when input_patch ? 'group' then coalesce(input_patch->>'group', '') else "group" end,
     tags = case when input_patch ? 'tags' then coalesce(input_patch->>'tags', '') else tags end,
     hidden = case when input_patch ? 'hidden' then case when lower(coalesce(input_patch->>'hidden', '')) in ('true', '1') then 1 else 0 end else hidden end,
+    hide_price = case when input_patch ? 'hide_price' then case when lower(coalesce(input_patch->>'hide_price', '')) in ('true', '1') then 1 else 0 end else hide_price end,
     traffic_limit = case when input_patch ? 'traffic_limit' then coalesce((input_patch->>'traffic_limit')::bigint, 0) else traffic_limit end,
     traffic_limit_type = case when input_patch ? 'traffic_limit_type' then coalesce(input_patch->>'traffic_limit_type', 'sum') else traffic_limit_type end,
     traffic_reset_day = case when input_patch ? 'traffic_reset_day'
@@ -2193,7 +2194,7 @@ begin
         name, cpu_name, virtualization, arch, cpu_cores, os, kernel_version, gpu_name,
         ipv4, ipv6, region, remark, public_remark, mem_total, swap_total, disk_total,
         version, price, billing_cycle, auto_renewal, currency, expired_at, "group", tags,
-        hidden, traffic_limit, traffic_limit_type, traffic_reset_day, sort_order, created_at, updated_at
+        hidden, hide_price, traffic_limit, traffic_limit_type, traffic_reset_day, sort_order, created_at, updated_at
       )
       values (
         item->>'uuid',
@@ -2227,6 +2228,8 @@ begin
         coalesce(item->>'group', ''),
         coalesce(item->>'tags', ''),
         case when coalesce((item->>'hidden')::boolean, false) then 1 else 0 end,
+        -- 旧备份没有该字段：缺省 false（价格照常公开），与列默认值一致。
+        case when coalesce((item->>'hide_price')::boolean, false) then 1 else 0 end,
         coalesce((item->>'traffic_limit')::bigint, 0),
         -- 兜底值与 cfm_create_client / cfm_update_client 保持一致（'sum'）；
         -- 还原路径漏改会让从旧备份恢复的节点静默回到 'max' 口径。
@@ -2268,6 +2271,7 @@ begin
         "group" = excluded."group",
         tags = excluded.tags,
         hidden = excluded.hidden,
+        hide_price = excluded.hide_price,
         traffic_limit = excluded.traffic_limit,
         traffic_limit_type = excluded.traffic_limit_type,
         traffic_reset_day = excluded.traffic_reset_day,

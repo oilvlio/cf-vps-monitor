@@ -98,6 +98,7 @@ function optimisticAdminClient(created: CommandClient): AdminClient {
     group: '',
     tags: '',
     hidden: false,
+    hide_price: false,
     price: 0,
     billing_cycle: 0,
     currency: '$',
@@ -341,7 +342,8 @@ function SortableNodeCard({ node, selected, onSelect, liveData, onDetail, onEdit
           <span className="admin-node-card-badges">
             <span className={`admin-node-status-text${isOnline ? ' is-online' : ' is-offline'}`}>{isOnline ? '在线' : '离线'}</span>
             <Badge className="admin-node-region-badge" size="1" variant="soft" color="gray" title={node.region || '未知'}>{node.region || '未知'}</Badge>
-            {Boolean(node.hidden) && <Badge size="1" variant="soft" color="orange">隐藏</Badge>}
+            {Boolean(node.hidden) && <Badge size="1" variant="soft" color="orange">完全隐藏</Badge>}
+            {Boolean(node.hide_price) && <Badge size="1" variant="soft" color="amber">隐藏价格</Badge>}
           </span>
         </div>
 
@@ -645,7 +647,7 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
       traffic_limit_form: createTrafficLimitFormValue(client.traffic_limit, client.traffic_limit_type),
       traffic_reset_day: client.traffic_reset_day || 1,
       expired_at: toDateInputValue(client.expired_at),
-      hidden: client.hidden || false, auto_renewal: client.auto_renewal || false,
+      hidden: client.hidden || false, hide_price: client.hide_price || false, auto_renewal: client.auto_renewal || false,
     });
   }, [client]);
 
@@ -754,14 +756,21 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
             </Box>
             <Flex className="billing-switch-row" gap="3">
               <Flex className="billing-switch-item" align="center" justify="between">
-                <Text size="2">对游客隐藏</Text>
+                <Text size="2">对游客完全隐藏</Text>
                 <Switch checked={Boolean(form.hidden)} onCheckedChange={v => update('hidden', v)} />
+              </Flex>
+              <Flex className="billing-switch-item" align="center" justify="between">
+                <Text size="2">对游客隐藏价格</Text>
+                <Switch checked={Boolean(form.hide_price)} onCheckedChange={v => update('hide_price', v)} />
               </Flex>
               <Flex className="billing-switch-item" align="center" justify="between">
                 <Text size="2">自动续费</Text>
                 <Switch checked={Boolean(form.auto_renewal)} onCheckedChange={v => update('auto_renewal', v)} />
               </Flex>
             </Flex>
+            <Text size="1" color="gray" style={{ display: 'block' }}>
+              「完全隐藏」后节点整体不出现在游客前台；「隐藏价格」只对游客隐藏价格、计费周期、币种和自动续费，节点与到期时间仍然可见（管理员始终可见）。
+            </Text>
           </Flex>
         </div>
         <Flex gap="3" justify="end" mt="4">
@@ -968,7 +977,7 @@ export default function AdminDashboard() {
         body: JSON.stringify({ uuids: selectedNodes }),
       });
       if (!result.success) throw new Error(result.error || '批量隐藏失败');
-      toast.success(`已隐藏 ${result.updated ?? selectedNodes.length} 个节点`);
+      toast.success(`已对游客完全隐藏 ${result.updated ?? selectedNodes.length} 个节点`);
       updateClients((prev) => prev.map((client) => selectedNodes.includes(client.uuid) ? { ...client, hidden: true } : client));
       setSelectedNodes([]);
       notifyPublicDataUpdated({
@@ -1136,7 +1145,7 @@ export default function AdminDashboard() {
         icon: <Layers size={18} />,
       },
       {
-        label: '对游客隐藏',
+        label: '对游客完全隐藏',
         value: String(hiddenCount),
         detail: '不会出现在游客前台',
         icon: <EyeOff size={18} />,
@@ -1205,7 +1214,7 @@ export default function AdminDashboard() {
                   <Trash2 size={14} /> 删除
                 </Button>
                 <Button variant="soft" size="1" onClick={batchHideNodes}>
-                  <EyeOff size={14} /> 隐藏
+                  <EyeOff size={14} /> 完全隐藏
                 </Button>
                 <Button variant="ghost" size="1" onClick={() => setSelectedNodes([])}>清除</Button>
               </Flex>

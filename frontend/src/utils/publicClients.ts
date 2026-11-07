@@ -63,6 +63,7 @@ export function normalizePublicClient(payload: unknown): ClientInfo | null {
     group: stringField(record, 'group'),
     tags: stringField(record, 'tags'),
     hidden: booleanField(record, 'hidden'),
+    hide_price: booleanField(record, 'hide_price'),
     price: numberField(record, 'price'),
     billing_cycle: numberField(record, 'billing_cycle'),
     currency: stringField(record, 'currency'),

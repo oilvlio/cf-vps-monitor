@@ -314,7 +314,7 @@ function validateClients(items: unknown[], errors: string[]): Partial<Client>[] 
     'cpu_cores', 'mem_total', 'swap_total', 'disk_total', 'price',
     'billing_cycle', 'traffic_limit', 'sort_order',
   ];
-  const booleanFields = ['auto_renewal', 'hidden'];
+  const booleanFields = ['auto_renewal', 'hidden', 'hide_price'];
 
   items.forEach((item, index) => {
     if (!isPlainObject(item)) {

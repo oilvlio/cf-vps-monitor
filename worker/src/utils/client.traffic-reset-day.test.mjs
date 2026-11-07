@@ -77,7 +77,7 @@ assert.ok(
 // 而按 CHANGELOG 的说明这会连带清零每台机器的当期累计——比丢配置更糟。
 // 这里锁两层：SQL 的 insert/upsert 列清单，以及 backup.ts 的字段白名单。
 assert.ok(
-  /hidden, traffic_limit, traffic_limit_type, traffic_reset_day, sort_order, created_at, updated_at/.test(rpc),
+  /hidden, hide_price, traffic_limit, traffic_limit_type, traffic_reset_day, sort_order, created_at, updated_at/.test(rpc),
   'cfm_restore_backup_data 的 insert 列清单必须包含 traffic_reset_day',
 );
 assert.ok(

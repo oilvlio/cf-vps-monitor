@@ -1,5 +1,5 @@
 import { isPublicIpAddress } from './request-ip';
-import { PUBLIC_CLIENT_FIELDS, sanitizePublicTags } from './public-client';
+import { PUBLIC_CLIENT_FIELDS, applyPriceVisibility, sanitizePublicTags } from './public-client';
 
 // Agent observations never carry authority over administrative name/visibility,
 // billing, remarks or membership, even when an HTTP caller has an older row.
@@ -17,7 +17,11 @@ export function projectAgentClientMetadata(client: Record<string, unknown>): Rec
 
 // Metadata events are patches: absent fields stay absent, including IP-presence
 // flags. Neither audience receives token material or arbitrary Agent extensions.
-export function projectClientMetadata(client: Record<string, unknown>, administrator: boolean): Record<string, unknown> {
+export function projectClientMetadata(
+  client: Record<string, unknown>,
+  administrator: boolean,
+  hidePriceOverride?: boolean,
+): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   const fields: readonly string[] = administrator ? [...PUBLIC_CLIENT_FIELDS, 'ipv4', 'ipv6', 'remark'] : PUBLIC_CLIENT_FIELDS;
   for (const field of fields) {
@@ -30,5 +34,5 @@ export function projectClientMetadata(client: Record<string, unknown>, administr
     if (Object.hasOwn(client, field)) result[flag] = isPublicIpAddress(String(client[field] || ''));
     else if (typeof client[flag] === 'boolean') result[flag] = client[flag];
   }
-  return result;
+  return applyPriceVisibility(result, administrator, hidePriceOverride);
 }

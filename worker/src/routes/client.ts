@@ -219,6 +219,7 @@ function normalizeLiveAgentAuthClient(value: unknown): db.Client | null {
     group: clientStringField(value, 'group'),
     tags: clientStringField(value, 'tags'),
     hidden: clientBooleanField(value, 'hidden'),
+    hide_price: clientBooleanField(value, 'hide_price'),
     traffic_limit: clientNumberField(value, 'traffic_limit'),
     traffic_limit_type: clientStringField(value, 'traffic_limit_type') || 'sum',
     traffic_reset_day: clientNumberField(value, 'traffic_reset_day') || 1,

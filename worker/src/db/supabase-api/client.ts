@@ -89,17 +89,18 @@ function readRpcBoolean(value: unknown): boolean {
   return false;
 }
 
-function normalizeClientBooleans<T extends { hidden?: unknown; auto_renewal?: unknown } | null>(client: T): T {
+function normalizeClientBooleans<T extends { hidden?: unknown; hide_price?: unknown; auto_renewal?: unknown } | null>(client: T): T {
   if (!client || typeof client !== 'object') return client;
   const record = client as Record<string, unknown>;
   return {
     ...client,
     ...(Object.prototype.hasOwnProperty.call(record, 'hidden') ? { hidden: readRpcBoolean(record.hidden) } : {}),
+    ...(Object.prototype.hasOwnProperty.call(record, 'hide_price') ? { hide_price: readRpcBoolean(record.hide_price) } : {}),
     ...(Object.prototype.hasOwnProperty.call(record, 'auto_renewal') ? { auto_renewal: readRpcBoolean(record.auto_renewal) } : {}),
   } as T;
 }
 
-function normalizeClientList<T extends { hidden?: unknown; auto_renewal?: unknown }>(clients: T[]): T[] {
+function normalizeClientList<T extends { hidden?: unknown; hide_price?: unknown; auto_renewal?: unknown }>(clients: T[]): T[] {
   return clients.map(normalizeClientBooleans);
 }
 

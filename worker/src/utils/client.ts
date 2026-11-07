@@ -18,7 +18,7 @@ const TEXT_LIMITS: Record<string, number> = {
   group: 128,
 };
 const TEXT_FIELDS = new Set(Object.keys(TEXT_LIMITS));
-const BOOLEAN_FIELDS = new Set(['auto_renewal', 'hidden']);
+const BOOLEAN_FIELDS = new Set(['auto_renewal', 'hidden', 'hide_price']);
 const INTEGER_FIELDS = new Set(['cpu_cores', 'billing_cycle', 'mem_total', 'swap_total', 'disk_total', 'traffic_limit', 'traffic_reset_day']);
 const NUMBER_FIELDS = new Set(['price']);
 const TRAFFIC_LIMIT_TYPES = new Set(['sum', 'max', 'min', 'up', 'down', 'unlimited']);

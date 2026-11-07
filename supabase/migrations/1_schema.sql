@@ -36,6 +36,8 @@ create table if not exists clients (
   "group" text not null default '',
   tags text not null default '',
   hidden smallint not null default 0,
+  -- 对游客隐藏价格：节点本身仍对游客可见，仅价格/计费周期/币种/自动续费不下发给游客。
+  hide_price smallint not null default 0,
   traffic_limit bigint not null default 0,
   -- 默认口径为「总计」（上行+下行），与后台新建节点的默认值一致。
   traffic_limit_type text not null default 'sum',
@@ -496,6 +498,9 @@ end $$;
 -- 每月流量重置日：节点级配置，经 agent policy 下发。被 cfm_admin_clients 与
 -- cfm_create_client（均为 language sql）引用，故必须留在这里，不能放进下方 DDL 块。
 alter table clients add column if not exists traffic_reset_day smallint not null default 1 constraint clients_traffic_reset_day_check check (traffic_reset_day between 1 and 31);
+
+-- 对游客隐藏价格。被 cfm_public_clients / cfm_admin_clients / cfm_update_client_returning（language sql）引用，同样必须留在这里。
+alter table clients add column if not exists hide_price smallint not null default 0;
 
 -- Delivery state contains identities/timestamps only, never notification bodies
 -- or channel credentials. One row per event source/target bounds active state.

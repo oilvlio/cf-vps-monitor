@@ -24,7 +24,7 @@ import {
 } from '../auth/session';
 import { PUBLIC_SETTING_KEYS, buildPublicSettings } from '../settings/schema';
 import type { PublicSettings } from '../settings/schema';
-import { toPublicClient } from '../utils/public-client';
+import { applyPriceVisibility, toPublicClient } from '../utils/public-client';
 import type { PublicClient } from '../utils/public-client';
 import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
 import { getCloudflareClientIp } from '../utils/request-ip';
@@ -582,6 +582,9 @@ async function getPublicClientsSnapshot(c: PublicContext, database: db.QueryData
   const clients = await db.listPublicClientRows(database, force);
   let publicClients = clients.map(toPublicClient);
   publicClients = applyPublicClientsOverlay(publicClients, await readAdminClientsSnapshotOverlay(c), includeHidden);
+  // 价格可见性必须在 overlay 合并之后、且在按受众缓存之前处理：
+  // 管理员视角（includeHidden）保留真实价格，游客视角剔除并且不暴露 hide_price 开关。
+  publicClients = publicClients.map(client => applyPriceVisibility(client, includeHidden));
   const publicClientIds = new Set(publicClients.map(client => client.uuid));
   const nodes = publicClients.map((client) => ({
     ...client,

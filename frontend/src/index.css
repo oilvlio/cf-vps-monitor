@@ -709,23 +709,31 @@ body {
 .node-card-region-tags-line {
   width: 100%;
   min-width: 0;
-  display: block;
+  /* 固定行高：标签胶囊（16px）不能撑高这一行，否则带标签的卡片会比其它卡片高出几 px */
+  display: flex;
+  align-items: center;
+  height: 18px;
   color: var(--monitor-muted-text);
   font-size: 12px;
-  line-height: 1.25 !important;
+  line-height: 18px !important;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
   cursor: default;
 }
 
 .node-card-region-text {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--monitor-muted-text);
-  vertical-align: middle;
 }
 
 .node-card-header-tags {
-  display: inline;
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
   margin-left: 4px;
 }
 
@@ -5165,8 +5173,9 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   }
 
   .node-card-region-tags-line {
+    height: 17px;
     font-size: 11.5px;
-    line-height: 1.2 !important;
+    line-height: 17px !important;
   }
 
   .node-card-status-row {
@@ -5916,10 +5925,11 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   gap: 4px;
 }
 .lp-sub-tag {
+  flex: none;
   background: var(--monitor-panel-muted);
   color: var(--gray-11);
   border-radius: 6px;
-  padding: 1px 6px;
+  padding: 0 6px;
   font-size: 12px;
   font-weight: 600;
 }

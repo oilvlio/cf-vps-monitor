@@ -633,7 +633,7 @@ export default function Instance() {
 
               <LpMetricCard loading={recordsLoading} height={miniH} icon={<Network size={14} />} accent="var(--lp-net)" title="网络"
                 value={lastPoint ? `↓ ${formatSpeed(lastPoint.net_in)} · ↑ ${formatSpeed(lastPoint.net_out)}` : '—'}
-                sub={totalUp !== null && totalDown !== null ? `累计 ↓ ${formatMetricBytes(totalDown)} · ↑ ${formatMetricBytes(totalUp)}` : undefined}>
+                sub="实时速率">
                 <LpAreaChart id="net" data={chartRenderData} height={miniH} margin={miniChartMargin} grid={miniGrid} xAxis={miniXAxis}
                   yProps={{ ...lpYAxisWide, tickFormatter: (value: unknown) => formatSpeed(Number(value)) }} labelFormatter={chartTimeFormatter}
                   series={[

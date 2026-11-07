@@ -1,4 +1,21 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import {
   Badge,
   Box,
@@ -16,11 +33,12 @@ import {
   Text,
   TextField,
 } from '@radix-ui/themes';
-import { Activity, ArrowDown, ArrowUp, ListChecks, Pencil, Plus, Search, Trash2 } from 'lucide-react';
+import { Activity, Grip, ListChecks, Pencil, Plus, Search, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
 import { useApi } from '../../contexts/AuthContext';
 import { useAdminAction } from '../../hooks/useAdminAction';
+import { sortClientsByAdminOrder } from '../../utils/adminNodeOrder';
 
 interface PingTask {
   id: number;
@@ -38,6 +56,7 @@ interface ClientLite {
   name: string;
   group?: string;
   region?: string;
+  sort_order?: number;
 }
 
 type TaskScopeFilter = 'all' | 'global' | 'selected' | 'unbound';
@@ -516,20 +535,48 @@ function TaskRow({
   boundNames,
   onEdit,
   onDelete,
-  onMove,
-  canMoveUp,
-  canMoveDown,
+  dragDisabled,
 }: {
   task: PingTask;
   boundNames: string;
   onEdit: (task: PingTask) => void;
   onDelete: (task: PingTask) => void;
-  onMove: (task: PingTask, direction: 'up' | 'down') => void;
-  canMoveUp: boolean;
-  canMoveDown: boolean;
+  dragDisabled: boolean;
 }) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: task.id, disabled: dragDisabled });
+
+  const rowStyle = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    position: 'relative',
+    zIndex: isDragging ? 2 : undefined,
+    background: isDragging ? 'var(--color-panel-solid)' : undefined,
+    boxShadow: isDragging ? '0 6px 18px rgba(0, 0, 0, 0.22)' : undefined,
+    opacity: isDragging ? 0.92 : undefined,
+  } as CSSProperties;
+
   return (
-    <Table.Row>
+    <Table.Row ref={setNodeRef} style={rowStyle} className={isDragging ? 'admin-ping-task-row is-dragging' : 'admin-ping-task-row'}>
+      <Table.Cell style={{ width: 44, paddingRight: 0 }}>
+        <button
+          type="button"
+          className="admin-row-drag-handle"
+          title={dragDisabled ? '清除搜索 / 范围筛选后可拖拽排序' : '拖拽排序'}
+          aria-label={`拖拽排序 ${task.name}`}
+          disabled={dragDisabled}
+          {...attributes}
+          {...listeners}
+        >
+          <Grip size={15} />
+        </button>
+      </Table.Cell>
       <Table.Cell>
         <Flex direction="column" gap="1">
           <Text size="2" weight="bold">{task.name}</Text>
@@ -556,12 +603,6 @@ function TaskRow({
       </Table.Cell>
       <Table.Cell>
         <Flex gap="1" wrap="nowrap" style={{ whiteSpace: 'nowrap' }}>
-          <Button size="1" variant="soft" onClick={() => onMove(task, 'up')} disabled={!canMoveUp} title="上移" aria-label={`上移 ${task.name}`}>
-            <ArrowUp size={13} />
-          </Button>
-          <Button size="1" variant="soft" onClick={() => onMove(task, 'down')} disabled={!canMoveDown} title="下移" aria-label={`下移 ${task.name}`}>
-            <ArrowDown size={13} />
-          </Button>
           <Button size="1" variant="soft" onClick={() => onEdit(task)}>
             <Pencil size={13} /> 编辑
           </Button>
@@ -591,8 +632,8 @@ export default function AdminPingTasks() {
   const [scopeFilter, setScopeFilter] = useState<TaskScopeFilter>('all');
   const [assignClient, setAssignClient] = useState<ClientLite | null>(null);
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
+  const loadData = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     setLoadError(null);
     try {
       const tasksData = await apiFetch('/admin/ping');
@@ -602,30 +643,42 @@ export default function AdminPingTasks() {
       setLoadError(message);
       toast.error(message);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [apiFetch]);
 
-  const ensureClients = useCallback(async () => {
-    if (clientsLoaded) return;
+  const taskOrderRef = useRef(0);
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
+  // 拉取服务器列表并按后台「服务器」页的手动顺序排好；任务分配弹窗、服务器视图都用这一份顺序。
+  const refreshClients = useCallback(async () => {
     try {
       const clientsData = await apiFetch('/admin/clients');
       if (Array.isArray(clientsData)) {
-        setClients(clientsData);
+        setClients(sortClientsByAdminOrder(clientsData as ClientLite[]));
         setClientsLoaded(true);
       }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '服务器列表加载失败');
     }
-  }, [apiFetch, clientsLoaded]);
+  }, [apiFetch]);
+
+  const ensureClients = useCallback(async () => {
+    if (clientsLoaded) return;
+    await refreshClients();
+  }, [clientsLoaded, refreshClients]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
 
+  // 每次切到服务器视图都重新拉一次，这样在「服务器」页调整过的顺序能马上同步过来。
   useEffect(() => {
-    if (viewMode === 'server') void ensureClients();
-  }, [ensureClients, viewMode]);
+    if (viewMode === 'server') void refreshClients();
+  }, [refreshClients, viewMode]);
 
   // 进入页面就加载服务器列表：任务作用域、按下方的搜索框们一开始就能显示昵称而非 UUID。
   useEffect(() => {
@@ -720,14 +773,20 @@ export default function AdminPingTasks() {
     }
   });
 
-  const moveTask = async (task: PingTask, direction: 'up' | 'down') => {
-    const currentIndex = tasks.findIndex((item) => item.id === task.id);
-    if (currentIndex < 0) return;
-    const nextIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
-    if (nextIndex < 0 || nextIndex >= tasks.length) return;
+  // 有搜索 / 范围筛选时列表只是任务的子集，拖拽结果无法对应完整顺序，因此暂停拖拽（与「服务器」页一致）。
+  const taskDragDisabled = Boolean(taskSearch.trim()) || scopeFilter !== 'all';
 
-    const nextTasks = [...tasks];
-    [nextTasks[currentIndex], nextTasks[nextIndex]] = [nextTasks[nextIndex], nextTasks[currentIndex]];
+  const handleTaskDragEnd = async (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id || taskDragDisabled) return;
+
+    const oldIndex = tasks.findIndex((item) => item.id === active.id);
+    const newIndex = tasks.findIndex((item) => item.id === over.id);
+    if (oldIndex < 0 || newIndex < 0) return;
+
+    const previousTasks = tasks;
+    const nextTasks = arrayMove(tasks, oldIndex, newIndex);
+    const request = ++taskOrderRef.current;
     setTasks(nextTasks);
 
     try {
@@ -735,16 +794,21 @@ export default function AdminPingTasks() {
         method: 'POST',
         body: JSON.stringify({ ids: nextTasks.map((item) => item.id) }),
       });
+      // 连续拖拽时只认最后一次请求的结果，较早请求的回包不再回滚 / 提示。
+      if (taskOrderRef.current !== request) return;
 
       if (result.success) {
         toast.success('排序已更新');
       } else {
         toast.error(result.error || '排序失败');
-        loadData();
+        setTasks(previousTasks);
+        void loadData(true);
       }
     } catch (error) {
+      if (taskOrderRef.current !== request) return;
       toast.error(error instanceof Error ? error.message : '排序失败');
-      loadData();
+      setTasks(previousTasks);
+      void loadData(true);
     }
   };
 
@@ -811,20 +875,23 @@ export default function AdminPingTasks() {
 
       {viewMode === 'task' ? (
         <Card style={{ overflowX: 'auto' }}>
+          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleTaskDragEnd}>
           <Table.Root>
             <Table.Header>
               <Table.Row>
+                <Table.ColumnHeaderCell width="44px" aria-label="排序" />
                 <Table.ColumnHeaderCell>名称</Table.ColumnHeaderCell>
                 <Table.ColumnHeaderCell>类型</Table.ColumnHeaderCell>
                 <Table.ColumnHeaderCell>目标</Table.ColumnHeaderCell>
                 <Table.ColumnHeaderCell>应用范围</Table.ColumnHeaderCell>
-                <Table.ColumnHeaderCell width="220px">操作</Table.ColumnHeaderCell>
+                <Table.ColumnHeaderCell width="180px">操作</Table.ColumnHeaderCell>
               </Table.Row>
             </Table.Header>
             <Table.Body>
+              <SortableContext items={filteredTasks.map((task) => task.id)} strategy={verticalListSortingStrategy}>
               {filteredTasks.length === 0 ? (
                 <Table.Row>
-                  <Table.Cell colSpan={5}>
+                  <Table.Cell colSpan={6}>
                     <Text color="gray" align="center" style={{ display: 'block', padding: 24 }}>
                       {taskSearch || scopeFilter !== 'all' ? '没有匹配的 Ping 任务' : '暂无 Ping 任务'}
                     </Text>
@@ -838,14 +905,14 @@ export default function AdminPingTasks() {
                     boundNames={getTaskScopeLabel(task, clients)}
                     onEdit={openEdit}
                     onDelete={setDeleteTask}
-                    onMove={moveTask}
-                    canMoveUp={tasks.findIndex((item) => item.id === task.id) > 0}
-                    canMoveDown={tasks.findIndex((item) => item.id === task.id) < tasks.length - 1}
+                    dragDisabled={taskDragDisabled}
                   />
                 ))
               )}
+              </SortableContext>
             </Table.Body>
           </Table.Root>
+          </DndContext>
         </Card>
       ) : (
         <div className="admin-ping-server-grid">

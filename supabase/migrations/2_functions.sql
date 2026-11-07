@@ -792,12 +792,17 @@ declare
   next_order integer := 1;
   old_order integer;
 begin
+  -- 必须按传入顺序取值：DISTINCT 不保证保序（实际会被改写成按 id 升序，导致手动排序「保存后又回退」），
+  -- 因此用 WITH ORDINALITY + ORDER BY ord 取原顺序，再在循环里去重（保留首次出现的位置）。
   for input_id in
-    select distinct value::integer
-    from jsonb_array_elements_text(case when jsonb_typeof(input_ids) = 'array' then input_ids else '[]'::jsonb end) as value
+    select value::integer
+    from jsonb_array_elements_text(case when jsonb_typeof(input_ids) = 'array' then input_ids else '[]'::jsonb end) with ordinality as item(value, ord)
     where value ~ '^[0-9]+$' and value::integer > 0
+    order by ord
   loop
-    final_ids := array_append(final_ids, input_id);
+    if not (input_id = any(final_ids)) then
+      final_ids := array_append(final_ids, input_id);
+    end if;
   end loop;
 
   if cardinality(final_ids) = 0 then

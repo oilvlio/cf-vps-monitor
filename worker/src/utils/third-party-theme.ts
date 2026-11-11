@@ -40,18 +40,6 @@ export function rewriteThemeAssetPaths(text: string): string {
       `$1${THIRD_PARTY_THEME_PREFIX}$2`,
     );
 
-  // LuminaPlus' home store polls node metadata every 30s even though its
-  // Monitor adapter already maintains a live WebSocket cache. Shorten only
-  // the uniquely fingerprinted store bundle's metadata refresh to 5s. This
-  // keeps the UI responsive without changing arbitrary third-party bundles.
-  if (rewritten.includes('Ao().catch(()=>{})')
-    && rewritten.includes('failureStreak:0,hydrated:!1,nodeInfoError:!1')) {
-    rewritten = rewritten.replace(
-      'var Sa=2e3,Ca=3e4,wa=8e3,Ta=160',
-      'var Sa=2e3,Ca=5e3,wa=8e3,Ta=160',
-    );
-  }
-
   // Vite/Rolldown's module-preload helper turns dependency names such as
   // "assets/charts-....css" into "/assets/charts-....css" at runtime. That
   // string is assembled from a slash prefix, so the literal-path replacements

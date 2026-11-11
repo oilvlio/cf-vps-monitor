@@ -69,7 +69,7 @@ const options = {
   const luminaStore = 'var Sa=2e3,Ca=3e4,wa=8e3,Ta=160;function Ao(){};'
     + 'var ao={failureStreak:0,hydrated:!1,nodeInfoError:!1};'
     + 'function run(){setInterval(()=>{Ao().catch(()=>{})},Ca)}';
-  assert.match(rewriteThemeAssetPaths(luminaStore), /Sa=2e3,Ca=5e3,wa=8e3,Ta=160/);
+  assert.match(rewriteThemeAssetPaths(luminaStore), /Sa=2e3,Ca=3e4,wa=8e3,Ta=160/);
   const unrelatedStore = 'var Sa=2e3,Ca=3e4,wa=8e3,Ta=160;function run(){Ao().catch(()=>{})}';
   assert.match(rewriteThemeAssetPaths(unrelatedStore), /Sa=2e3,Ca=3e4,wa=8e3,Ta=160/);
 }

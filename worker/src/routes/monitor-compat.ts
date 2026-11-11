@@ -212,16 +212,27 @@ async function timed<T>(work: () => Promise<T>): Promise<{ ms: number; value: T 
 
 monitorCompatRoutes.get('/nodes', async (c) => {
   const startedAt = performance.now();
-  const limited = await guardPublicMetadata(c, 'monitor-nodes');
-  if (limited) return limited;
-  const rateLimitMs = performance.now() - startedAt;
+  // 限流（RATE_LIMIT DO）和数据读取（LIVE_DATA DO + 快照）互不依赖，串行会让每次
+  // 首页轮询白等两个跨机房往返。这里同时发起，限流照旧优先决定是否 429。
+  const rateLimitStarted = performance.now();
+  const guardTask = guardPublicMetadata(c, 'monitor-nodes')
+    .then(value => ({ value, ms: performance.now() - rateLimitStarted }));
 
   const database = getDatabase(c.env);
-  const [snapshotResult, liveResult, adminResult] = await Promise.all([
+  const dataTask = Promise.all([
     timed(() => getPublicClientsSnapshot(c, database, false, false)),
     timed(() => readLive(c)),
     timed(() => hasAdminSession(c)),
   ]);
+
+  const guard = await guardTask;
+  if (guard.value) {
+    // 已发出的读取让它自己结束，不要拖慢 429 响应。
+    dataTask.catch(() => undefined);
+    return guard.value;
+  }
+  const rateLimitMs = guard.ms;
+  const [snapshotResult, liveResult, adminResult] = await dataTask;
   const snapshot = snapshotResult.value;
   const live = liveResult.value;
   const admin = adminResult.value;

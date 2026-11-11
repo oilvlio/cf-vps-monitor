@@ -204,29 +204,39 @@ function siteUrl(c: MonitorContext): string {
 
 export const monitorCompatRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
+async function timed<T>(work: () => Promise<T>): Promise<{ ms: number; value: T }> {
+  const startedAt = performance.now();
+  const value = await work();
+  return { ms: performance.now() - startedAt, value };
+}
+
 monitorCompatRoutes.get('/nodes', async (c) => {
+  const startedAt = performance.now();
   const limited = await guardPublicMetadata(c, 'monitor-nodes');
   if (limited) return limited;
+  const rateLimitMs = performance.now() - startedAt;
 
   const database = getDatabase(c.env);
-  const [snapshot, live, admin] = await Promise.all([
-    getPublicClientsSnapshot(c, database, false, false),
-    readLive(c),
-    hasAdminSession(c),
+  const [snapshotResult, liveResult, adminResult] = await Promise.all([
+    timed(() => getPublicClientsSnapshot(c, database, false, false)),
+    timed(() => readLive(c)),
+    timed(() => hasAdminSession(c)),
   ]);
+  const snapshot = snapshotResult.value;
+  const live = liveResult.value;
+  const admin = adminResult.value;
 
   const onlineSet = new Set(live.online);
   const nowMs = Date.now();
   monitorKnownNodeCount = snapshot.clients.length;
   // day_* / total_* 一次批量取；失败时退回 0，而不是让整个节点列表报错。
   const totalsLookup: db.TrafficTotalsLookup = {};
-  const totals = await db.getTrafficTotals(
+  const totalsResult = await timed(() => db.getTrafficTotals(
     database,
     snapshot.clients.map(client => client.uuid),
     totalsLookup,
-  ).catch(() => ({} as Record<string, MonitorTrafficTotals>));
-  // 短 TTL 缓存是否命中，线上用 Server-Timing 就能看出来，不必翻日志。
-  c.header('Server-Timing', `traffic-totals;desc="${totalsLookup.cached ? 'cache' : 'database'}"`);
+  ).catch(() => ({} as Record<string, MonitorTrafficTotals>)));
+  const totals = totalsResult.value;
   const nodes = [...snapshot.clients]
     .sort((left, right) => {
       const orderDiff = (left.sort_order || 0) - (right.sort_order || 0);
@@ -247,6 +257,17 @@ monitorCompatRoutes.get('/nodes', async (c) => {
 
   // 顺带刷新 DO 的静态缓存，让已连着的 /api/ws 客户端也能看到节点增删。
   scheduleMonitorMetaPush(c, snapshot.clients, totals);
+
+  // 分段耗时放在响应头里，线上直接对 Network 面板就能定位慢在哪一段；
+  // `traffic-totals` 的 desc 还顺手标出这次是否命中 10s 缓存。
+  c.header('Server-Timing', [
+    `rate-limit;dur=${rateLimitMs.toFixed(1)}`,
+    `snapshot;dur=${snapshotResult.ms.toFixed(1)}`,
+    `live;dur=${liveResult.ms.toFixed(1)}`,
+    `admin;dur=${adminResult.ms.toFixed(1)}`,
+    `traffic-totals;dur=${totalsResult.ms.toFixed(1)};desc="${totalsLookup.cached ? 'cache' : 'database'}"`,
+    `total;dur=${(performance.now() - startedAt).toFixed(1)}`,
+  ].join(', '));
 
   // 含 admin 位的响应绝不能进共享缓存，否则访客可能拿到 admin:true。
   // The public theme home polls this endpoint while its store is hydrated.

@@ -159,6 +159,9 @@ setSettings({ enabled: true, theme_url: 'https://github.com/o/r' });
   const css = await get('/style.css');
   assert.equal(css.status, 200);
   assert.equal(await css.text(), 'body{color:red}');
+  assert.match(css.headers.get('Server-Timing') || '', /desc="memory"/, '第二个文件应复用解压后的归档索引');
+  const archiveFetches = fetched.filter(url => url === 'https://github.com/o/r/releases/latest/download/theme.tar.gz');
+  assert.equal(archiveFetches.length, 1, '同一归档只应下载并解压一次');
 }
 
 // --- 停用：首页回落内置 SPA，且不能被边缘缓存 ---

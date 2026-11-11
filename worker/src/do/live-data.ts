@@ -1542,14 +1542,7 @@ export class LiveDataDO {
           clients: {
             ...(Array.isArray(patch.upsert) ? {
               upsert: upserts.filter(client => target === 'admin' || !client.hidden)
-                .map(client => projectClientMetadata(
-                  client,
-                  target === 'admin',
-                  // 补丁没带 hide_price 时，用 DO 已缓存的管理端元数据兜底，避免漏价。
-                  Object.hasOwn(client, 'hide_price') || typeof client.uuid !== 'string'
-                    ? undefined
-                    : booleanField(this.adminClientMetadata.get(client.uuid) ?? {}, 'hide_price'),
-                )),
+                .map(client => projectClientMetadata(client, target === 'admin')),
             } : {}),
             ...(remove.size ? { remove: [...remove] } : {}),
           },

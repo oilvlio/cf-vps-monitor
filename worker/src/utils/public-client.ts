@@ -44,32 +44,6 @@ export function sanitizePublicTags(tags: unknown): string {
     .join(';');
 }
 
-// 「对游客隐藏价格」时，游客侧这四个计费字段被替换成前端视为“无价格”的零值
-// （price=0 时前端不渲染价格标签）。到期时间 expired_at 不属于价格，保持公开。
-const GUEST_HIDDEN_PRICE_VALUES = {
-  price: 0,
-  billing_cycle: 0,
-  auto_renewal: false,
-  currency: '',
-} as const;
-
-/**
- * 按受众投影价格可见性。
- * - 管理员：原样返回（后台需要看到并编辑真实价格）。
- * - 游客：永远不返回 hide_price 开关本身；开关为 true 时把价格相关字段覆盖为零值。
- *   覆盖是“有则无条件写入”而不是“有价格才改”：元数据事件是补丁语义，
- *   游客端之前可能已经缓存了旧价格，必须用显式零值把它冲掉。
- * hidePriceOverride 用于补丁里没带 hide_price 字段、但调用方能从别处查到开关的场景。
- */
-export function applyPriceVisibility<T extends object>(client: T, administrator: boolean, hidePriceOverride?: boolean): T {
-  if (administrator) return client;
-  const record = { ...client } as Record<string, unknown>;
-  const hidePrice = hidePriceOverride ?? Boolean(record.hide_price);
-  delete record.hide_price;
-  if (hidePrice) Object.assign(record, GUEST_HIDDEN_PRICE_VALUES);
-  return record as T;
-}
-
 export function toPublicClient(client: PublicClientSource): PublicClient {
   const { ipv4, ipv6 } = client;
   const publicClient = pickFields(client, PUBLIC_CLIENT_FIELDS);

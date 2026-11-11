@@ -98,7 +98,6 @@ function optimisticAdminClient(created: CommandClient): AdminClient {
     group: '',
     tags: '',
     hidden: false,
-    hide_price: false,
     price: 0,
     billing_cycle: 0,
     currency: '$',
@@ -343,7 +342,6 @@ function SortableNodeCard({ node, selected, onSelect, liveData, onDetail, onEdit
             <span className={`admin-node-status-text${isOnline ? ' is-online' : ' is-offline'}`}>{isOnline ? '在线' : '离线'}</span>
             <Badge className="admin-node-region-badge" size="1" variant="soft" color="gray" title={node.region || '未知'}>{node.region || '未知'}</Badge>
             {Boolean(node.hidden) && <Badge size="1" variant="soft" color="orange">完全隐藏</Badge>}
-            {Boolean(node.hide_price) && <Badge size="1" variant="soft" color="amber">隐藏价格</Badge>}
           </span>
         </div>
 
@@ -647,7 +645,7 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
       traffic_limit_form: createTrafficLimitFormValue(client.traffic_limit, client.traffic_limit_type),
       traffic_reset_day: client.traffic_reset_day || 1,
       expired_at: toDateInputValue(client.expired_at),
-      hidden: client.hidden || false, hide_price: client.hide_price || false, auto_renewal: client.auto_renewal || false,
+      hidden: client.hidden || false, auto_renewal: client.auto_renewal || false,
     });
   }, [client]);
 
@@ -760,16 +758,12 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
                 <Switch checked={Boolean(form.hidden)} onCheckedChange={v => update('hidden', v)} />
               </Flex>
               <Flex className="billing-switch-item" align="center" justify="between">
-                <Text size="2">对游客隐藏价格</Text>
-                <Switch checked={Boolean(form.hide_price)} onCheckedChange={v => update('hide_price', v)} />
-              </Flex>
-              <Flex className="billing-switch-item" align="center" justify="between">
                 <Text size="2">自动续费</Text>
                 <Switch checked={Boolean(form.auto_renewal)} onCheckedChange={v => update('auto_renewal', v)} />
               </Flex>
             </Flex>
             <Text size="1" color="gray" style={{ display: 'block' }}>
-              「完全隐藏」后节点整体不出现在游客前台；「隐藏价格」只对游客隐藏价格、计费周期、币种和自动续费，节点与到期时间仍然可见（管理员始终可见）。
+              「完全隐藏」后节点整体不出现在游客前台；价格信息会下发给主题，由主题决定是否展示。
             </Text>
           </Flex>
         </div>

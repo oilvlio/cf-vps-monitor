@@ -30,7 +30,7 @@ export interface Client {
   group: string;
   tags: string;
   hidden: boolean;
-  // 对游客隐藏价格：节点仍对游客可见，但价格/周期/币种/自动续费不下发。
+  // 历史兼容字段；当前价格可见性由主题决定，不再据此改写公开响应。
   hide_price: boolean;
   traffic_limit: number;
   traffic_limit_type: string;

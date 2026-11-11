@@ -335,7 +335,7 @@ export default function AdminLayout() {
               className="admin-top-action-button"
               variant="soft"
               size="2"
-              onClick={() => navigate("/")}
+              onClick={openPublicSite}
               aria-label="返回前台"
               title="返回前台"
             >

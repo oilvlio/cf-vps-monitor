@@ -36,7 +36,7 @@ create table if not exists clients (
   "group" text not null default '',
   tags text not null default '',
   hidden smallint not null default 0,
-  -- 对游客隐藏价格：节点本身仍对游客可见，仅价格/计费周期/币种/自动续费不下发给游客。
+  -- 历史兼容字段；当前价格可见性由主题决定，不再据此改写公开响应。
   hide_price smallint not null default 0,
   traffic_limit bigint not null default 0,
   -- 默认口径为「总计」（上行+下行），与后台新建节点的默认值一致。

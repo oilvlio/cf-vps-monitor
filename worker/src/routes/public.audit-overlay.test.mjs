@@ -43,6 +43,22 @@ test('AUD-41: explicit zero and empty metadata survive public REST overlays', as
   assert.equal(clients[0].public_remark, '');
 });
 
+test('legacy hide_price no longer redacts public billing fields', async () => {
+  const client = {
+    ...row,
+    hide_price: true,
+    price: 12.5,
+    billing_cycle: 30,
+    currency: '¥',
+    auto_renewal: true,
+  };
+  const [publicClient] = await publicClients(client, client);
+  assert.equal(publicClient.price, 12.5);
+  assert.equal(publicClient.billing_cycle, 30);
+  assert.equal(publicClient.currency, '¥');
+  assert.equal(publicClient.auto_renewal, true);
+});
+
 test('AUD-41: a stale DO overlay does not replace newer database metadata', async () => {
   const clients = await publicClients({ ...row, name: 'new database name', price: 12, updated_at: newer }, row);
   assert.equal(clients[0].name, 'new database name');

@@ -219,8 +219,14 @@ monitorCompatRoutes.get('/nodes', async (c) => {
   const nowMs = Date.now();
   monitorKnownNodeCount = snapshot.clients.length;
   // day_* / total_* 一次批量取；失败时退回 0，而不是让整个节点列表报错。
-  const totals = await db.getTrafficTotals(database, snapshot.clients.map(client => client.uuid))
-    .catch(() => ({} as Record<string, MonitorTrafficTotals>));
+  const totalsLookup: db.TrafficTotalsLookup = {};
+  const totals = await db.getTrafficTotals(
+    database,
+    snapshot.clients.map(client => client.uuid),
+    totalsLookup,
+  ).catch(() => ({} as Record<string, MonitorTrafficTotals>));
+  // 短 TTL 缓存是否命中，线上用 Server-Timing 就能看出来，不必翻日志。
+  c.header('Server-Timing', `traffic-totals;desc="${totalsLookup.cached ? 'cache' : 'database'}"`);
   const nodes = [...snapshot.clients]
     .sort((left, right) => {
       const orderDiff = (left.sort_order || 0) - (right.sort_order || 0);

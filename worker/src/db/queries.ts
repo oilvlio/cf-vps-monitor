@@ -345,12 +345,52 @@ export async function getRecordsByTimeRangeAggregated(
   );
 }
 
-/** monitor 主题契约：批量取节点的 day_* / total_* 流量。 */
+/**
+ * monitor 主题契约：批量取节点的 day_* / total_* 流量。
+ *
+ * 首页每 30 秒、每个访客都会要这份数据，而它是只读聚合，短时间内的重复查询
+ * 没有收益。这里按 isolate 缓存 10 秒，并合并同一时刻的并发请求：多个访客同时
+ * 打开页面时只打一次 Supabase。失败不缓存，避免把一次网络抖动放大成 10 秒空值。
+ */
+const TRAFFIC_TOTALS_TTL_MS = 10_000;
+type TrafficTotals = Record<string, t.MonitorTrafficTotals>;
+type TrafficTotalsCacheEntry = { key: string; at: number; value: TrafficTotals };
+const trafficTotalsCache = new WeakMap<object, TrafficTotalsCacheEntry>();
+const trafficTotalsInflight = new WeakMap<object, { key: string; promise: Promise<TrafficTotals> }>();
+
+export type TrafficTotalsLookup = { cached?: boolean };
+
 export async function getTrafficTotals(
   database: QueryDatabase,
   clients: readonly string[],
-): Promise<Record<string, t.MonitorTrafficTotals>> {
-  return sba.getSupabaseTrafficTotals(database.env, clients);
+  lookup?: TrafficTotalsLookup,
+): Promise<TrafficTotals> {
+  const env = database.env as unknown as object;
+  // 节点集合相同即同一份数据；排序让调用方传参顺序不影响命中。
+  const key = [...clients].sort().join('\n');
+
+  const cached = trafficTotalsCache.get(env);
+  if (cached && cached.key === key && Date.now() - cached.at < TRAFFIC_TOTALS_TTL_MS) {
+    if (lookup) lookup.cached = true;
+    return cached.value;
+  }
+
+  const pending = trafficTotalsInflight.get(env);
+  if (pending && pending.key === key) {
+    if (lookup) lookup.cached = true;
+    return pending.promise;
+  }
+
+  const promise = sba.getSupabaseTrafficTotals(database.env, clients)
+    .then(value => {
+      trafficTotalsCache.set(env, { key, at: Date.now(), value });
+      return value;
+    })
+    .finally(() => {
+      if (trafficTotalsInflight.get(env)?.promise === promise) trafficTotalsInflight.delete(env);
+    });
+  trafficTotalsInflight.set(env, { key, promise });
+  return promise;
 }
 
 export async function getRecordsByTimeRangePaged(

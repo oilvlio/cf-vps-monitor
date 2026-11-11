@@ -14,7 +14,7 @@ for (const action of ['hide', 'remove', 'rename', 'none']) {
     const loader = createWorkerLoader({ db: {
       getClientIdentityByToken: async () => structuredClone(old), getClient: async () => structuredClone(old),
       getSettingsByKeys: async () => ({ record_enabled: 'false' }),
-      markClientTokenUsed: async () => {}, insertAuditLog: async () => {},
+      markClientTokenUsed: async () => ({ updated: false, previous_ip: null }), insertAuditLog: async () => {},
       updateClient: async () => { startedResolve(); await release; },
       getSetting: async () => null, setSetting: async () => {},
       listPingTasks: async () => [],

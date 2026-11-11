@@ -126,6 +126,44 @@ const cssExampleSnippets = [
 
 const themeCssExamples = cssExampleSnippets.map(item => item.css).join('\n\n');
 
+type ThirdPartyThemeProbe = {
+  ok: boolean;
+  status: number;
+  version: string;
+  error: string;
+};
+
+type ThirdPartyThemeState = {
+  enabled: boolean;
+  theme_url: string;
+  raw_base: string;
+  probe: ThirdPartyThemeProbe | null;
+};
+
+const emptyThirdPartyTheme: ThirdPartyThemeState = { enabled: false, theme_url: '', raw_base: '', probe: null };
+
+function readThirdPartyThemeState(result: unknown): ThirdPartyThemeState {
+  if (!result || typeof result !== 'object') return emptyThirdPartyTheme;
+  const record = result as Record<string, unknown>;
+  const rawProbe = record.probe;
+  let probe: ThirdPartyThemeProbe | null = null;
+  if (rawProbe && typeof rawProbe === 'object') {
+    const value = rawProbe as Record<string, unknown>;
+    probe = {
+      ok: value.ok === true,
+      status: Number(value.status) || 0,
+      version: String(value.version || ''),
+      error: String(value.error || ''),
+    };
+  }
+  return {
+    enabled: record.enabled === true,
+    theme_url: String(record.theme_url || ''),
+    raw_base: String(record.raw_base || ''),
+    probe,
+  };
+}
+
 export default function AdminThemes() {
   const apiFetch = useApi();
   const { setDisplayTheme } = useDisplayTheme();
@@ -140,6 +178,9 @@ export default function AdminThemes() {
   const [preview, setPreview] = useState<{ bootstrap: PublicBootstrapPayload; css: string } | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const previewRequestRef = useRef(0);
+  const [thirdPartyTheme, setThirdPartyTheme] = useState<ThirdPartyThemeState>(emptyThirdPartyTheme);
+  const [thirdPartySaving, setThirdPartySaving] = useState(false);
+  const [thirdPartyRefreshing, setThirdPartyRefreshing] = useState(false);
 
   function clearPreviewCss() {
     previewRequestRef.current += 1;
@@ -160,8 +201,65 @@ export default function AdminThemes() {
     }
   }
 
+  async function loadThirdPartyTheme() {
+    try {
+      const result = await apiFetch('/admin/third-party-theme');
+      setThirdPartyTheme(readThirdPartyThemeState(result));
+    } catch {
+      // 主题管理页的其他功能不因第三方主题配置读取失败而不可用。
+    }
+  }
+
+  async function saveThirdPartyTheme() {
+    setThirdPartySaving(true);
+    try {
+      const result = await apiFetch('/admin/third-party-theme', {
+        method: 'POST',
+        body: JSON.stringify({
+          enabled: thirdPartyTheme.enabled,
+          theme_url: thirdPartyTheme.theme_url,
+        }),
+      });
+      if (result?.success) {
+        const next = readThirdPartyThemeState(result);
+        setThirdPartyTheme(next);
+        if (next.enabled && next.probe && !next.probe.ok) {
+          toast.error(`已保存，但上游不可用：${next.probe.error}`);
+        } else {
+          toast.success('第三方主题配置已保存');
+        }
+      } else {
+        toast.error(result?.error || '保存失败');
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '保存失败');
+    } finally {
+      setThirdPartySaving(false);
+    }
+  }
+
+  async function refreshThirdPartyTheme() {
+    setThirdPartyRefreshing(true);
+    try {
+      const result = await apiFetch('/admin/third-party-theme/refresh', { method: 'POST' });
+      if (result?.success) {
+        const next = readThirdPartyThemeState(result);
+        setThirdPartyTheme(current => ({ ...current, probe: next.probe }));
+        if (next.probe && !next.probe.ok) toast.error(`上游不可用：${next.probe.error}`);
+        else toast.success('已刷新第三方主题缓存');
+      } else {
+        toast.error(result?.error || '刷新失败');
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '刷新失败');
+    } finally {
+      setThirdPartyRefreshing(false);
+    }
+  }
+
   useEffect(() => {
     void loadThemes();
+    void loadThirdPartyTheme();
   }, []);
 
   useEffect(() => {
@@ -440,6 +538,59 @@ export default function AdminThemes() {
           </Card>
         ))}
       </Grid>
+
+      <Card>
+        <Flex direction="column" gap="3">
+          <Flex align="center" justify="between" wrap="wrap" gap="2">
+            <Flex align="center" gap="2">
+              <Palette size={18} />
+              <Text size="4" weight="bold">第三方主题</Text>
+              {thirdPartyTheme.enabled ? <Badge color="green">已启用</Badge> : <Badge color="gray">未启用</Badge>}
+            </Flex>
+            <Flex align="center" gap="3">
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Text size="2">启用</Text>
+                <Switch
+                  checked={thirdPartyTheme.enabled}
+                  onCheckedChange={(checked) => setThirdPartyTheme(current => ({ ...current, enabled: checked }))}
+                />
+              </label>
+            </Flex>
+          </Flex>
+          <Text as="p" size="1" color="gray">
+            启用后首页与详情页由 Monitor 主题接管，后台 `/admin` 保持原样。粘贴主题的 GitHub 仓库地址即可；系统会像原版 Monitor 一样读取最新 Release 的 `theme.tar.gz`（不是源码压缩包），无需补 `/tree/dist`。主题需要发布包含 `dist/index.html` 的 `theme.tar.gz`。
+          </Text>
+          <TextField.Root
+            placeholder="https://github.com/owner/repo"
+            value={thirdPartyTheme.theme_url}
+            onChange={(event) => setThirdPartyTheme(current => ({ ...current, theme_url: event.target.value }))}
+          />
+          {thirdPartyTheme.raw_base ? (
+            <Text as="p" size="1" color="gray">上游地址：{thirdPartyTheme.raw_base}</Text>
+          ) : null}
+          {thirdPartyTheme.enabled && thirdPartyTheme.probe ? (
+            thirdPartyTheme.probe.ok ? (
+              <Text as="p" size="1" color="green">
+                上游探活正常（HTTP {thirdPartyTheme.probe.status}
+                {thirdPartyTheme.probe.version ? ` · ${thirdPartyTheme.probe.version}` : ''}）
+              </Text>
+            ) : (
+              <Text as="p" size="1" color="red">
+                上游不可用：{thirdPartyTheme.probe.error}
+                {thirdPartyTheme.probe.status ? `（HTTP ${thirdPartyTheme.probe.status}）` : ''}。首页会继续显示内置主题。
+              </Text>
+            )
+          ) : null}
+          <Flex gap="2" wrap="wrap">
+            <Button size="2" disabled={thirdPartySaving} onClick={() => void saveThirdPartyTheme()}>
+              {thirdPartySaving ? '保存中…' : '保存配置'}
+            </Button>
+            <Button size="2" variant="soft" disabled={thirdPartyRefreshing} onClick={() => void refreshThirdPartyTheme()}>
+              <RotateCcw size={14} />{thirdPartyRefreshing ? '刷新中…' : '刷新缓存'}
+            </Button>
+          </Flex>
+        </Flex>
+      </Card>
 
       <Dialog.Root open={!!editing} onOpenChange={open => !open && closeConfig()}>
         <Dialog.Content aria-describedby={undefined} maxWidth="720px">

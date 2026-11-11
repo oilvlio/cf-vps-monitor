@@ -40,5 +40,9 @@ SUPABASE_URL = "https://PROJECT_REF.supabase.co"
 
 [assets]
 directory = "frontend/dist"
+binding = "ASSETS"
 not_found_handling = "single-page-application"
-run_worker_first = ["/api/*", "/ping", "/agent/*"]
+# 第三方主题的静态文件名由上游决定（`/assets/...`、`/style.css`、`/fonts/...` 都可能），
+# 枚举不过来，所以除了内置资源目录之外全部先交给 worker：
+# 主题启用时按上游取文件 / 回主题 index，未启用时原样透传给静态资源层。
+run_worker_first = ["/*", "!/assets/*"]

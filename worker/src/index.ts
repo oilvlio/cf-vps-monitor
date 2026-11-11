@@ -15,6 +15,8 @@ import { adminThemeRoutes, publicThemeRoutes } from './routes/theme';
 import { clientRoutes } from './routes/client';
 import { wsRoutes } from './routes/websocket';
 import { setupRoutes } from './routes/setup';
+import { monitorCompatRoutes } from './routes/monitor-compat';
+import { thirdPartyThemeRoutes } from './routes/third-party-theme';
 import * as db from './db/queries';
 import { DatabaseConfigurationError, getDatabase, withDatabase } from './db/provider';
 import { validateAdminSession } from './auth/admin-session';
@@ -162,6 +164,8 @@ function canServeWithoutDatabaseStartup(pathname: string): boolean {
     pathname === '/api/theme/active.css' ||
     pathname.startsWith('/api/theme/assets/') ||
     pathname.startsWith('/api/theme/manifest/') ||
+    pathname.startsWith('/flags/') ||
+    pathname.startsWith('/os-icons/') ||
     pathname === '/api/live' ||
     pathname === '/api/live/clients' ||
     pathname === '/api/ws/live' ||
@@ -290,6 +294,8 @@ app.use('*', async (c, next) => {
   await next();
   if (c.res.status === 101) return;
   for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
+    // 第三方主题的 index.html 带有按内联脚本哈希生成的 CSP，不要覆盖。
+    if (name === 'Content-Security-Policy' && c.res.headers.has(name)) continue;
     c.header(name, value);
   }
 });
@@ -308,6 +314,9 @@ app.get('/agent/install-windows.ps1', (c) => c.redirect('https://raw.githubuserc
 // 公开 API，无认证
 app.route('/api/setup', setupRoutes);
 app.route('/api/theme', publicThemeRoutes);
+// monitor 主题契约（/api/nodes、/api/nodes/:id/metrics、/api/themes/:short/config）
+// 必须在 publicRoutes 之前挂载，才能拿到 /api/nodes 这条路径。
+app.route('/api', monitorCompatRoutes);
 app.route('/api', publicRoutes);
 
 // Agent 上报 API，Token 认证
@@ -407,6 +416,10 @@ app.get('/api/version', (c) => {
     build: gitCommit || `release-${appVersion}`,
   });
 });
+
+// 第三方主题托管：内部有一条 `*` 兜底路由，必须挂在所有具体路由之后，
+// 否则会先于 /api/version 之类的后注册路由命中。
+app.route('/', thirdPartyThemeRoutes);
 
 // 404 处理
 // 前端静态资源由 wrangler.toml 的 [assets] 托管；

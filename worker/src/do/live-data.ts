@@ -30,6 +30,8 @@ import { compactLiveReport, serializedBytes } from '../utils/live-report-state';
 import { evaluateHistoryCapacity } from '../utils/history-capacity';
 import { MAX_BACKUP_BYTES } from '../utils/backup';
 import { measureRestoredClientSnapshot, restoredClientMetadata } from '../utils/restore-client-snapshot';
+import { buildMonitorNodeFromStatic, type MonitorNodeStatic } from '../utils/monitor-contract';
+import { gzipSync, strToU8 } from 'fflate';
 
 // 客户端状态
 interface ClientState {
@@ -117,10 +119,17 @@ const GPU_TEMPERATURE_BUCKET_C = 2;
 const GPU_MEMORY_BUCKET_MIN_UNITS = 64;
 const GPU_MEMORY_BUCKET_RATIO = 0.01;
 const ADMIN_CLIENTS_SNAPSHOT_KEY = 'admin-clients:snapshot';
+// monitor 主题契约的 /api/ws：帧本身是全量快照，节流只是避免同一轮上报刷屏。
+// 真正的推送节奏跟 agent 上报（3–5s）走，不复制上游 hub 的 2s。
+const MONITOR_FRAME_MIN_INTERVAL_MS = 2_000;
+const MONITOR_WS_HEARTBEAT_MS = 15_000;
+const MONITOR_WS_HEARTBEAT_KEY = 'monitor:ws_heartbeat_at';
+const MONITOR_META_MAX_BYTES = 256 * 1024;
+const MONITOR_META_STORAGE_KEY = 'monitor:meta';
 const AGENT_AUTH_SNAPSHOT_PREFIX = 'agent-auth:';
 const AGENT_AUTH_UUID_PREFIX = 'agent-auth-uuid:';
 const GEO_REGION_CACHE_MS = 48 * 60 * 60 * 1000;
-type SessionRole = 'agent' | 'viewer';
+type SessionRole = 'agent' | 'viewer' | 'monitor';
 type AgentPolicyMode = 'active' | 'idle';
 type JsonObject = Record<string, unknown>;
 type LiveDataEnv = DatabaseProviderEnv & Record<string, unknown>;
@@ -169,6 +178,13 @@ interface AgentPolicyMessage {
 
 function isObjectPayload(value: unknown): value is JsonObject {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** monitor 静态投影的最小形状校验：数字 id + UUID 关联字段。 */
+function isMonitorStaticNode(value: unknown): value is MonitorNodeStatic {
+  return isObjectPayload(value)
+    && typeof value.id === 'number' && Number.isInteger(value.id)
+    && typeof value.uuid === 'string' && value.uuid !== '';
 }
 
 function stringField(source: JsonObject, key: string): string {
@@ -400,6 +416,10 @@ interface SessionAttachment {
   lastReport?: MonitorReportPayload;
   lastReportTime?: number;
   expiresAt?: number;
+  /** monitor 主题契约的 /api/ws：客户端带了 ?gzip 时发 gzip 二进制帧。 */
+  gzip?: boolean;
+  /** monitor 主题契约的 /api/ws：该连接是否由管理员建立（每连接独立，不进共享 meta）。 */
+  admin?: boolean;
 }
 
 export function normalizeViewerTtlMs(value: unknown): number {
@@ -448,6 +468,12 @@ export class LiveDataDO {
   private adminClientsUpdatedAt: number | null = null;
   private adminClientsSnapshot: AdminClientsSnapshot | null = null;
   private adminClientMetadata = new Map<string, JsonObject>();
+  // monitor 主题的静态节点投影（由 Worker 在 /api/nodes 与 /api/ws 建连时推进来）。
+  // 每帧只合入实时数据，不查库；持久化是为了 hibernation 唤醒后还能立刻出帧。
+  // 只存公开节点；admin 是每个订阅连接自己的属性（见 SessionAttachment.admin）。
+  private monitorMeta: MonitorNodeStatic[] | null = null;
+  private monitorMetaReady: Promise<void> | null = null;
+  private monitorFrameAt = 0;
   private trafficResetDays = new Map<string, number>();
   private trafficResetDaysAt = 0;
   // 流量统计：每个节点最近一次由数据库返回的当前周期合计（用来覆盖 report 的 net_total_*），
@@ -575,7 +601,7 @@ export class LiveDataDO {
     const attachment = ws.deserializeAttachment();
     if (!attachment || typeof attachment !== 'object') return null;
     const value = attachment as Partial<SessionAttachment>;
-    if (value.role !== 'agent' && value.role !== 'viewer') return null;
+    if (value.role !== 'agent' && value.role !== 'viewer' && value.role !== 'monitor') return null;
     if (typeof value.clientId !== 'string' || value.clientId.trim() === '') return null;
     return {
       role: value.role,
@@ -604,6 +630,8 @@ export class LiveDataDO {
       expiresAt: typeof value.expiresAt === 'number' && Number.isFinite(value.expiresAt)
         ? value.expiresAt
         : undefined,
+      gzip: value.gzip === true,
+      admin: value.admin === true,
     };
   }
 
@@ -771,6 +799,86 @@ export class LiveDataDO {
       }));
     } catch (error) {
       // Viewer snapshots are best effort; HTTP fallback will retry.
+    }
+  }
+
+  /** hibernation 唤醒后把持久化的静态投影读回内存。 */
+  private ensureMonitorMeta(): Promise<void> {
+    if (this.monitorMeta) return Promise.resolve();
+    if (this.monitorMetaReady) return this.monitorMetaReady;
+    this.monitorMetaReady = this.state.storage
+      .get<unknown>(MONITOR_META_STORAGE_KEY)
+      .then((value) => {
+        // 兼容两种持久化形态：当前是节点数组；早期版本是 { admin, nodes }。
+        const rawNodes = Array.isArray(value)
+          ? value
+          : isObjectPayload(value) && Array.isArray(value.nodes) ? value.nodes : null;
+        if (rawNodes) {
+          this.monitorMeta = rawNodes.filter((node): node is MonitorNodeStatic =>
+            isMonitorStaticNode(node));
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        this.monitorMetaReady = null;
+      });
+    return this.monitorMetaReady;
+  }
+
+  /**
+   * monitor hub 的 WS 帧：`{admin, nodes}`（与 /api/nodes 同形）。
+   * 只用 DO 内存里的静态投影 + 实时报告拼装，**不查库**；节奏跟随 agent 上报。
+   * `admin` 取该连接建连时的身份，不能存在共享 meta 里——否则会广播给所有人。
+   */
+  private buildMonitorFrameText(nowMs: number, admin: boolean): string {
+    const meta = this.monitorMeta;
+    if (!meta) return JSON.stringify({ admin, nodes: [] });
+    const nodes = meta.map((node) => {
+      // online 只看 this.clients（在线上报表）；lastKnownClients 是离线保留值，
+      // 用来给离线节点提供 last_seen / 周期流量，不代表在线。
+      const liveClient = this.clients.get(node.uuid);
+      const retained = liveClient ?? this.lastKnownClients.get(node.uuid);
+      const online = Boolean(liveClient && (!liveClient.expiresAt || liveClient.expiresAt > nowMs));
+      const live = retained ? this.projectSnapshotClient(retained, false, !online) : null;
+      return buildMonitorNodeFromStatic({
+        node,
+        live,
+        online,
+        lastReportMs: retained?.lastReportTime ?? 0,
+        nowMs,
+      });
+    });
+    return JSON.stringify({ admin, nodes });
+  }
+
+  private async sendMonitorFrame(ws: WebSocket): Promise<void> {
+    if (ws.readyState !== WebSocket.READY_STATE_OPEN) return;
+    const attachment = this.getSessionAttachment(ws);
+    const text = this.buildMonitorFrameText(Date.now(), attachment?.admin === true);
+    try {
+      if (attachment?.gzip === true) {
+        const bytes = gzipSync(strToU8(text));
+        ws.send(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
+      } else {
+        ws.send(text);
+      }
+    } catch {
+      // 坏连接由 close/error 回调清理。
+    }
+  }
+
+  private broadcastMonitorFrame(force = false): void {
+    const now = Date.now();
+    if (!force && now - this.monitorFrameAt < MONITOR_FRAME_MIN_INTERVAL_MS) return;
+    this.monitorFrameAt = now;
+    for (const [id, session] of this.sessions) {
+      if (this.sessionRoles.get(id) !== 'monitor') continue;
+      if (session.readyState !== WebSocket.READY_STATE_OPEN) continue;
+      try {
+        this.state.waitUntil(this.sendMonitorFrame(session));
+      } catch {
+        // waitUntil 不可用时退化为不发这一帧；下一轮上报会补上完整状态。
+      }
     }
   }
 
@@ -1124,10 +1232,13 @@ export class LiveDataDO {
   private activeViewerCount(now: number): number {
     let count = 0;
     for (const [id, role] of this.sessionRoles) {
-      if (role !== 'viewer') continue;
+      // Monitor-compatible pages also represent active human viewers. They use
+      // their own full-snapshot protocol, but must still activate fast Agent
+      // sampling just like the built-in viewer sockets.
+      if (role !== 'viewer' && role !== 'monitor') continue;
       const session = this.sessions.get(id);
       const expiresAt = this.viewerExpiresAt.get(id);
-      if (expiresAt && expiresAt <= now) continue;
+      if (role === 'viewer' && expiresAt && expiresAt <= now) continue;
       if (session?.readyState === WebSocket.READY_STATE_OPEN) {
         count += 1;
       }
@@ -1354,6 +1465,19 @@ export class LiveDataDO {
           expiries.push(expiresAt);
         }
       }
+      const hasMonitorSubscribers = [...this.sessionRoles].some(([id, role]) =>
+        role === 'monitor' && this.sessions.get(id)?.readyState === WebSocket.READY_STATE_OPEN,
+      );
+      if (hasMonitorSubscribers) {
+        let heartbeatAt = await this.state.storage.get<number>(MONITOR_WS_HEARTBEAT_KEY);
+        if (typeof heartbeatAt !== 'number' || !Number.isFinite(heartbeatAt)) {
+          heartbeatAt = now + MONITOR_WS_HEARTBEAT_MS;
+          await this.state.storage.put(MONITOR_WS_HEARTBEAT_KEY, heartbeatAt);
+        }
+        expiries.push(heartbeatAt);
+      } else {
+        await this.state.storage.delete(MONITOR_WS_HEARTBEAT_KEY);
+      }
       const nextExpiry = expiries.sort((a, b) => a - b)[0];
 
       if (nextExpiry === undefined) {
@@ -1368,6 +1492,8 @@ export class LiveDataDO {
   }
 
   private broadcastToViewers(message: JsonObject, audience: 'all' | 'public' | 'admin' = 'all') {
+    // monitor 主题的 /api/ws 也靠这些实时事件驱动；帧是全量快照，节流在内部。
+    this.broadcastMonitorFrame();
     let publicPayload = '';
     let adminPayload = '';
     for (const [id, session] of this.sessions) {
@@ -2138,6 +2264,32 @@ export class LiveDataDO {
       return Response.json({ success: true });
     }
 
+    // monitor 主题 /api/ws 的静态节点缓存：由 Worker 在 /api/nodes 与 WS 建连时推进来。
+    // 之后每帧只用内存里的这份 + 实时报告，不查库。
+    if (request.method === 'POST' && url.pathname === '/monitor-meta') {
+      const raw = await request.text();
+      if (raw.length > MONITOR_META_MAX_BYTES) {
+        return new Response('Payload Too Large', { status: 413 });
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        return new Response('Bad Request', { status: 400 });
+      }
+      if (!isObjectPayload(parsed) || !Array.isArray(parsed.nodes)) {
+        return new Response('Bad Request', { status: 400 });
+      }
+      const nodes = parsed.nodes.filter((node): node is MonitorNodeStatic =>
+        isMonitorStaticNode(node));
+      this.monitorMeta = nodes;
+      this.state.waitUntil(
+        this.state.storage.put(MONITOR_META_STORAGE_KEY, nodes).catch(() => undefined),
+      );
+      this.broadcastMonitorFrame(true);
+      return new Response(null, { status: 204 });
+    }
+
     if (request.method === 'GET' && url.pathname === '/policy') {
       return Response.json(await this.buildAgentPolicy(Date.now(), false));
     }
@@ -2150,7 +2302,10 @@ export class LiveDataDO {
       const clientId = url.searchParams.get('id') || crypto.randomUUID();
       const clientName = url.searchParams.get('name') || clientId;
       const hidden = url.searchParams.get('hidden') === '1' || url.searchParams.get('hidden') === 'true';
-      const role = url.searchParams.get('role') === 'agent' ? 'agent' : 'viewer';
+      const roleParam = url.searchParams.get('role');
+      const role: SessionRole = roleParam === 'agent'
+        ? 'agent'
+        : roleParam === 'monitor' ? 'monitor' : 'viewer';
       const viewerIp = url.searchParams.get('viewer_ip') || undefined;
       const sourceIp = url.searchParams.get('source_ip') || undefined;
       const region = url.searchParams.get('region') || undefined;
@@ -2190,6 +2345,8 @@ export class LiveDataDO {
         ...(role === 'viewer' && (url.searchParams.get('include_hidden') === '1' || url.searchParams.get('include_hidden') === 'true') ? { includeHidden: true } : {}),
         ...(role === 'agent' && sourceIp && isPublicIpAddress(sourceIp) ? { sourceIp } : {}),
         ...(role === 'agent' && region && this.isUsefulRegion(region) ? { region } : {}),
+        ...(role === 'monitor' && url.searchParams.get('gzip') === '1' ? { gzip: true } : {}),
+        ...(role === 'monitor' && url.searchParams.get('admin') === '1' ? { admin: true } : {}),
       };
       this.registerSession(server, attachment);
       this.state.acceptWebSocket(server);
@@ -2197,6 +2354,13 @@ export class LiveDataDO {
       if (role === 'viewer') {
         this.sendSnapshot(server);
         this.runBackground('do_viewer_expiry', this.scheduleExpiryAlarm(now));
+        if (activeViewersBefore === 0) {
+          this.runBackground('do_agent_policy', this.broadcastAgentPolicy(now, true));
+        }
+      } else if (role === 'monitor') {
+        // 首帧必须在 101 之前排好：先补上持久化缓存，再推一份全量快照。
+        this.state.waitUntil(this.ensureMonitorMeta().then(() => this.sendMonitorFrame(server)));
+        this.state.waitUntil(this.scheduleExpiryAlarm(now));
         if (activeViewersBefore === 0) {
           this.runBackground('do_agent_policy', this.broadcastAgentPolicy(now, true));
         }
@@ -2312,10 +2476,10 @@ export class LiveDataDO {
     await this.httpClientsReady;
     const attachment = this.getSessionAttachment(ws);
     if (attachment) {
-      const wasViewer = attachment.role === 'viewer';
-      const activeViewersBefore = this.activeViewerCount(Date.now());
       this.cleanupSession(ws, attachment);
-      if (wasViewer && activeViewersBefore > 0) {
+      if (attachment.role === 'monitor') await this.scheduleExpiryAlarm(Date.now());
+      if ((attachment.role === 'viewer' || attachment.role === 'monitor')
+        && this.activeViewerCount(Date.now()) === 0) {
         await this.broadcastAgentPolicy(Date.now(), false);
       }
     }
@@ -2325,10 +2489,10 @@ export class LiveDataDO {
     await this.httpClientsReady;
     const attachment = this.getSessionAttachment(ws);
     if (attachment) {
-      const wasViewer = attachment.role === 'viewer';
-      const activeViewersBefore = this.activeViewerCount(Date.now());
       this.cleanupSession(ws, attachment);
-      if (wasViewer && activeViewersBefore > 0) {
+      if (attachment.role === 'monitor') await this.scheduleExpiryAlarm(Date.now());
+      if ((attachment.role === 'viewer' || attachment.role === 'monitor')
+        && this.activeViewerCount(Date.now()) === 0) {
         await this.broadcastAgentPolicy(Date.now(), false);
       }
     }
@@ -2339,6 +2503,21 @@ export class LiveDataDO {
     const now = Date.now();
     await this.removeExpiredClients(now);
     this.removeExpiredViewers(now);
+    const hasMonitorSubscribers = [...this.sessionRoles].some(([id, role]) =>
+      role === 'monitor' && this.sessions.get(id)?.readyState === WebSocket.READY_STATE_OPEN,
+    );
+    if (hasMonitorSubscribers) {
+      const heartbeatAt = await this.state.storage.get<number>(MONITOR_WS_HEARTBEAT_KEY);
+      if (typeof heartbeatAt !== 'number' || !Number.isFinite(heartbeatAt) || heartbeatAt <= now) {
+        await this.ensureMonitorMeta();
+        await this.state.storage.put(MONITOR_WS_HEARTBEAT_KEY, now + MONITOR_WS_HEARTBEAT_MS);
+        // An unchanged snapshot still serves as a keepalive for clients that
+        // declare the stream timed out when no node happens to report.
+        this.broadcastMonitorFrame(true);
+      }
+    } else {
+      await this.state.storage.delete(MONITOR_WS_HEARTBEAT_KEY);
+    }
     await this.broadcastAgentPolicy(now, false);
     await this.scheduleExpiryAlarm(now);
   }

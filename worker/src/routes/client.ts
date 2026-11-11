@@ -124,9 +124,9 @@ async function markAgentTokenUsedIfDue(
     ip: normalizedIp,
     expiresAt: now + AGENT_TOKEN_USAGE_CACHE_MS,
   });
-  const tokenUsageUpdated = await db.markClientTokenUsed(database, client.uuid, normalizedIp).catch(() => false);
-  if (tokenUsageUpdated) {
-    await recordAgentTokenSourceIpChange(database, client, normalizedIp).catch(() => undefined);
+  const tokenUsage = await db.markClientTokenUsed(database, client.uuid, normalizedIp).catch(() => null);
+  if (tokenUsage?.updated) {
+    await recordAgentTokenSourceIpChange(database, client, tokenUsage.previous_ip ?? null, normalizedIp).catch(() => undefined);
   }
 }
 
@@ -266,12 +266,13 @@ async function upsertLiveAgentAuthClient(env: Bindings, client: db.Client): Prom
 
 async function recordAgentTokenSourceIpChange(
   database: db.QueryDatabase,
-  client: Pick<db.Client, 'uuid' | 'name' | 'token_last_used_ip'>,
+  client: Pick<db.Client, 'uuid' | 'name'>,
+  previousIp: string | null,
   ip: string,
 ): Promise<void> {
-  const previousIp = (client.token_last_used_ip || '').trim();
+  const previous = (previousIp || '').trim();
   const nextIp = ip.trim();
-  if (!previousIp || !nextIp || previousIp === nextIp) return;
+  if (!previous || !nextIp || previous === nextIp) return;
 
   // 可选功能：默认关闭，在「通知管理 → 来源 IP 通知」中开启。
   // 通过全局通知渠道发送明文 IP，不再写入审计日志。
@@ -281,7 +282,7 @@ async function recordAgentTokenSourceIpChange(
   const notification = buildTokenSourceIpChangeNotification({
     nodeName: client.name || '-',
     uuid: client.uuid,
-    previousIp,
+    previousIp: previous,
     newIp: nextIp,
   });
   await dispatchNotification(database, buildAdminSettings(settings), notification, {

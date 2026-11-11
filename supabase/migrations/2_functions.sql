@@ -268,25 +268,45 @@ as $$
   ) row_data;
 $$;
 
+drop function if exists public.cfm_mark_client_token_used(text, text);
+
 create or replace function public.cfm_mark_client_token_used(input_uuid text, input_ip text default '')
-returns boolean
+returns jsonb
 language plpgsql
 set search_path = public
 as $$
 declare
+  target_uuid text;
+  previous_value text;
   updated_count integer;
   normalized_ip text := left(coalesce(trim(input_ip), ''), 128);
 begin
-  update clients
-  set token_last_used_at = now(),
-      token_last_used_ip = case when normalized_ip <> '' then normalized_ip else token_last_used_ip end
+  -- 在同一个事务内锁定并读取更新前的 IP，作为来源 IP 变化的权威「旧值」。
+  -- 节流窗口（15 分钟）内不更新，直接返回 updated=false，previous_ip 无意义。
+  select uuid, token_last_used_ip
+    into target_uuid, previous_value
+  from clients
   where uuid = input_uuid
     and (
       token_last_used_at is null
       or token_last_used_at < now() - interval '15 minutes'
-    );
+    )
+  for update;
+
+  if target_uuid is null then
+    return jsonb_build_object('updated', false, 'previous_ip', null);
+  end if;
+
+  update clients
+  set token_last_used_at = now(),
+      token_last_used_ip = case when normalized_ip <> '' then normalized_ip else token_last_used_ip end
+  where uuid = input_uuid;
   get diagnostics updated_count = row_count;
-  return updated_count > 0;
+
+  return jsonb_build_object(
+    'updated', updated_count > 0,
+    'previous_ip', nullif(previous_value, '')
+  );
 end;
 $$;
 
@@ -3781,6 +3801,127 @@ begin
 end;
 $$;
 
+-- monitor 主题契约的 metrics 分桶：每个桶给「整桶的均值 + 峰值 + 样本数」。
+--
+-- 与 cfm_records_range_bucketed（每桶取最新一行）的区别是这里的桶是**封闭**的：
+-- 桶内所有落库记录一起参与聚合，而不是拿桶里最后一条（可能还在写入中的）记录
+-- 冒充整桶。桶键按 epoch 对齐到 bucket_sec 的整数倍，与 hub 的
+-- `(MIN(ts)/step)*step` 一致。
+--
+-- records 的落库节奏是可配置的（record_persist_interval_sec，默认 120s），一条
+-- 记录代表 sample_sec 秒的数据，所以 minutes 按 `样本数 × sample_sec / 60` 折算，
+-- 并夹在 [1, bucket_sec/60] 之间；hub 存的是每分钟一行，COUNT(*) 就等于分钟数。
+create or replace function public.cfm_records_range_aggregated(
+  input_client text,
+  input_start text,
+  input_end text,
+  input_bucket_sec integer default 60,
+  input_limit integer default 2000,
+  input_sample_sec integer default 60
+)
+returns jsonb
+language plpgsql
+stable
+set search_path = public
+as $$
+declare
+  safe_bucket integer := least(greatest(coalesce(input_bucket_sec, 60), 60), 3600);
+  safe_limit integer := least(greatest(coalesce(input_limit, 2000), 1), 4000);
+  safe_sample integer := least(greatest(coalesce(input_sample_sec, 60), 3), 3600);
+begin
+  return coalesce((
+    with aggregated as (
+      select
+        (floor(extract(epoch from r.time) / safe_bucket)::bigint * safe_bucket) as bucket_ts,
+        count(*) as samples,
+        avg(r.cpu) as cpu,
+        max(r.cpu) as cpu_max,
+        cast(avg(r.ram) as bigint) as mem_used,
+        cast(avg(r.disk) as bigint) as disk_used,
+        cast(avg(r.swap) as bigint) as swap_used,
+        cast(avg(r.net_in) as bigint) as net_rx,
+        cast(avg(r.net_out) as bigint) as net_tx,
+        max(r.net_in) as net_rx_max,
+        max(r.net_out) as net_tx_max,
+        cast(round(avg(r.connections)) as bigint) as tcp,
+        cast(round(avg(r.connections_udp)) as bigint) as udp,
+        cast(round(avg(r.process_count)) as bigint) as procs
+      from records r
+      where r.client = input_client
+        and r.time >= input_start::timestamptz
+        and r.time <= input_end::timestamptz
+      group by bucket_ts
+    ),
+    limited as (
+      select * from aggregated order by bucket_ts desc limit safe_limit
+    )
+    select jsonb_agg(jsonb_build_object(
+      'ts', bucket_ts,
+      'samples', samples,
+      'minutes', least(safe_bucket / 60, greatest(1, round(samples * safe_sample / 60.0)::integer)),
+      'cpu', cpu,
+      'cpu_max', cpu_max,
+      'mem_used', mem_used,
+      'disk_used', disk_used,
+      'net_rx', net_rx,
+      'net_tx', net_tx,
+      'net_rx_max', net_rx_max,
+      'net_tx_max', net_tx_max,
+      'swap_used', swap_used,
+      'tcp', tcp,
+      'udp', udp,
+      'procs', procs
+    ) order by bucket_ts asc)
+    from limited
+  ), '[]'::jsonb);
+end;
+$$;
+
+-- monitor 主题契约的节点流量：一次批量给出 day_* / total_*。
+--   total_* = traffic_daily 全部行之和（含历史所有日期）
+--   day_*   = 最近一个日桶的值，但只有当它落在服务器日期的 ±1 天内才算「今天」
+--             （traffic_daily.day 是 Agent 本地自然日，时区可能跨日）；
+--             否则说明这台机器已经很久没上报，按 0 处理。
+-- up 是上行（tx），down 是下行（rx）。
+create or replace function public.cfm_traffic_totals(input_clients jsonb)
+returns jsonb
+language sql
+stable
+set search_path = public
+as $$
+  with wanted as (
+    select distinct value as client
+    from jsonb_array_elements_text(coalesce(input_clients, '[]'::jsonb))
+  ),
+  totals as (
+    select t.client,
+      sum(t.up)::bigint as total_up,
+      sum(t.down)::bigint as total_down,
+      max(t.day) as latest_day
+    from traffic_daily t
+    join wanted w on w.client = t.client
+    group by t.client
+  ),
+  latest as (
+    select t.client,
+      sum(t.up)::bigint as day_up,
+      sum(t.down)::bigint as day_down
+    from traffic_daily t
+    join totals a on a.client = t.client and a.latest_day = t.day
+    group by t.client
+  )
+  select coalesce(jsonb_object_agg(a.client, jsonb_build_object(
+    'day_rx', case when a.latest_day between current_date - 1 and current_date + 1
+      then coalesce(l.day_down, 0) else 0 end,
+    'day_tx', case when a.latest_day between current_date - 1 and current_date + 1
+      then coalesce(l.day_up, 0) else 0 end,
+    'total_rx', a.total_down,
+    'total_tx', a.total_up
+  )), '{}'::jsonb)
+  from totals a
+  left join latest l on l.client = a.client;
+$$;
+
 -- ---------------------------------------------------------------------------
 -- 函数权限：public 级一律收回，只授权给服务端使用的角色。
 -- ---------------------------------------------------------------------------
@@ -4024,6 +4165,10 @@ revoke all on function public.cfm_records_range_cursor(text, text, text, text, i
 grant execute on function public.cfm_records_range_cursor(text, text, text, text, integer) to service_role;
 revoke all on function public.cfm_records_range_bucketed(text, text, text, integer, integer) from public, anon, authenticated;
 grant execute on function public.cfm_records_range_bucketed(text, text, text, integer, integer) to service_role;
+revoke all on function public.cfm_records_range_aggregated(text, text, text, integer, integer, integer) from public, anon, authenticated;
+grant execute on function public.cfm_records_range_aggregated(text, text, text, integer, integer, integer) to service_role;
+revoke all on function public.cfm_traffic_totals(jsonb) from public, anon, authenticated;
+grant execute on function public.cfm_traffic_totals(jsonb) to service_role;
 
 create or replace trigger cfm_client_delivery_retirement after delete or update of expired_at on public.clients
 for each row execute function cfm_internal.retire_entity_notification_deliveries();

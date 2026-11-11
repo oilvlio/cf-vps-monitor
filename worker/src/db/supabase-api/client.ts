@@ -1,5 +1,5 @@
 import type { AuditLogsPage, BoundedTableRowCounts, ClearAllRecordsResult, Client, ClientCapacityCounts, ClientIdentity, ClientReferenceCleanupResult, ClientTokenMeta, DeleteClientsResult, DeleteOldRowsOptions, ExpiryNotification, ExpiryNotificationUpdate, GPUHistoryRecord, GPUInfo, 
-  HistoryTableByteSizes, LoadMetricWindowStats, LoadNotification, LoadNotificationInput, LoadNotificationMetric, LoginRateLimit, MonitorRecord, OfflineNotification, OfflineNotificationUpdate, OrphanClientDataCleanupResult, PingHistoryRecord, PingSnapshotInput, PingTask, PingTaskEstimateRow, PingTaskHistoryRequest, PingTaskStats, PublicClientRow, ScheduledClientRow, TableRowCounts, Theme, ThemeAsset, ThemeAssetUpsertInput, ThemeUpsertInput, User } from '../types.ts';
+  HistoryTableByteSizes, LoadMetricWindowStats, LoadNotification, LoadNotificationInput, LoadNotificationMetric, LoginRateLimit, MonitorMetricsBucket, MonitorRecord, MonitorTrafficTotals, OfflineNotification, OfflineNotificationUpdate, OrphanClientDataCleanupResult, PingHistoryRecord, PingSnapshotInput, PingTask, PingTaskEstimateRow, PingTaskHistoryRequest, PingTaskStats, PublicClientRow, ScheduledClientRow, TableRowCounts, Theme, ThemeAsset, ThemeAssetUpsertInput, ThemeUpsertInput, User } from '../types.ts';
 import type { BackupData } from '../../utils/backup.ts';
 import type { BackupConfigurationSnapshot, HistoryStorageUsage, NotificationDeliveryClaim, NotificationDeliveryCleanupOptions, NotificationDeliveryCleanupResult } from '../types.ts';
 import { redactDatabaseSecrets } from '../../utils/setup-diagnostics.ts';
@@ -230,8 +230,13 @@ export async function createSupabaseClient(env: SupabaseApiEnv, client: Partial<
   }).then(normalizeClientBooleans);
 }
 
-export function markSupabaseClientTokenUsed(env: SupabaseApiEnv, uuid: string, ip = ''): Promise<boolean> {
-  return callSupabaseRpc<boolean>(env, 'cfm_mark_client_token_used', {
+export type MarkClientTokenUsedResult = {
+  updated: boolean;
+  previous_ip: string | null;
+};
+
+export function markSupabaseClientTokenUsed(env: SupabaseApiEnv, uuid: string, ip = ''): Promise<MarkClientTokenUsedResult> {
+  return callSupabaseRpc<MarkClientTokenUsedResult>(env, 'cfm_mark_client_token_used', {
     input_uuid: uuid,
     input_ip: ip,
   });
@@ -586,6 +591,39 @@ export function getSupabaseRecordsByTimeRangeBucketed(
     input_end: end,
     input_bucket_sec: bucketSec,
     input_limit: limit,
+  });
+}
+
+/**
+ * monitor 主题契约的 metrics：每个桶给整桶的均值、峰值与真实分钟数。
+ * `sampleSec` 是记录落库间隔（record_persist_interval_sec），用来把样本数折成分钟。
+ */
+export function getSupabaseRecordsByTimeRangeAggregated(
+  env: SupabaseApiEnv,
+  client: string,
+  start: string,
+  end: string,
+  bucketSec: number,
+  limit = 2000,
+  sampleSec = 120,
+): Promise<MonitorMetricsBucket[]> {
+  return callSupabaseRpc<MonitorMetricsBucket[]>(env, 'cfm_records_range_aggregated', {
+    input_client: client,
+    input_start: start,
+    input_end: end,
+    input_bucket_sec: bucketSec,
+    input_limit: limit,
+    input_sample_sec: sampleSec,
+  });
+}
+
+/** monitor 主题契约的节点流量：批量取 day_* / total_*。 */
+export function getSupabaseTrafficTotals(
+  env: SupabaseApiEnv,
+  clients: readonly string[],
+): Promise<Record<string, MonitorTrafficTotals>> {
+  return callSupabaseRpc<Record<string, MonitorTrafficTotals>>(env, 'cfm_traffic_totals', {
+    input_clients: [...clients],
   });
 }
 

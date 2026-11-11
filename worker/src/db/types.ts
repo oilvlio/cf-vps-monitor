@@ -83,6 +83,36 @@ export interface MonitorRecord {
   uptime: number;
 }
 
+/**
+ * `cfm_records_range_aggregated` 的一个分桶：桶内所有记录一起聚合，
+ * `samples` 是桶内记录数，`minutes` 是按落库间隔折算出的分钟数。
+ */
+export interface MonitorMetricsBucket {
+  ts: number;
+  samples: number;
+  minutes: number;
+  cpu: number;
+  cpu_max: number;
+  mem_used: number;
+  disk_used: number;
+  net_rx: number;
+  net_tx: number;
+  net_rx_max: number;
+  net_tx_max: number;
+  swap_used: number;
+  tcp: number;
+  udp: number;
+  procs: number;
+}
+
+/** `cfm_traffic_totals` 给单个节点的当日 / 累计流量（字节）。 */
+export interface MonitorTrafficTotals {
+  day_rx: number;
+  day_tx: number;
+  total_rx: number;
+  total_tx: number;
+}
+
 export interface PagedResult<T> {
   data: T[];
   total: number;

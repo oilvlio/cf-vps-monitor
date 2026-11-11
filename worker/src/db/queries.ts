@@ -86,7 +86,7 @@ export async function rotateClientToken(database: QueryDatabase, uuid: string, t
   return sba.rotateSupabaseClientToken(database.env, uuid, token);
 }
 
-export async function markClientTokenUsed(database: QueryDatabase, uuid: string, ip = ''): Promise<boolean> {
+export async function markClientTokenUsed(database: QueryDatabase, uuid: string, ip = ''): Promise<sba.MarkClientTokenUsedResult> {
   return sba.markSupabaseClientTokenUsed(database.env, uuid, ip);
 }
 
@@ -329,6 +329,28 @@ export async function getRecordsByTimeRangeBucketed(
   limit = 1000,
 ): Promise<t.MonitorRecord[]> {
   return sba.getSupabaseRecordsByTimeRangeBucketed(database.env, client, start, end, bucketSec, limit);
+}
+
+export async function getRecordsByTimeRangeAggregated(
+  database: QueryDatabase,
+  client: string,
+  start: string,
+  end: string,
+  bucketSec: number,
+  limit = 2000,
+  sampleSec = 120,
+): Promise<t.MonitorMetricsBucket[]> {
+  return sba.getSupabaseRecordsByTimeRangeAggregated(
+    database.env, client, start, end, bucketSec, limit, sampleSec,
+  );
+}
+
+/** monitor 主题契约：批量取节点的 day_* / total_* 流量。 */
+export async function getTrafficTotals(
+  database: QueryDatabase,
+  clients: readonly string[],
+): Promise<Record<string, t.MonitorTrafficTotals>> {
+  return sba.getSupabaseTrafficTotals(database.env, clients);
 }
 
 export async function getRecordsByTimeRangePaged(

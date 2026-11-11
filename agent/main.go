@@ -963,18 +963,26 @@ func executeTCPPing(target string) float64 {
 // （通常是 SYN 重传的 1s/3s 台阶）会触发补测，补测仍超限则按失败(-1)处理，
 // 不会把 1000+/2000+ms 的重传耗时当作延迟上报。
 func executeTCPPingWithContext(ctx context.Context, target string) float64 {
+	var probeErr error
 	result := resolveTCPPingSamples(func() float64 {
 		if ctx.Err() != nil {
+			probeErr = ctx.Err()
 			return -1
 		}
-		v, e := executeTCPProbeWithContext(ctx, target, 3*time.Second)
-		if e != nil {
+		v, err := executeTCPProbeWithContext(ctx, target, 3*time.Second)
+		if err != nil {
+			probeErr = err
 			return -1
 		}
+		probeErr = nil
 		return v
 	})
 	if result < 0 && ctx.Err() == nil {
-		logWarnf("TCP ping failed for %q", target)
+		if probeErr != nil {
+			logWarnf("TCP ping failed for %q: %v", target, probeErr)
+		} else {
+			logWarnf("TCP ping failed for %q: connect latency remained above %dms after retries or suspected SYN retransmission", target, tcpRetestTriggerMS)
+		}
 	}
 	return result
 }
@@ -1011,14 +1019,14 @@ func executeTCPProbeWithContext(parent context.Context, target string, timeout t
 	defer cancel()
 	ips, err := resolvePublicIPsForPing(ctx, host)
 	if err != nil {
-		return -1, fmt.Errorf("%s: %w", address, err)
+		return -1, fmt.Errorf("DNS resolution for %s: %w", address, err)
 	}
 	// The budget includes DNS, but TCP latency still measures only the connect phase.
 	started := time.Now()
 	conn, err := dialResolvedTCP(ctx, "tcp", ips, port, timeout)
 	elapsed := time.Since(started).Milliseconds()
 	if err != nil {
-		return -1, err
+		return -1, fmt.Errorf("TCP connect to %s: %w", address, err)
 	}
 	_ = conn.Close()
 	return float64(elapsed), nil

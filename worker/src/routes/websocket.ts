@@ -11,7 +11,9 @@ import { createViewerToken, verifyViewerToken } from '../auth/viewer-token';
 import { getAgentClientIdentityByToken } from './client';
 import { getCloudflareClientIp, isPublicIpAddress } from '../utils/request-ip';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
-import { hasAdminSession, invalidatePublicMetadataCache } from './public';
+import { hasAdminSession, getPublicClientsSnapshot, invalidatePublicMetadataCache } from './public';
+import { pushMonitorMetaToDo } from './monitor-compat';
+import { monitorNodeStatic } from '../utils/monitor-contract';
 
 const wsRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 type WsContext = Context<{ Bindings: Bindings; Variables: Variables }>;
@@ -25,6 +27,8 @@ const VIEWER_TOKEN_RATE_LIMIT_MAX = 20;
 const LIVE_CLIENTS_RATE_LIMIT_WINDOW_MS = 60_000;
 const LIVE_CLIENTS_RATE_LIMIT_MAX = 180;
 const LIVE_CLIENTS_CACHE_SECONDS = 2;
+const MONITOR_WS_RATE_LIMIT_WINDOW_MS = 60_000;
+const MONITOR_WS_RATE_LIMIT_MAX = 30;
 /**
  * 通行证有效期。刻意与 viewer 窗口解耦并保持很短——它只是"取证 → 建连"
  * 这一瞬间的一次性凭据，有效期越短，被截获后的可用窗口越小。
@@ -233,6 +237,18 @@ async function enforceLiveClientsRateLimit(c: WsContext, ip: string): Promise<Re
   );
 }
 
+async function enforceMonitorWsRateLimit(c: WsContext, ip: string): Promise<Response | null> {
+  return enforceWsRateLimit(
+    c,
+    'monitor-ws',
+    'monitor-ws',
+    ip,
+    MONITOR_WS_RATE_LIMIT_MAX,
+    MONITOR_WS_RATE_LIMIT_WINDOW_MS,
+    'Too many monitor websocket connections',
+  );
+}
+
 function jwtSecret(c: WsContext): string {
   return String(c.env.JWT_SECRET || '').trim();
 }
@@ -294,6 +310,56 @@ wsRoutes.get('/clients/report', async (c) => {
   if (sourceIpIsPublic) url.searchParams.set('source_ip', sourceIp);
   if (region) url.searchParams.set('region', region);
 
+  return stub.fetch(new Request(url.toString(), c.req.raw));
+});
+
+/**
+ * monitor 主题契约的实时通道：`{admin, nodes}` 全量帧，`?gzip` 发 gzip 二进制。
+ *
+ * 帧由 Durable Object 从内存里的静态投影 + 实时报告拼装（每帧不查库），推送节奏
+ * 跟随 agent 上报（3–5s），而不是上游 hub 的 2s。普通 GET 按契约回 426。
+ */
+wsRoutes.get('/ws', async (c) => {
+  if (!isWebSocketUpgrade(c)) {
+    return c.text('需要 WebSocket', 426);
+  }
+  if (!requestHasValidOrigin(c)) {
+    return c.json({ error: 'Invalid WebSocket Origin' }, 403);
+  }
+  const limited = await enforceMonitorWsRateLimit(c, requestIp(c));
+  if (limited) return limited;
+
+  const gzip = c.req.query('gzip') !== undefined && c.req.query('gzip') !== '0';
+
+  const database = getDatabase(c.env);
+  const [admin, snapshot] = await Promise.all([
+    hasAdminSession(c),
+    getPublicClientsSnapshot(c, database, false, false),
+  ]);
+
+  // 建连时把静态投影推进 DO，保证首帧就是当前数据；之后只在 /api/nodes 被访问时
+  // 节流刷新（节点增删），运行期每帧都不再查库。
+  try {
+    const totals = await db.getTrafficTotals(database, snapshot.clients.map(client => client.uuid))
+      .catch(() => ({} as Record<string, db.MonitorTrafficTotals>));
+    await pushMonitorMetaToDo(
+      c,
+      snapshot.clients.map(client => monitorNodeStatic(client, totals[client.uuid])),
+    );
+  } catch {
+    // DO 写失败不阻塞建连：旧缓存仍能出帧，下一次 /api/nodes 会刷新。
+  }
+
+  const url = new URL(c.req.url);
+  url.pathname = '/';
+  url.search = '';
+  url.searchParams.set('id', 'monitor-' + crypto.randomUUID());
+  url.searchParams.set('role', 'monitor');
+  // admin 是每个连接自己的身份，不进共享 meta，避免访客被管理员的连接带成 admin。
+  if (admin) url.searchParams.set('admin', '1');
+  if (gzip) url.searchParams.set('gzip', '1');
+
+  const stub = c.env.LIVE_DATA.get(c.env.LIVE_DATA.idFromName('global'));
   return stub.fetch(new Request(url.toString(), c.req.raw));
 });
 

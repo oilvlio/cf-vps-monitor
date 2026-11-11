@@ -14,7 +14,7 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 - **首页延迟色块**：在后台编辑服务器时，可为节点勾选一个“首页探测点”（需先在 Ping 任务里应用到该节点），首页节点卡片会显示该探测任务最新的 24 次原始采样色块（不聚合，右端为最新）。
 - **后台管理**：节点增删改、批量隐藏/删除、拖拽排序、记录清理、Agent Token 轮换、安装命令生成、系统设置、审计日志、健康检查、容量估算、备份恢复、账号改名和改密。
 - **通知**：支持 Telegram、SMTP Email 和 Webhook，可配置离线、到期和负载通知。
-- **主题**：内置 `monitor` 和 `aurora` 主题，支持主题包（CSS + 图片 + 字体资源）、自定义 CSS 和可配置变量。
+- **主题**：内置 `monitor` 和 `aurora` 主题，支持主题包（CSS + 图片 + 字体资源）、自定义 CSS 和可配置变量。另支持 Monitor 主题：在后台填写 GitHub 仓库地址并启用后，Worker 会读取其最新 Release 的 `theme.tar.gz`，托管主题页面及静态资源，并提供 Monitor 主题所需的兼容数据 API 与实时 WebSocket；主题配置可在后台管理。`/admin`、`/api/*` 等内置路径仍由本项目处理。
 - **管理员恢复**：首次登录时创建管理员；忘记账号或密码时，可在登录页用当前部署的 Supabase Secret key 重置唯一管理员。
 - **省配额策略**：有实时观看者时 Agent 约 3 秒采集并上报；无人查看时约 120 秒采样并批量上报。Ping 历史按落库间隔全量保存，无「值不变不落库」压缩。可用节点数取决于 Ping 任务、访问量、上报方式以及数据库和实时服务的独立额度，请在后台容量估算中核对。
 
@@ -24,8 +24,11 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 
 - **移除**：网站监控（页面、API、定时探测、通知与数据库对象全部下线）；后台「一键同步更新 / 版本更新」入口。
 - **新增**：首页探测点（`/api/ping/home` + 首页色块）；Agent `--allow-host-load`（默认开启，`--no-host-load` 关闭）/ `--host-cpu-cores`（容器上报宿主负载并按核数折算）；`--enable-gpu`（GPU 探测默认关闭）；`--log-level debug|info|warn|error`（默认 info，每次上报 / ack 属于 debug，debug/info 走 stdout，warn/error 走 stderr）；Load5/Load15 三元组上报。
+- **Monitor 主题兼容**：公开兼容节点、指标、Ping 历史及主题配置 API，并通过 `/api/ws` 提供实时数据；指标历史按落库间隔聚合，流量总量由服务端批量补齐。第三方主题资源经 Worker 托管，后台保存配置后会立即刷新主题设置。
+- **Ping 历史**：节点详情历史查询支持按任务筛选并稳定排序；Monitor 兼容接口按主题契约输出聚合后的指标与 Ping 历史，并使用短时进程内缓存减少重复数据库查询。
+- **Agent TCP Ping 日志**：失败日志包含 DNS 解析错误或 TCP 连接错误详情；若连接成功但重测仍超过阈值，也会标明持续高延迟或疑似 SYN 重传。
 - **行为调整**：月度流量改为 vnstat 式按天存增量，并且全部放在服务端：Agent 只上报各网卡的内核累计读数（不再有 `traffic-state.json` 等任何本地流量状态），Supabase 换算增量、按 Agent 本地日期累计到 `traffic_daily`，月度流量 = 当前计费周期 `[重置日, 今天]` 的日增量之和。在后台修改流量重置日只是换求和区间，当期流量不再清零，改回去也能原样找回（Agent 的 `--traffic-reset-day` 参数已移除，旧服务需重跑安装命令更新服务单元；系统级安装也不再创建 `state` 目录）；Ping 快照按落库间隔全量落库（含丢包/超时事件即时落库）；容器磁盘直接按 statfs 上报（移除目录扫描 / 配额换算 / root 收集器）；记录与 Ping 历史保留上限 168h（默认 168h）；超过 24h 的 GPU 历史自动并入小时桶 `gpu_rollup` 节省存储。
-- **安全基线**：Go 1.26.10（GO-2026-6809）、undici 7.30.1、sharp 0.35.5 overrides。
+- **安全基线**：Go 1.26.11（GO-2026-6809、GO-2026-6859）、undici 7.30.1、sharp 0.35.5 overrides。
 - **数据库**：迁移收敛为 2 个「全新安装终态」文件，不含旧版本存量数据迁移。
 - **流量统计的节奏与口径**：月度总量约每 2 分钟（与 ping record 同节奏）精确落库一次；两次落库之间，Worker 在内存里用「上次落库的合计 + 当前读数相对上次落库读数的增量」估算，随每份上报一起刷新（规则与数据库换算一致，不额外写库），落库后由数据库的精确值接管。读数是累计的，所以某次落库失败只是少一次更新，下一次的差值会把空档补上；仅当失败期间节点恰好重启，才会丢失「最后一次落库到重启」之间的流量。新装的 Agent 从第一次读到网卡计数器开始累计（与 vnstat 一致），不再把「开机以来」的累计回填到开机当天。`traffic_daily` / `traffic_counter_state` 与 `records` 一样属于运行数据，不进入配置备份，随节点删除级联清理，日增量保留约 400 天。
 - **流量统计升级顺序**：先部署 Worker 并重新执行一次 `/db-init`（新增两张表和 `cfm_traffic_apply_samples` / `cfm_traffic_import` 两个 RPC，均为幂等），再升级 Agent。旧版 Agent 本地保存的按天历史会在升级后随第一批上报一次性导入，服务端确认入库后旧的 `traffic-state.json` 才会被改名为 `*.imported`，所以当月已有流量不会丢，升级瞬间的那一小段流量也会接上。Agent 先于 Worker 升级时，面板会暂时显示「开机以来」的原始累计，旧状态文件不会被动，待服务端就绪后自动恢复。尚未升级的旧 Agent 仍按原方式上报当期累计，面板照常展示。
@@ -54,7 +57,7 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 
 ## 面板部署
 
-在 Cloudflare 的 **Settings → Build → Build Variables and Secrets** 中设置 `NODE_VERSION=24`、`GO_VERSION=1.26.10`（与 `agent/go.mod` 保持一致）。Workers Builds 官方镜像已包含 Go，也能按 `go.mod` 自动选择工具链。部署入口会先运行前后端检查、构建和 JavaScript/Go 测试；检查失败时不会发布。
+在 Cloudflare 的 **Settings → Build → Build Variables and Secrets** 中设置 `NODE_VERSION=24`、`GO_VERSION=1.26.11`（与 `agent/go.mod` 保持一致）。Workers Builds 官方镜像已包含 Go，也能按 `go.mod` 自动选择工具链。部署入口会先运行前后端检查、构建和 JavaScript/Go 测试；检查失败时不会发布。
 
 > **本仓库不保留旧版本数据库迁移。** 全新部署照常在 `/db-init` 初始化数据库；如果你从旧版本（上游或本仓库更早版本）升级，请重建数据库（新建 Supabase 项目或清空后重跑 `/db-init`），迁移不会自动搬运或清理旧数据与旧表。
 

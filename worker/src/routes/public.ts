@@ -31,6 +31,8 @@ import { getCloudflareClientIp } from '../utils/request-ip';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { readJsonWithLimit } from '../utils/request-body';
 import { base64ToBytes } from '../utils/theme-package';
+import { historyBucketSec } from '../utils/history-bucket';
+import { buildMonitorMe } from '../utils/monitor-contract';
 
 const publicRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 type PublicContext = Context<{ Bindings: Bindings; Variables: Variables }>;
@@ -247,6 +249,7 @@ export function purgePublicMetadataEdgeCache(c: Context<{ Bindings: Bindings; Va
     '/api/public/bootstrap',
     '/api/clients',
     '/api/nodes',
+    '/api/legacy/nodes',
     '/api/public',
     '/api/task/ping',
     '/api/ping/home',
@@ -481,28 +484,10 @@ function validatePublicTimeRange(start: string, end: string): string | null {
   return null;
 }
 
-// 原始点的上限：12h 内按 60s 最小落库间隔最多 720 点，SVG 直接画完全没有压力。
-// 前端的区间是 start/end 两次独立取 Date 得到的，会比名义区间多出几毫秒，
-// 所以边界留 10 分钟余量，免得 12h 档被偶然判成分桶请求。
-const RAW_HISTORY_MAX_RANGE_MS = 12 * 60 * 60 * 1000 + 10 * 60 * 1000;
+// 分桶口径统一放在 utils/history-bucket.ts，Monitor 契约也读同一份定义。
+export { historyBucketSec };
 
-/**
- * <=12h 读原始（12h × 60s = 720 点）；更长的窗口分桶，目标约 720 点/档（1600px 宽约 2px 一个点）：
- * 12h~3.5d → 360s 桶（3d = 720 桶，1d = 240 桶）；>3.5d → 840s 桶（7d = 720 桶）。
- *
- * 步长取 120s 的整数倍（6min / 14min），60s 和 120s 的探测间隔都整除，每桶样本数恒定
- * （60s 探测下 6 / 14 个，120s 探测下 3 / 7 个）。每桶至少 3 个样本，中位数才压得住孤立的
- * 尖峰；步长等于探测间隔时桶边界会和采样时刻错位（桶里时有 0 个、时有 2 个），所以短窗口不分桶。
- */
-export function historyBucketSec(rangeMs: number): number | null {
-  const hour = 60 * 60 * 1000;
-  const day = 24 * hour;
-  if (rangeMs > 3.5 * day) return 840;
-  if (rangeMs > RAW_HISTORY_MAX_RANGE_MS) return 360;
-  return null;
-}
-
-async function getPublicSettings(database: db.QueryDatabase, force = false): Promise<PublicSettings> {
+export async function getPublicSettings(database: db.QueryDatabase, force = false): Promise<PublicSettings> {
   const now = Date.now();
   if (!force && cacheIsFresh(publicSettingsCache, now)) return publicSettingsCache!.value;
 
@@ -511,7 +496,7 @@ async function getPublicSettings(database: db.QueryDatabase, force = false): Pro
   return settings;
 }
 
-function privateJsonResponse(value: unknown, maxAgeSeconds = 0): Response {
+export function privateJsonResponse(value: unknown, maxAgeSeconds = 0): Response {
   // 后台视角的响应不能进共享缓存，但允许写入浏览器自己的私有缓存：
   // 历史记录（旧数据不可变）短缓存可以让「来回切时间档 / 切页签」在浏览器层直接命中。
   return new Response(JSON.stringify(value), {
@@ -574,7 +559,7 @@ function applyPublicClientsOverlay(clients: PublicClient[], overlay: AdminClient
   return [...byUuid.values()].filter(client => includeHidden || !client.hidden);
 }
 
-async function getPublicClientsSnapshot(c: PublicContext, database: db.QueryDatabase, force = false, includeHidden = false): Promise<PublicClientsSnapshot> {
+export async function getPublicClientsSnapshot(c: PublicContext, database: db.QueryDatabase, force = false, includeHidden = false): Promise<PublicClientsSnapshot> {
   const now = Date.now();
   if (!includeHidden && !force && cacheIsFresh(publicClientsSnapshotCache, now)) return publicClientsSnapshotCache!;
   if (includeHidden && !force && cacheIsFresh(publicAdminClientsSnapshotCache, now)) return publicAdminClientsSnapshotCache!;
@@ -734,15 +719,28 @@ async function publicApiRateLimit(c: PublicContext, bucket: string, maxRequests:
   }
 }
 
-function guardPublicMetadata(c: PublicContext, bucket: string): Promise<Response | null> {
+export function guardPublicMetadata(c: PublicContext, bucket: string): Promise<Response | null> {
   return publicApiRateLimit(c, `metadata:${bucket}`, PUBLIC_METADATA_RATE_LIMIT_MAX);
 }
 
-function guardPublicHistory(c: PublicContext, bucket: string): Promise<Response | null> {
+export function guardPublicHistory(c: PublicContext, bucket: string): Promise<Response | null> {
   return publicApiRateLimit(c, `history:${bucket}`, PUBLIC_HISTORY_RATE_LIMIT_MAX);
 }
 
-function guardPublicLive(c: PublicContext): Promise<Response | null> {
+/**
+ * monitor 主题专用的历史限流桶。额度由调用方按节点数算（hex 的节点总览会按节点
+ * 扇出 `series=ping` 请求，5s 一轮，沿用 60 次/分钟会误伤正常浏览），换算见
+ * `monitorMetricsRateLimit()`。仍走同一个限流 DO，只是桶和额度不同。
+ */
+export function guardMonitorMetrics(
+  c: PublicContext,
+  bucket: string,
+  maxRequests: number,
+): Promise<Response | null> {
+  return publicApiRateLimit(c, `history:${bucket}`, maxRequests);
+}
+
+export function guardPublicLive(c: PublicContext): Promise<Response | null> {
   return publicApiRateLimit(c, 'live', PUBLIC_LIVE_RATE_LIMIT_MAX);
 }
 
@@ -1339,46 +1337,61 @@ async function authSessionHeadResponse(c: PublicContext): Promise<Response> {
   }
 }
 
-// 获取当前用户信息（需要 token）
+// 当前会话信息 + monitor 主题的站点公开信息（合并响应）
+// 这条路径同时服务两种消费者，字段键名不重叠，所以合并成一份响应：
+// - monitor 主题：需要 `authed/github/history_days/public_page/site/site_name`
+//   （见 preview/hub.js 的 /api/me），未登录时也要 200 —— 主题只是在页面上显示站名。
+// - 后台前端（AuthContext）：需要 `uuid/username/csrf_token`，且以「能否解析出
+//   uuid/username」判登录，不依赖 401 状态码。
 publicRoutes.get('/me', async (c) => {
   if (c.req.method === 'HEAD') return authSessionHeadResponse(c);
+  // 响应随会话变化，不能进共享缓存。
+  c.header('Cache-Control', 'private, no-store');
+
+  let origin = '';
+  try {
+    origin = new URL(c.req.url).origin;
+  } catch {
+    origin = '';
+  }
+  let title = 'CF VPS Monitor';
+  try {
+    const settings = await getPublicSettings(getDatabase(c.env));
+    if (typeof settings.site_title === 'string' && settings.site_title.trim() !== '') {
+      title = settings.site_title;
+    }
+  } catch {
+    // 数据库未就绪：站名退回默认值，不影响公开形状。
+  }
+  const monitorFields = buildMonitorMe({ siteUrl: origin, siteName: title, authed: false });
+  const anonymous = () => c.json(monitorFields);
+  const authenticated = (uuid: string, username: string) => c.json({
+    ...buildMonitorMe({ siteUrl: origin, siteName: title, authed: true }),
+    uuid,
+    username,
+    csrf_token: ensureAdminCsrfCookie(c),
+  });
 
   const token = getAdminSessionToken(c);
-  if (!token) {
-    return c.json({ error: '未登录' }, 401);
-  }
+  if (!token) return anonymous();
 
   try {
     const payload = await verifyAdminToken(token, c.env);
-    if (!payload) {
-      return c.json({ error: 'Token 无效' }, 401);
-    }
+    if (!payload) return anonymous();
     if (await getAdminSessionEdgeCache(payload.userId, payload.sessionVersion)) {
-      const csrfToken = ensureAdminCsrfCookie(c);
-      return c.json({
-        uuid: payload.userId,
-        username: payload.username,
-        csrf_token: csrfToken,
-      });
+      return authenticated(payload.userId, payload.username);
     }
     const database = getDatabase(c.env);
     const user = await validateAdminSession(database, payload);
-    if (!user) {
-      return c.json({ error: 'Token 无效' }, 401);
-    }
+    if (!user) return anonymous();
     putAdminSessionEdgeCache(c, user);
-    const csrfToken = ensureAdminCsrfCookie(c);
-    return c.json({
-      uuid: user.uuid,
-      username: user.username,
-      csrf_token: csrfToken,
-    });
+    return authenticated(user.uuid, user.username);
   } catch (error) {
     if (error instanceof AuthConfigurationError) {
       console.error('[auth] JWT_SECRET is missing or shorter than 32 bytes');
       return c.json({ error: '服务端 JWT_SECRET 未正确配置' }, 500);
     }
-    return c.json({ error: 'Token 无效' }, 401);
+    return anonymous();
   }
 });
 
@@ -1742,8 +1755,9 @@ publicRoutes.get('/ping/home', async (c) => {
   return includeHidden ? privateJsonResponse(summary) : setPublicMetadataResponse(c, summary, !fresh);
 });
 
-// 节点信息（兼容旧版格式）
-publicRoutes.get('/nodes', async (c) => {
+// 节点信息（兼容旧版格式）：`/api/nodes` 现在归 monitor 主题契约
+// （见 routes/monitor-compat.ts），这条原生形状挪到 `/api/legacy/nodes` 保留。
+publicRoutes.get('/legacy/nodes', async (c) => {
   const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
   const cached = includeHidden ? null : await getCachedPublicMetadataResponse(c, 'nodes');
   if (cached) return cached;

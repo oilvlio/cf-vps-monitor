@@ -19,7 +19,7 @@ async function reportAcrossAdminChange(action, basic) {
     getClientByToken: async () => structuredClone(row), getClient: async () => structuredClone(row),
     getSettingsByKeys: async () => ({ record_enabled: 'false' }),
     getSetting: async () => null, setSetting: async () => {},
-    updateClient: async () => {}, markClientTokenUsed: async () => {},
+    updateClient: async () => {}, markClientTokenUsed: async () => ({ updated: false, previous_ip: null }),
     insertAuditLog: async () => {}, tryClaimAuditThrottle: async () => true,
     listPingTasks: async () => [],
   } });

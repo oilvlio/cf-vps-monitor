@@ -32,7 +32,7 @@ async function fixture({ sameUuid = false, removed = false, includeClients = tru
       if (backup.clients) clients = structuredClone(backup.clients);
     },
     cleanupOrphanClientData: async () => ({}), insertAuditLog: async () => {},
-    markClientTokenUsed: async () => false,
+    markClientTokenUsed: async () => ({ updated: false, previous_ip: null }),
     getClientByToken: async (_db, token) => clients.find(client => client.token === token) || null,
     getClientIdentityByToken: async (_db, token) => clients.find(client => client.token === token) || null,
     getClient: async (_db, uuid) => clients.find(client => client.uuid === uuid) || null,

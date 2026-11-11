@@ -52,6 +52,16 @@ import {
 } from './public';
 import { invalidateAgentClientAuthCache, invalidateAgentPingTaskCache } from './client';
 import { invalidateLiveViewerSettingsCache } from './websocket';
+import {
+  LEGACY_CFSM_THEME_SETTING_KEY,
+  THIRD_PARTY_THEME_SETTING_KEY,
+  normalizeThemeUrl,
+  parseThirdPartyThemeSettings,
+  parseThemeUrl,
+  probeTheme,
+  serializeThirdPartyThemeSettings,
+} from '../utils/third-party-theme';
+import { invalidateThirdPartyThemeCache } from './third-party-theme';
 import { getDatabase, type AppDatabase } from '../db/provider';
 import {
   bestEffortRecordHealthEvent,
@@ -3052,6 +3062,82 @@ adminRoutes.post('/test/sendMessage', async (c) => {
     );
     return c.json({ error: '发送测试消息失败' }, 500);
   }
+});
+
+// ============ 第三方 Monitor 主题托管 ============
+
+async function getThirdPartyThemeSettings(database: AppDatabase) {
+  const current = await db.getSetting(database, THIRD_PARTY_THEME_SETTING_KEY);
+  if (current !== null && current !== undefined) return parseThirdPartyThemeSettings(current);
+  return parseThirdPartyThemeSettings(await db.getSetting(database, LEGACY_CFSM_THEME_SETTING_KEY), true);
+}
+
+adminRoutes.get('/third-party-theme', async (c) => {
+  const database = getDatabase(c.env);
+  const settings = await getThirdPartyThemeSettings(database);
+  const theme = settings.theme_url ? parseThemeUrl(settings.theme_url) : null;
+  // 上游取不到 index.html 时首页会静默回落到内置主题，这里主动探活让后台能看出地址填错了。
+  const probe = settings.enabled && settings.theme_url ? await probeTheme(settings.theme_url) : null;
+  return c.json({
+    enabled: settings.enabled,
+    theme_url: settings.theme_url,
+    raw_base: theme?.rawBase || '',
+    is_commit: theme?.isCommit || false,
+    probe,
+  });
+});
+
+adminRoutes.post('/third-party-theme', async (c) => {
+  const parsed = await readAdminJsonObject(c);
+  if (!parsed.ok) return parsed.response;
+
+  const enabled = parsed.body.enabled === true;
+  const themeUrl = normalizeThemeUrl(parsed.body.theme_url);
+  if (enabled && !themeUrl) {
+    return c.json({ error: '主题地址必须是 GitHub 仓库，例如 https://github.com/owner/repo' }, 400);
+  }
+
+  const database = getDatabase(c.env);
+  const settings = { enabled, theme_url: themeUrl };
+  await db.setSetting(database, THIRD_PARTY_THEME_SETTING_KEY, serializeThirdPartyThemeSettings(settings));
+  invalidateThirdPartyThemeCache();
+  await db.insertAuditLog(
+    database,
+    c.get('username')!,
+    'third_party_theme_update',
+    `${enabled ? '启用' : '停用'} Monitor 第三方主题: ${themeUrl || '(未设置)'}`,
+  );
+
+  const theme = themeUrl ? parseThemeUrl(themeUrl) : null;
+  // 保存后立刻探活：地址写错（例如把分支名当成目录）时能马上提示，而不是等访客发现首页没变。
+  const probe = enabled && themeUrl ? await probeTheme(themeUrl) : null;
+  return c.json({
+    success: true,
+    ...settings,
+    raw_base: theme?.rawBase || '',
+    is_commit: theme?.isCommit || false,
+    probe,
+  });
+});
+
+adminRoutes.post('/third-party-theme/refresh', async (c) => {
+  const database = getDatabase(c.env);
+  const settings = await getThirdPartyThemeSettings(database);
+  invalidateThirdPartyThemeCache();
+
+  const theme = settings.theme_url ? parseThemeUrl(settings.theme_url) : null;
+  if (theme) {
+    try {
+      await caches.default.delete(new Request(`${theme.cacheBase}/index.html`));
+      if (theme.repository) {
+        await caches.default.delete(new Request(`https://third-party-theme-cache.local/archive/${theme.owner}/${theme.repo}`));
+      }
+    } catch {
+      // Cache API 不可用时只清内存缓存。
+    }
+  }
+  const probe = settings.theme_url ? await probeTheme(settings.theme_url) : null;
+  return c.json({ success: true, probe });
 });
 
 export { adminRoutes };

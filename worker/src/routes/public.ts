@@ -127,6 +127,20 @@ function setServerTiming(c: PublicContext, metrics: TimingMetric[]): void {
   c.header('Server-Timing', metrics.map(metric => `${metric.name};dur=${metric.dur.toFixed(1)}`).join(', '));
 }
 
+/**
+ * 给裸 Response 写 `Server-Timing`。
+ *
+ * `/api/live` 直接返回 DO 响应或边缘缓存响应，不是 `c.json()` 构造的，`c.header()`
+ * 只写进 preparedHeaders、不会出现在返回值上，只能写在 Response 自己的 headers 里。
+ */
+function setResponseServerTiming(response: Response, segments: string[]): void {
+  try {
+    response.headers.set('Server-Timing', segments.join(', '));
+  } catch {
+    // headers 不可变时放弃观测，不影响响应
+  }
+}
+
 function adminSessionEdgeCacheRequest(userId: string, sessionVersion: number): Request {
   return new Request(
     `https://cf-monitor.internal/cache/admin-session/${encodeURIComponent(userId)}/${sessionVersion}`,
@@ -1799,19 +1813,37 @@ publicRoutes.get('/legacy/nodes', async (c) => {
 
 // 实时数据 - 代理到 Durable Object
 publicRoutes.get('/live', async (c) => {
+  const startedAt = performance.now();
+  const rateLimitStarted = performance.now();
   const limited = await guardPublicLive(c);
   if (limited) return limited;
+  const rateLimitMs = performance.now() - rateLimitStarted;
   const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
   const cached = includeHidden ? null : await getPublicEdgeCache(c, PUBLIC_LIVE_CACHE_SECONDS);
-  if (cached) return cached;
+  if (cached) {
+    setResponseServerTiming(cached, [
+      `rate-limit;dur=${rateLimitMs.toFixed(1)}`,
+      'edge-cache;desc="hit";dur=0',
+      `total;dur=${(performance.now() - startedAt).toFixed(1)}`,
+    ]);
+    return cached;
+  }
 
   const stub = liveDataStub(c.env.LIVE_DATA);
   const doUrl = new URL(c.req.url);
   if (includeHidden) doUrl.searchParams.set('include_hidden', '1');
   else doUrl.searchParams.delete('include_hidden');
+  const liveStarted = performance.now();
   const response = includeHidden
     ? privateJsonResponse(await (await stub.fetch(new Request(doUrl.toString(), c.req.raw))).json())
     : withPublicCacheHeader(c, await stub.fetch(new Request(doUrl.toString(), c.req.raw)), PUBLIC_LIVE_CACHE_SECONDS, 'miss');
+  const liveMs = performance.now() - liveStarted;
+  setResponseServerTiming(response, [
+    `rate-limit;dur=${rateLimitMs.toFixed(1)}`,
+    `live;dur=${liveMs.toFixed(1)}`,
+    'edge-cache;desc="miss";dur=0',
+    `total;dur=${(performance.now() - startedAt).toFixed(1)}`,
+  ]);
   if (!includeHidden) putPublicEdgeCache(c, response);
   return response;
 });

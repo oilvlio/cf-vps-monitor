@@ -15,6 +15,7 @@ import { hasAdminSession, getPublicClientsSnapshot, invalidatePublicMetadataCach
 import { pushMonitorMetaToDo } from './monitor-compat';
 import { monitorNodeStatic } from '../utils/monitor-contract';
 import { liveDataStub } from '../utils/live-data-object';
+import { rateLimitStub } from '../utils/rate-limit-object';
 
 const wsRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 type WsContext = Context<{ Bindings: Bindings; Variables: Variables }>;
@@ -197,8 +198,7 @@ async function enforceWsRateLimit(
   try {
     const namespace = c.env.RATE_LIMIT;
     if (!namespace) return localWsRateLimit(c, bucket, ip, max, windowMs, error, noStore);
-    const doId = namespace.idFromName(doName);
-    const stub = namespace.get(doId);
+    const stub = rateLimitStub(namespace, doName);
     const response = await stub.fetch(new Request('https://do/rate-limit', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -440,15 +440,24 @@ wsRoutes.get('/ws/live', async (c) => {
 });
 
 wsRoutes.get('/live/clients', async (c) => {
+  const startedAt = performance.now();
   const limited = await enforceLiveClientsRateLimit(c, requestIp(c));
+  const rateLimitMs = performance.now() - startedAt;
   if (limited) return limited;
   const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
 
   const stub = liveDataStub(c.env.LIVE_DATA);
 
+  const liveStarted = performance.now();
   const response = await stub.fetch(new Request(`https://do/live${includeHidden ? '?include_hidden=1' : ''}`, { method: 'GET' }));
   const snapshot = await readLiveSnapshot(response) ?? { online: [], count: 0 };
+  const liveMs = performance.now() - liveStarted;
   c.header('Cache-Control', includeHidden ? 'no-store' : `public, max-age=${LIVE_CLIENTS_CACHE_SECONDS}, s-maxage=${LIVE_CLIENTS_CACHE_SECONDS}, stale-while-revalidate=${LIVE_CLIENTS_CACHE_SECONDS * 2}`);
+  c.header('Server-Timing', [
+    `rate-limit;dur=${rateLimitMs.toFixed(1)}`,
+    `live;dur=${liveMs.toFixed(1)}`,
+    `total;dur=${(performance.now() - startedAt).toFixed(1)}`,
+  ].join(', '));
   return c.json(snapshot);
 });
 

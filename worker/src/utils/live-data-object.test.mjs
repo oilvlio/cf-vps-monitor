@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createWorkerLoader } from '../../test-support/worker-module.mjs';
@@ -27,12 +27,9 @@ test('LIVE_DATA stub uses the v2 object name and an APAC location hint', () => {
   assert.equal(calls[0].options.locationHint, 'apac-se');
 });
 
-const FORBIDDEN_OBJECT_IDS = [
-  "idFromName('global')",
-  "idFromName('public-api')",
-  "idFromName('agent-ingress')",
-  "idFromName('admin-health')",
-];
+// 只允许这两个模块自己拼 id。其它文件一律走 liveDataStub / rateLimitStub，
+// 否则新加的对象会悄悄留在旧位置（美区），又变成一次跨洲往返。
+const ID_FACTORY_ALLOWED = new Set(['utils/live-data-object.ts', 'utils/rate-limit-object.ts']);
 
 test('no source file bypasses the shared LIVE_DATA / RATE_LIMIT object ids', () => {
   const srcRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -42,10 +39,9 @@ test('no source file bypasses the shared LIVE_DATA / RATE_LIMIT object ids', () 
       const full = join(dir, entry.name);
       if (entry.isDirectory()) walk(full);
       else if (entry.name.endsWith('.ts')) {
-        const source = readFileSync(full, 'utf8');
-        for (const pattern of FORBIDDEN_OBJECT_IDS) {
-          if (source.includes(pattern)) offenders.push(`${full}: ${pattern}`);
-        }
+        const relativePath = relative(srcRoot, full).replaceAll('\\', '/');
+        if (ID_FACTORY_ALLOWED.has(relativePath)) continue;
+        if (readFileSync(full, 'utf8').includes('idFromName(')) offenders.push(relativePath);
       }
     }
   };

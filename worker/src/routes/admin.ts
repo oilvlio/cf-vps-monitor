@@ -38,6 +38,8 @@ import { WEBHOOK_MESSAGE_MAX_CHARS } from '../utils/webhook';
 import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { readJsonWithLimit, readRequestBytesWithLimit } from '../utils/request-body';
+import { liveDataId, liveDataStub as liveDataObjectStub, legacyLiveDataId } from '../utils/live-data-object';
+import { RATE_LIMIT_OBJECT_NAMES, rateLimitStub } from '../utils/rate-limit-object';
 import { bytesToBase64 } from '../utils/theme-package';
 import {
   auditLoginFailure,
@@ -416,7 +418,7 @@ function hideAdminClientToken(client: db.Client): Omit<db.Client, 'token' | 'tok
 }
 
 function liveDataStub(c: AdminContext) {
-  return c.env.LIVE_DATA.get(c.env.LIVE_DATA.idFromName('global'));
+  return liveDataObjectStub(c.env.LIVE_DATA);
 }
 
 async function readAdminClientsSnapshot(c: AdminContext): Promise<AdminClientsSnapshot | null> {
@@ -562,8 +564,7 @@ async function getInstallToken(database: db.QueryDatabase, uuid: string): Promis
 
 async function refreshLivePingTasks(c: AdminContext): Promise<void> {
   try {
-    const doId = c.env.LIVE_DATA.idFromName('global');
-    const stub = c.env.LIVE_DATA.get(doId);
+    const stub = liveDataObjectStub(c.env.LIVE_DATA);
     await stub.fetch(new Request('https://do/ping-tasks-refresh', { method: 'POST' }));
   } catch {
     // The DO cache is short-lived; admin writes should not fail if refresh signalling is unavailable.
@@ -572,8 +573,7 @@ async function refreshLivePingTasks(c: AdminContext): Promise<void> {
 
 async function refreshLiveAgentPolicy(c: AdminContext): Promise<void> {
   try {
-    const doId = c.env.LIVE_DATA.idFromName('global');
-    const stub = c.env.LIVE_DATA.get(doId);
+    const stub = liveDataObjectStub(c.env.LIVE_DATA);
     await stub.fetch(new Request('https://do/policy-refresh', { method: 'POST' }));
   } catch {
     // Agent policy caches are short-lived; admin writes should not fail if refresh signalling is unavailable.
@@ -582,8 +582,7 @@ async function refreshLiveAgentPolicy(c: AdminContext): Promise<void> {
 
 async function broadcastLiveMetadataChanged(c: AdminContext, detail: Record<string, unknown>): Promise<void> {
   try {
-    const doId = c.env.LIVE_DATA.idFromName('global');
-    const stub = c.env.LIVE_DATA.get(doId);
+    const stub = liveDataObjectStub(c.env.LIVE_DATA);
     await stub.fetch(new Request('https://do/metadata-refresh', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -803,8 +802,7 @@ async function runAgentTokenHygieneProbe(database: AppDatabase, checkedAt: strin
 
 async function runDoProbe(c: AdminContext, checkedAt: string): Promise<HealthEvent> {
   try {
-    const doId = c.env.LIVE_DATA.idFromName('global');
-    const stub = c.env.LIVE_DATA.get(doId);
+    const stub = liveDataObjectStub(c.env.LIVE_DATA);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort('durable object fetch timed out'), 3_000);
     const response = await (async () => {
@@ -836,8 +834,7 @@ async function runRateLimitProbe(c: AdminContext, checkedAt: string): Promise<He
     return healthEvent('rate_limit_probe', 'error', 'RATE_LIMIT binding is missing; falling back to per-isolate limits', checkedAt);
   }
   try {
-    const doId = namespace.idFromName('admin-health');
-    const stub = namespace.get(doId);
+    const stub = rateLimitStub(namespace, RATE_LIMIT_OBJECT_NAMES.adminHealth);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort('rate limit durable object fetch timed out'), 3_000);
     const response = await (async () => {
@@ -2199,8 +2196,7 @@ adminRoutes.post('/settings', async (c) => {
       livePolicySettingsChanged ||
       recordPersistenceSettingsChanged
     ) {
-      const doId = c.env.LIVE_DATA.idFromName('global');
-      const stub = c.env.LIVE_DATA.get(doId);
+      const stub = liveDataObjectStub(c.env.LIVE_DATA);
       if (livePolicySettingsChanged) {
         invalidateLiveViewerSettingsCache();
         background.push(stub.fetch(new Request('https://do/policy-refresh', { method: 'POST' })));
@@ -2785,6 +2781,58 @@ adminRoutes.get('/health', async (c) => {
     };
   }
   return c.json(result.body, result.status);
+});
+
+adminRoutes.get('/do-location', async (c) => {
+  const id = liveDataId(c.env.LIVE_DATA);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort('do location probe timed out'), 5_000);
+  try {
+    const response = await liveDataObjectStub(c.env.LIVE_DATA).fetch(new Request('https://do/diagnostics/location', {
+      method: 'GET',
+      signal: controller.signal,
+    }));
+    const body = await response.json().catch(() => null) as Record<string, unknown> | null;
+    return c.json({
+      status: response.status,
+      durableObjectId: id.toString(),
+      ...(body && typeof body === 'object' ? body : {}),
+    }, 200, { 'Cache-Control': 'private, no-store' });
+  } catch (error) {
+    return c.json({
+      error: 'DO location probe failed',
+      detail: errorDetail(error),
+      durableObjectId: id.toString(),
+    }, 502, { 'Cache-Control': 'private, no-store' });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+});
+
+adminRoutes.get('/do-retire-legacy', async (c) => {
+  const legacyId = legacyLiveDataId(c.env.LIVE_DATA);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort('legacy DO retire timed out'), 5_000);
+  try {
+    const response = await c.env.LIVE_DATA.get(legacyId).fetch(new Request('https://do/retire', {
+      method: 'POST',
+      signal: controller.signal,
+    }));
+    const body = await response.json().catch(() => null) as Record<string, unknown> | null;
+    return c.json({
+      status: response.status,
+      legacyObjectId: legacyId.toString(),
+      ...(body && typeof body === 'object' ? body : {}),
+    }, 200, { 'Cache-Control': 'private, no-store' });
+  } catch (error) {
+    return c.json({
+      error: 'Legacy DO retire failed',
+      detail: errorDetail(error),
+      legacyObjectId: legacyId.toString(),
+    }, 502, { 'Cache-Control': 'private, no-store' });
+  } finally {
+    clearTimeout(timeoutId);
+  }
 });
 
 adminRoutes.get('/capacity', async (c) => {

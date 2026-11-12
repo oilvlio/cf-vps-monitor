@@ -14,8 +14,13 @@ const CLIENT = {
   traffic_limit: 1024 * GIB, traffic_limit_type: 'sum', traffic_reset_day: 1,
 };
 
-function fixture({ admin = false } = {}) {
+function fixture({ admin = false, snapshot, totals } = {}) {
   const doCalls = [];
+  const snapshotValue = snapshot ?? {
+    clients: [CLIENT],
+    nodes: [],
+    publicClientIds: new Set([CLIENT.uuid]),
+  };
   const env = {
     LIVE_DATA: {
       idFromName: name => name,
@@ -35,17 +40,13 @@ function fixture({ admin = false } = {}) {
   };
   const loader = createWorkerLoader({
     db: {
-      getTrafficTotals: async (_database, clients) => Object.fromEntries(
+      getTrafficTotals: async (_database, clients) => totals ?? Object.fromEntries(
         clients.map(uuid => [uuid, { day_rx: 100, day_tx: 50, total_rx: 1e12, total_tx: 5e11 }]),
       ),
     },
     overrides: {
       'worker/src/routes/public.ts': {
-        getPublicClientsSnapshot: async () => ({
-          clients: [CLIENT],
-          nodes: [],
-          publicClientIds: new Set([CLIENT.uuid]),
-        }),
+        getPublicClientsSnapshot: async () => snapshotValue,
         hasAdminSession: async () => admin,
         invalidatePublicMetadataCache: () => {},
       },
@@ -123,6 +124,27 @@ test('升级时先推静态投影给 DO，再按 role=monitor 转发', async () 
   assert.equal(forward.params.gzip, undefined);
   // 管理员建连时 admin=1 跟着连接走。
   assert.equal(forward.params.admin, '1');
+});
+
+test('静态投影未变化时跳过第二次 DO 写入', async () => {
+  const totals = {
+    [CLIENT.uuid]: { day_rx: 100, day_tx: 50, total_rx: 1e12, total_tx: 5e11 },
+  };
+  const { wsRoutes, env, doCalls } = fixture({ totals });
+  await call(wsRoutes, env, '/ws', UPGRADE);
+  assert.equal(doCalls.filter(item => item.path === '/monitor-meta').length, 1);
+
+  await call(wsRoutes, env, '/ws', UPGRADE);
+  assert.equal(
+    doCalls.filter(item => item.path === '/monitor-meta').length,
+    1,
+    '快照和流量引用都没变时不应重复推送静态投影',
+  );
+  assert.equal(
+    doCalls.filter(item => item.path === '/').length,
+    2,
+    '两次建连都要正常转发升级请求',
+  );
 });
 
 test('访客建连不带 admin 参数', async () => {

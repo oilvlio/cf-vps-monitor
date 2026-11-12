@@ -31,6 +31,7 @@ import { currentScheduledBudget, rotateScheduledItems, scheduledItems, Scheduled
 import { clearScheduledDatabaseStartupFailure, recordScheduledDatabaseStartupFailure } from './utils/scheduled-observability';
 import { sanitizeSetupDiagnosticDetail } from './utils/setup-diagnostics';
 import { getCloudflareClientIp } from './utils/request-ip';
+import { liveDataStub } from './utils/live-data-object';
 import {
   buildExpiryNotification,
   buildLoadNotification,
@@ -623,7 +624,7 @@ async function fetchOfflineLiveness(
 ): Promise<Record<string, { lastSeen: number | null; offline: boolean; streak: number }> | null> {
   if (items.length === 0) return {};
   try {
-    const stub = env.LIVE_DATA.get(env.LIVE_DATA.idFromName('global'));
+    const stub = liveDataStub(env.LIVE_DATA);
     const response = await stub.fetch('https://do/offline-evaluate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

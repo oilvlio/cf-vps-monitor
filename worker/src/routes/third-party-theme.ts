@@ -23,6 +23,7 @@ import {
   THIRD_PARTY_THEME_SETTING_KEY,
   fetchThemeFile,
   fetchPublishedThemeFile,
+  isImmutableThemeAsset,
   normalizeThemeAssetPath,
   parseThirdPartyThemeSettings,
   parseThemeUrl,
@@ -96,6 +97,17 @@ function themeAssetCacheSeconds(theme: ParsedTheme): number {
   return theme.isCommit ? THIRD_PARTY_THEME_COMMIT_ASSET_CACHE_SECONDS : THIRD_PARTY_THEME_BRANCH_ASSET_CACHE_SECONDS;
 }
 
+/**
+ * 带内容哈希的构建产物（`assets/index-CP_ec1xO.js`）可以长缓存；分支主题的
+ * 未哈希文件仍按短缓存，保证主题更新能及时生效。
+ */
+function themeAssetCachePolicy(theme: ParsedTheme, relativePath: string): { seconds: number; immutable: boolean } {
+  if (isImmutableThemeAsset(relativePath)) {
+    return { seconds: THIRD_PARTY_THEME_COMMIT_ASSET_CACHE_SECONDS, immutable: true };
+  }
+  return { seconds: themeAssetCacheSeconds(theme), immutable: false };
+}
+
 /** 按主题上游取一个静态文件；上游 404 时回 null，由调用方决定回落还是透传。 */
 async function themeAssetResponse(
   active: ActiveTheme,
@@ -106,25 +118,29 @@ async function themeAssetResponse(
 
   const { theme } = active;
   const contentType = themeContentType(normalized);
+  const cachePolicy = themeAssetCachePolicy(theme, normalized);
   if (theme.repository) {
     return fetchPublishedThemeFile(
       theme,
       normalized,
       contentType,
-      themeAssetCacheSeconds(theme),
+      cachePolicy.seconds,
       contentType.startsWith('text/css') || contentType.startsWith('application/javascript')
         ? rewriteThemeAssetPaths
         : undefined,
+      cachePolicy.immutable,
     );
   }
   const response = await fetchThemeFile(
     `${theme.rawBase}/${normalized}`,
     `${theme.cacheBase}/${normalized}`,
     contentType,
-    themeAssetCacheSeconds(theme),
+    cachePolicy.seconds,
     contentType.startsWith('text/css') || contentType.startsWith('application/javascript')
       ? rewriteThemeAssetPaths
       : undefined,
+    '1',
+    cachePolicy.immutable,
   );
   return response.status === 404 ? null : response;
 }

@@ -83,21 +83,29 @@ const totalsByClient = {
 const recordCalls = [];
 let adminAllowed = false;
 let pingRecordTaskIds = [];
+let pingTaskCalls = 0;
+let settingsCalls = 0;
 const monitorThemeConfigs = new Map();
 
 const loader = createWorkerLoader({
   db: {
-    listPingTasks: async () => [
+    listPingTasks: async () => {
+      pingTaskCalls += 1;
+      return [
       { id: 1, name: '电信', clients: ['node-1'], all_clients: false, sort_order: 2, type: 'icmp', target: '1.1.1.1', interval_sec: 60 },
       { id: 2, name: '移动', clients: ['node-2'], all_clients: false, sort_order: 3, type: 'icmp', target: '2.2.2.2', interval_sec: 60 },
       { id: 3, name: '联通', clients: ['node-1'], all_clients: false, sort_order: 1, type: 'icmp', target: '3.3.3.3', interval_sec: 60 },
       { id: 4, name: '未分配', clients: [], all_clients: false, sort_order: 0, type: 'icmp', target: '4.4.4.4', interval_sec: 60 },
-    ],
+      ];
+    },
     listClients: async () => clients,
     getTheme: async (_database, short) => (short === 'hex' ? { config_json: '{"accent":"#fff"}' } : null),
     getSetting: async (_database, key) => monitorThemeConfigs.get(key) ?? null,
     setSetting: async (_database, key, value) => monitorThemeConfigs.set(key, value),
-    getSettingsByKeys: async () => ({ record_persist_interval_sec: '120' }),
+    getSettingsByKeys: async () => {
+      settingsCalls += 1;
+      return { record_persist_interval_sec: '120' };
+    },
     getTrafficTotals: async (_database, clients) => Object.fromEntries(
       clients.map(uuid => [uuid, totalsByClient[uuid] ?? { day_rx: 0, day_tx: 0, total_rx: 0, total_tx: 0 }]),
     ),
@@ -127,7 +135,7 @@ const loader = createWorkerLoader({
   },
 });
 
-const { monitorCompatRoutes, clearMonitorHistoryCache } = loader.load('worker/src/routes/monitor-compat.ts');
+const { monitorCompatRoutes, clearMonitorHistoryCache, clearMonitorMetricsMetaCache, clearThemeConfigCache } = loader.load('worker/src/routes/monitor-compat.ts');
 const { monitorNumericId } = loader.load('worker/src/utils/monitor-contract.ts');
 // 契约里的 id 是整数（UUID 经 monitorNumericId 映射），路径与查找都用这个。
 const ID1 = monitorNumericId('node-1');
@@ -153,8 +161,8 @@ const get = path => monitorCompatRoutes.request(path, { method: 'GET' }, env);
 {
   const res = await get('/nodes');
   assert.equal(res.status, 200);
-  assert.match(res.headers.get('Cache-Control'), /max-age=2/);
-  assert.match(res.headers.get('Cache-Control'), /s-maxage=2/);
+  assert.match(res.headers.get('Cache-Control'), /max-age=4/);
+  assert.match(res.headers.get('Cache-Control'), /s-maxage=4/);
   const body = await res.json();
   assert.equal(body.admin, false);
   assert.equal(body.nodes.length, 2);
@@ -299,11 +307,22 @@ const get = path => monitorCompatRoutes.request(path, { method: 'GET' }, env);
       body: JSON.stringify(config),
     }, env);
     assert.equal(saved.status, 200);
-    assert.equal((await saved.json()).success, true);
+    const savedBody = await saved.json();
+    assert.equal(savedBody.success, true);
+    assert.deepEqual(savedBody.config, config, 'PUT 响应应直接带回新配置');
 
     const loaded = await get(path);
     assert.equal(loaded.headers.get('Cache-Control'), 'private, no-store');
     assert.deepEqual(await loaded.json(), config);
+
+    // 5 秒 isolate 缓存：直接改库后立即 GET 仍返回旧值，保存路径清缓存后才更新。
+    monitorThemeConfigs.set(
+      'monitor_theme_config:LuminaPlus',
+      JSON.stringify({ accent: '#000' }),
+    );
+    assert.deepEqual(await (await get(path)).json(), config, '5 秒内应复用 isolate 缓存');
+    clearThemeConfigCache('LuminaPlus');
+    assert.deepEqual(await (await get(path)).json(), { accent: '#000' });
   } finally {
     adminAllowed = false;
   }
@@ -360,6 +379,35 @@ const get = path => monitorCompatRoutes.request(path, { method: 'GET' }, env);
   assert.equal((await res.json()).admin, true);
   assert.match(res.headers.get('Cache-Control'), /private/);
   assert.doesNotMatch(res.headers.get('Cache-Control'), /public/);
+}
+
+// --- metrics 元数据缓存：任务列表/落库间隔 30 秒内只查一次 ---
+{
+  clearMonitorHistoryCache();
+  clearMonitorMetricsMetaCache();
+  pingTaskCalls = 0;
+  settingsCalls = 0;
+  recordCalls.length = 0;
+
+  const first = await get(`/nodes/${ID1}/metrics?hours=24&points=1440`);
+  assert.equal(first.status, 200);
+  assert.equal(pingTaskCalls, 1, '首次 metrics 应查一次 ping 任务');
+  assert.equal(settingsCalls, 1, '首次 metrics 应查一次落库间隔');
+  assert.match(first.headers.get('server-timing') || '', /meta;dur=[\d.]+;desc="database"/);
+  const recordsAfterFirst = recordCalls.length;
+
+  const second = await get(`/nodes/${ID1}/metrics?hours=24&points=1440`);
+  assert.equal(second.status, 200);
+  assert.match(second.headers.get('server-timing') || '', /history;desc="memory"/);
+  assert.equal(pingTaskCalls, 1, '历史缓存命中时不应再查任务列表');
+  assert.equal(settingsCalls, 1, '历史缓存命中时不应再查落库间隔');
+  assert.equal(recordCalls.length, recordsAfterFirst, '历史缓存命中时不应再查区间');
+
+  const third = await get(`/nodes/${ID1}/metrics?hours=6&points=1440`);
+  assert.equal(third.status, 200);
+  assert.match(third.headers.get('server-timing') || '', /meta;dur=[\d.]+;desc="cache"/);
+  assert.equal(pingTaskCalls, 1, '不同窗口仍应复用 30 秒元数据缓存');
+  assert.equal(settingsCalls, 1, '不同窗口仍应复用 30 秒元数据缓存');
 }
 
 console.log('monitor-compat route tests passed');

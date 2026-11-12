@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { LIVE_DATA_OBJECT_NAME } from '../src/utils/live-data-object.ts';
 import { request } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import { generateToken } from '../src/auth/jwt.ts';
@@ -94,7 +95,7 @@ test('AUD-06 native backup restoration synchronizes SQL, durable metadata and Ag
   await f.database.query("insert into clients(uuid,name,token_hash) values ('old-node','Old node',$1)", [oldHash]);
   await rpc(f.database, 'cfm_set_settings', { input_settings: { record_enabled: 'false' } });
   const namespace = await f.mf.getDurableObjectNamespace('LIVE_DATA');
-  const stub = namespace.get(namespace.idFromName('global'));
+  const stub = namespace.get(namespace.idFromName(LIVE_DATA_OBJECT_NAME));
   assert.equal((await stub.fetch('https://do/admin-clients-snapshot', { method: 'PUT', body: JSON.stringify({
     clients: [{ uuid: 'old-node', name: 'Old node', hidden: false }],
   }) })).status, 200);
@@ -159,7 +160,7 @@ test('AUD-06 native backup restoration synchronizes SQL, durable metadata and Ag
   assert.equal((await (await stub.fetch('https://do/admin-clients-snapshot')).json()).clients.length, 1000);
   await f.restart();
   const restartedNamespace = await f.mf.getDurableObjectNamespace('LIVE_DATA');
-  const restarted = restartedNamespace.get(restartedNamespace.idFromName('global'));
+  const restarted = restartedNamespace.get(restartedNamespace.idFromName(LIVE_DATA_OBJECT_NAME));
   const persisted = await (await restarted.fetch('https://do/admin-clients-snapshot')).json();
   assert.equal(persisted.clients.length, 1000);
   assert.equal(persisted.complete, true);

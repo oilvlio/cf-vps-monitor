@@ -10,6 +10,8 @@ import * as db from '../db/queries';
 import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
 import { getCloudflareClientIp } from '../utils/request-ip';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
+import { liveDataStub } from '../utils/live-data-object';
+import { RATE_LIMIT_OBJECT_NAMES, rateLimitStub } from '../utils/rate-limit-object';
 import { BUNDLED_SUPABASE_MIGRATIONS, type BundledMigration } from '../generated/supabase-migrations';
 
 type SetupCheckStatus = 'ok' | 'warning' | 'error' | 'pending' | 'disabled';
@@ -106,8 +108,7 @@ async function setupRateLimit(c: SetupContext, bucket: string, max: number, wind
   try {
     const namespace = c.env.RATE_LIMIT;
     if (!namespace) return localSetupRateLimit(c, ip, bucket, max, windowMs);
-    const doId = namespace.idFromName(bucket);
-    const stub = namespace.get(doId);
+    const stub = rateLimitStub(namespace, bucket);
     const response = await fetchDurableObjectWithTimeout(stub, new Request('https://do/rate-limit', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -167,8 +168,7 @@ function secretsCheck(env: Bindings): SetupCheck {
 
 async function durableObjectsCheck(env: Bindings): Promise<SetupCheck> {
   try {
-    const doId = env.LIVE_DATA.idFromName('global');
-    const stub = env.LIVE_DATA.get(doId);
+    const stub = liveDataStub(env.LIVE_DATA);
     const response = await fetchDurableObjectWithTimeout(stub, new Request('https://do/live', { method: 'GET' }));
     if (!response.ok) {
       return setupCheck('durable_objects', 'error', `LIVE_DATA returned HTTP ${response.status}`);
@@ -189,8 +189,7 @@ async function rateLimitBindingCheck(env: Bindings): Promise<SetupCheck> {
     return setupCheck('rate_limit', 'error', 'RATE_LIMIT binding is missing; requests will use per-isolate fallback limits');
   }
   try {
-    const doId = namespace.idFromName('setup-diagnostics');
-    const stub = namespace.get(doId);
+    const stub = rateLimitStub(namespace, RATE_LIMIT_OBJECT_NAMES.setupDiagnostics);
     const response = await fetchDurableObjectWithTimeout(stub, new Request('https://do/rate-limit', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

@@ -40,18 +40,6 @@ export function rewriteThemeAssetPaths(text: string): string {
       `$1${THIRD_PARTY_THEME_PREFIX}$2`,
     );
 
-  // LuminaPlus' home store polls node metadata every 30s even though its
-  // Monitor adapter already maintains a live WebSocket cache. Shorten only
-  // the uniquely fingerprinted store bundle's metadata refresh to 5s. This
-  // keeps the UI responsive without changing arbitrary third-party bundles.
-  if (rewritten.includes('Ao().catch(()=>{})')
-    && rewritten.includes('failureStreak:0,hydrated:!1,nodeInfoError:!1')) {
-    rewritten = rewritten.replace(
-      'var Sa=2e3,Ca=3e4,wa=8e3,Ta=160',
-      'var Sa=2e3,Ca=5e3,wa=8e3,Ta=160',
-    );
-  }
-
   // Vite/Rolldown's module-preload helper turns dependency names such as
   // "assets/charts-....css" into "/assets/charts-....css" at runtime. That
   // string is assembled from a slash prefix, so the literal-path replacements
@@ -176,6 +164,17 @@ export function themeContentType(path: string): string {
   return 'application/octet-stream';
 }
 
+/**
+ * Vite/Rolldown 的构建产物在文件名里带内容哈希（`index-CP_ec1xO.js`），内容变了
+ * 文件名就会变，可以放心长缓存；手写主题的 `/style.css`、`/assets/index.js` 之类
+ * 没有哈希，必须继续用短缓存，否则改完主题要等很久才能生效。
+ */
+export function isImmutableThemeAsset(path: string): boolean {
+  if (!path.startsWith('assets/')) return false;
+  const base = path.slice(path.lastIndexOf('/') + 1);
+  return /-[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+$/.test(base);
+}
+
 /** Normalize a hosted theme asset path; reject traversal, backslashes and long paths. */
 export function normalizeThemeAssetPath(path: string): string {
   const raw = String(path || '').replace(/^\/+/, '');
@@ -203,6 +202,7 @@ export async function fetchThemeFile(
   transform?: (text: string) => string,
   /** 同一份文件按格式改写时会产出不同字节，缓存键要分开。 */
   cacheVariant = '1',
+  immutable = false,
 ): Promise<Response> {
   // 改写后的内容单独占一个缓存键，避免与历史缓存的正文字节混淆。
   const cacheKey = new Request(transform ? `${cacheUrl}?rewritten=${cacheVariant}` : cacheUrl, { method: 'GET' });
@@ -264,7 +264,7 @@ export async function fetchThemeFile(
 
   const headers = new Headers({
     'Content-Type': contentType,
-    'Cache-Control': `public, max-age=${cacheSeconds}`,
+    'Cache-Control': `public, max-age=${cacheSeconds}${immutable ? ', immutable' : ''}`,
     'X-Content-Type-Options': 'nosniff',
   });
   const etag = upstream.headers.get('ETag');
@@ -277,50 +277,22 @@ export async function fetchThemeFile(
   return response;
 }
 
-/** Read a published Monitor theme bundle from a repository URL, matching the hub's
- * install contract: latest GitHub release asset `theme.tar.gz`, with site files
- * under `dist/`. The archive and extracted responses are cached independently. */
-export async function fetchPublishedThemeFile(
-  theme: ParsedTheme,
-  relativePath: string,
-  contentType: string,
-  cacheSeconds: number,
-  transform?: (text: string) => string,
-): Promise<Response> {
-  const cache = typeof caches !== 'undefined' ? caches.default : null;
-  const key = new Request(`https://third-party-theme-cache.local/repo/${theme.owner}/${theme.repo}/${relativePath}${transform ? '?rewritten=2' : ''}`);
-  const cachedFile = await cache?.match(key).catch(() => undefined);
-  if (cachedFile) return cachedFile;
+/** 解压后的归档索引：同一 isolate 内复用，避免每个静态文件都 gunzip + 全量扫描 tar。 */
+type ThemeArchiveIndex = {
+  bytes: Uint8Array;
+  files: Map<string, { offset: number; size: number }>;
+};
 
-  const archiveKey = new Request(`https://third-party-theme-cache.local/archive/${theme.owner}/${theme.repo}`);
-  let archive = await cache?.match(archiveKey).catch(() => undefined);
-  if (!archive) {
-    let upstream: Response;
-    try {
-      upstream = await fetch(`https://github.com/${theme.owner}/${theme.repo}/releases/latest/download/theme.tar.gz`, {
-        headers: { 'User-Agent': 'cf-vps-monitor-monitor-theme' },
-        signal: AbortSignal.timeout(THEME_FETCH_TIMEOUT_MS),
-      });
-    } catch {
-      return new Response('Theme release unavailable', { status: 502 });
-    }
-    if (!upstream.ok) return new Response('Theme release unavailable', { status: upstream.status });
-    const bytes = await upstream.arrayBuffer();
-    if (bytes.byteLength > 16 * 1024 * 1024) return new Response('Theme archive too large', { status: 413 });
-    archive = new Response(bytes, { headers: { 'Cache-Control': `public, max-age=${cacheSeconds}` } });
-    await cache?.put(archiveKey, archive.clone()).catch(() => undefined);
-  }
+/** 内存索引只保留很短的时间，避免与 `releases/latest` 的更新窗口脱节。 */
+const ARCHIVE_INDEX_TTL_MS = 60_000;
+/** 单个归档解压后的内存上限；超过就退回逐文件解压，保护 isolate 内存。 */
+const ARCHIVE_INDEX_MAX_BYTES = 8 * 1024 * 1024;
+const ARCHIVE_INDEX_MAX_ENTRIES = 2;
+const archiveIndexCache = new Map<string, { expiresAt: number; index: ThemeArchiveIndex }>();
 
-  let bytes: Uint8Array;
-  try {
-    bytes = gunzipSync(new Uint8Array(await archive.arrayBuffer()));
-  } catch {
-    return new Response('Theme archive is invalid', { status: 502 });
-  }
-  if (bytes.byteLength > 32 * 1024 * 1024) return new Response('Theme archive too large', { status: 413 });
-
+function parseThemeArchive(bytes: Uint8Array): ThemeArchiveIndex {
+  const files = new Map<string, { offset: number; size: number }>();
   let offset = 0;
-  let result: Uint8Array | null = null;
   while (offset + 512 <= bytes.length) {
     const header = bytes.subarray(offset, offset + 512);
     if (header.every(byte => byte === 0)) break;
@@ -332,23 +304,99 @@ export async function fetchPublishedThemeFile(
     const size = Number.parseInt(sizeText || '0', 8);
     if (!Number.isFinite(size) || size < 0 || offset + 512 + size > bytes.length) break;
     const normalized = fullName.replace(/^\.\//, '').replace(/^dist\//, '');
-    if (normalized === relativePath && (header[156] === 0 || header[156] === 48)) {
-      result = bytes.slice(offset + 512, offset + 512 + size);
-      break;
+    if (normalized && (header[156] === 0 || header[156] === 48)) {
+      files.set(normalized, { offset: offset + 512, size });
     }
     offset += 512 + Math.ceil(size / 512) * 512;
   }
-  if (!result) return new Response('Theme file not found', { status: 404 });
-  if (result.byteLength > 4 * 1024 * 1024) return new Response('Theme file too large', { status: 413 });
-  let body: ArrayBuffer | string = result.buffer.slice(result.byteOffset, result.byteOffset + result.byteLength) as ArrayBuffer;
+  return { bytes, files };
+}
+
+function cachedArchiveIndex(key: string): ThemeArchiveIndex | null {
+  const hit = archiveIndexCache.get(key);
+  if (!hit) return null;
+  if (Date.now() > hit.expiresAt) {
+    archiveIndexCache.delete(key);
+    return null;
+  }
+  return hit.index;
+}
+
+function rememberArchiveIndex(key: string, index: ThemeArchiveIndex): void {
+  if (index.bytes.byteLength > ARCHIVE_INDEX_MAX_BYTES) return;
+  if (!archiveIndexCache.has(key) && archiveIndexCache.size >= ARCHIVE_INDEX_MAX_ENTRIES) {
+    const oldest = archiveIndexCache.keys().next().value;
+    if (oldest !== undefined) archiveIndexCache.delete(oldest);
+  }
+  archiveIndexCache.set(key, { expiresAt: Date.now() + ARCHIVE_INDEX_TTL_MS, index });
+}
+
+/** Read a published Monitor theme bundle from a repository URL, matching the hub's
+ * install contract: latest GitHub release asset `theme.tar.gz`, with site files
+ * under `dist/`. The archive and extracted responses are cached independently. */
+export async function fetchPublishedThemeFile(
+  theme: ParsedTheme,
+  relativePath: string,
+  contentType: string,
+  cacheSeconds: number,
+  transform?: (text: string) => string,
+  immutable = false,
+): Promise<Response> {
+  const cache = typeof caches !== 'undefined' ? caches.default : null;
+  const key = new Request(`https://third-party-theme-cache.local/repo/${theme.owner}/${theme.repo}/${relativePath}${transform ? '?rewritten=2' : ''}`);
+  const cachedFile = await cache?.match(key).catch(() => undefined);
+  if (cachedFile) return cachedFile;
+
+  const archiveIndexKey = `${theme.owner}/${theme.repo}@${theme.ref}`;
+  let index = cachedArchiveIndex(archiveIndexKey);
+  let decompressMs = 0;
+  if (!index) {
+    const archiveKey = new Request(`https://third-party-theme-cache.local/archive/${theme.owner}/${theme.repo}`);
+    let archive = await cache?.match(archiveKey).catch(() => undefined);
+    if (!archive) {
+      let upstream: Response;
+      try {
+        upstream = await fetch(`https://github.com/${theme.owner}/${theme.repo}/releases/latest/download/theme.tar.gz`, {
+          headers: { 'User-Agent': 'cf-vps-monitor-monitor-theme' },
+          signal: AbortSignal.timeout(THEME_FETCH_TIMEOUT_MS),
+        });
+      } catch {
+        return new Response('Theme release unavailable', { status: 502 });
+      }
+      if (!upstream.ok) return new Response('Theme release unavailable', { status: upstream.status });
+      const bytes = await upstream.arrayBuffer();
+      if (bytes.byteLength > 16 * 1024 * 1024) return new Response('Theme archive too large', { status: 413 });
+      archive = new Response(bytes, { headers: { 'Cache-Control': `public, max-age=${cacheSeconds}` } });
+      await cache?.put(archiveKey, archive.clone()).catch(() => undefined);
+    }
+
+    const startedAt = Date.now();
+    let bytes: Uint8Array;
+    try {
+      bytes = gunzipSync(new Uint8Array(await archive.arrayBuffer()));
+    } catch {
+      return new Response('Theme archive is invalid', { status: 502 });
+    }
+    if (bytes.byteLength > 32 * 1024 * 1024) return new Response('Theme archive too large', { status: 413 });
+    index = parseThemeArchive(bytes);
+    decompressMs = Date.now() - startedAt;
+    rememberArchiveIndex(archiveIndexKey, index);
+  }
+
+  const entry = index.files.get(relativePath);
+  if (!entry) return new Response('Theme file not found', { status: 404 });
+  if (entry.size > 4 * 1024 * 1024) return new Response('Theme file too large', { status: 413 });
+  const result = index.bytes.slice(entry.offset, entry.offset + entry.size);
+  let body: Uint8Array | string = result;
   if (transform && (contentType.startsWith('text/') || contentType.startsWith('application/javascript'))) {
     const text = new TextDecoder().decode(result);
     body = transform(text);
   }
   const response = new Response(body, { headers: {
     'Content-Type': contentType,
-    'Cache-Control': `public, max-age=${cacheSeconds}`,
+    'Cache-Control': `public, max-age=${cacheSeconds}${immutable ? ', immutable' : ''}`,
     'X-Content-Type-Options': 'nosniff',
+    'Server-Timing': `theme-archive;dur=${decompressMs};desc="${decompressMs > 0 ? 'decompress' : 'memory'}"`,
   } });
   await cache?.put(key, response.clone()).catch(() => undefined);
   return response;
@@ -412,6 +460,25 @@ function injectApiBase(html: string): string {
   return insertBeforeHeadClose(html, tag);
 }
 
+/**
+ * 首页的 `/api/nodes` 要等主题 JS 执行、并且 `/api/me`、主题配置都返回后才发起，
+ * 首屏会多等一个串行的 200–300ms。提前在 HTML 里 preload，让它和 JS 下载并行。
+ *
+ * 主题的 fetch 用 `credentials: 'include'`，所以这里必须用 `use-credentials`；
+ * 否则凭据模式不匹配，预加载的响应不会被复用（Network 面板会出现
+ * "preloaded but not used"），等于白打一次请求。
+ */
+function injectApiPreload(html: string): string {
+  if (/<link\b[^>]*rel\s*=\s*["']preload["'][^>]*\/api\/nodes/i.test(html)
+    || /<link\b[^>]*\/api\/nodes[^>]*rel\s*=\s*["']preload["']/i.test(html)) {
+    return html;
+  }
+  return insertBeforeHeadClose(
+    html,
+    '<link rel="preload" as="fetch" href="/api/nodes" crossorigin="use-credentials">',
+  );
+}
+
 function injectBackground(html: string, desktop: string, mobile: string): string {
   const desktopUrl = desktop.trim();
   const mobileUrl = mobile.trim();
@@ -445,6 +512,7 @@ export function transformThemeHtml(html: string, options: TransformThemeHtmlOpti
   output = injectTitle(output, options.siteTitle);
   output = injectFavicon(output, options.favicon);
   output = injectApiBase(output);
+  output = injectApiPreload(output);
   output = injectBackground(output, options.backgroundDesktop, options.backgroundMobile);
   return output;
 }

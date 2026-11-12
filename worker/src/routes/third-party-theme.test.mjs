@@ -18,6 +18,7 @@ const files = new Map([
   [`${RAW}/assets/index.js`, 'console.log("theme")'],
   [`${RAW}/assets/chunk.js`, 'const u=`modulepreload`,d=function(e){return`/`+e},f={},p=function(e,t,n){};import("/assets/charts-CnsZ1jie.css")'],
   [`${RAW}/assets/index.css`, 'body{background:url(/images/bg.png)}'],
+  [`${RAW}/assets/app-abcdefgh.js`, 'console.log("hashed")'],
   [`${RAW}/fonts/x.woff2`, 'font-bytes'],
   [`${RAW}/images/logo/os-x.svg`, '<svg></svg>'],
   [`${RAW}/style.css`, '.x{color:red}'],
@@ -112,6 +113,16 @@ setSettings({ enabled: true, theme_url: THEME_URL });
   assert.equal(res.status, 200);
   assert.match(res.headers.get('Content-Type') || '', /javascript/);
   assert.equal(await res.text(), 'console.log("theme")');
+  // 未哈希的文件仍按分支主题的短缓存，改完主题能及时生效。
+  assert.equal(res.headers.get('Cache-Control'), 'public, max-age=300');
+
+  const hashed = await get('/mt/assets/app-abcdefgh.js');
+  assert.equal(hashed.status, 200);
+  assert.equal(
+    hashed.headers.get('Cache-Control'),
+    'public, max-age=31536000, immutable',
+    '带内容哈希的构建产物可以长缓存',
+  );
 
   const chunk = await get('/mt/assets/chunk.js');
   assert.equal(chunk.status, 200);
@@ -159,6 +170,9 @@ setSettings({ enabled: true, theme_url: 'https://github.com/o/r' });
   const css = await get('/style.css');
   assert.equal(css.status, 200);
   assert.equal(await css.text(), 'body{color:red}');
+  assert.match(css.headers.get('Server-Timing') || '', /desc="memory"/, '第二个文件应复用解压后的归档索引');
+  const archiveFetches = fetched.filter(url => url === 'https://github.com/o/r/releases/latest/download/theme.tar.gz');
+  assert.equal(archiveFetches.length, 1, '同一归档只应下载并解压一次');
 }
 
 // --- 停用：首页回落内置 SPA，且不能被边缘缓存 ---

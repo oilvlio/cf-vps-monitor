@@ -8,6 +8,7 @@ const {
   serializeThirdPartyThemeSettings,
   rewriteThemeAssetPaths,
   transformThemeHtml,
+  isImmutableThemeAsset,
 } = createWorkerLoader().load('worker/src/utils/third-party-theme.ts');
 
 const options = {
@@ -69,9 +70,19 @@ const options = {
   const luminaStore = 'var Sa=2e3,Ca=3e4,wa=8e3,Ta=160;function Ao(){};'
     + 'var ao={failureStreak:0,hydrated:!1,nodeInfoError:!1};'
     + 'function run(){setInterval(()=>{Ao().catch(()=>{})},Ca)}';
-  assert.match(rewriteThemeAssetPaths(luminaStore), /Sa=2e3,Ca=5e3,wa=8e3,Ta=160/);
+  assert.match(rewriteThemeAssetPaths(luminaStore), /Sa=2e3,Ca=3e4,wa=8e3,Ta=160/);
   const unrelatedStore = 'var Sa=2e3,Ca=3e4,wa=8e3,Ta=160;function run(){Ao().catch(()=>{})}';
   assert.match(rewriteThemeAssetPaths(unrelatedStore), /Sa=2e3,Ca=3e4,wa=8e3,Ta=160/);
+}
+
+// --- 只有 assets/ 下的内容哈希产物才能长缓存 ---
+{
+  assert.equal(isImmutableThemeAsset('assets/index-CP_ec1xO.js'), true);
+  assert.equal(isImmutableThemeAsset('assets/inter-latin-wght-normal-Dx4kXJAl.woff2'), true);
+  assert.equal(isImmutableThemeAsset('assets/index.js'), false, '没有哈希的文件不能 immutable');
+  assert.equal(isImmutableThemeAsset('assets/chunk-ABC.js'), false, '哈希太短不认');
+  assert.equal(isImmutableThemeAsset('images/foo-abcdefgh.png'), false, '只有 assets/ 下的产物走长缓存');
+  assert.equal(isImmutableThemeAsset('style.css'), false);
 }
 
 // --- HTML 注入：Monitor 不注入 base / 桥接脚本 ---
@@ -81,6 +92,16 @@ const options = {
   assert.doesNotMatch(monitor, /<base /);
   assert.doesNotMatch(monitor, /bridge/);
   assert.match(monitor, /<title>站点名<\/title>/);
+  // 首屏 /api/nodes preload：主题 fetch 用 credentials: 'include'，凭据模式必须匹配。
+  assert.match(monitor, /<link rel="preload" as="fetch" href="\/api\/nodes" crossorigin="use-credentials">/);
+  assert.equal((monitor.match(/href="\/api\/nodes"/g) || []).length, 1, 'preload 不应重复注入');
+  // 已经有主题自己写的 preload 时保持原样。
+  const already = '<head><link rel="preload" as="fetch" href="/api/nodes"></head>';
+  assert.equal(
+    (transformThemeHtml(already, options).match(/preload/g) || []).length,
+    1,
+    '重复执行也不应叠加 preload',
+  );
 }
 
 console.log('third-party-theme utils tests passed');

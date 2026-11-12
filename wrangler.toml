@@ -19,6 +19,16 @@ mode = "smart"
 [triggers]
 crons = ["*/2 * * * *"]
 
+# 公开元数据读接口的限流不需要全局强一致：用 Rate Limiting 绑定按数据中心近似
+# 计数，省掉每次请求一次 RATE_LIMIT DO 往返（约 200ms）。历史/实时等接口仍走 DO。
+[[ratelimits]]
+name = "PUBLIC_METADATA_RATE_LIMITER"
+namespace_id = "4039121"
+
+  [ratelimits.simple]
+  limit = 120
+  period = 60
+
 [[durable_objects.bindings]]
 name = "LIVE_DATA"
 class_name = "LiveDataDO"

@@ -30,6 +30,8 @@ import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
 import { getCloudflareClientIp } from '../utils/request-ip';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { readJsonWithLimit } from '../utils/request-body';
+import { liveDataStub } from '../utils/live-data-object';
+import { RATE_LIMIT_OBJECT_NAMES, rateLimitStub } from '../utils/rate-limit-object';
 import { base64ToBytes } from '../utils/theme-package';
 import { historyBucketSec } from '../utils/history-bucket';
 import { buildMonitorMe } from '../utils/monitor-contract';
@@ -51,6 +53,11 @@ const PUBLIC_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const PUBLIC_METADATA_RATE_LIMIT_MAX = 120;
 const PUBLIC_HISTORY_RATE_LIMIT_MAX = 60;
 const PUBLIC_LIVE_RATE_LIMIT_MAX = 180;
+
+/** `[[ratelimits]]` 绑定；旧部署/测试没有这个绑定时退回 RATE_LIMIT DO。 */
+type MetadataRateLimiter = {
+  limit(options: { key: string }): Promise<{ success: boolean }>;
+};
 const PUBLIC_ADMIN_RECOVERY_RATE_LIMIT_MAX = 5;
 const PUBLIC_METADATA_CACHE_SECONDS = 30;
 const PUBLIC_HISTORY_CACHE_SECONDS = 10;
@@ -118,6 +125,20 @@ async function timed<T>(metrics: TimingMetric[], name: string, fn: () => Promise
 function setServerTiming(c: PublicContext, metrics: TimingMetric[]): void {
   if (metrics.length === 0) return;
   c.header('Server-Timing', metrics.map(metric => `${metric.name};dur=${metric.dur.toFixed(1)}`).join(', '));
+}
+
+/**
+ * 给裸 Response 写 `Server-Timing`。
+ *
+ * `/api/live` 直接返回 DO 响应或边缘缓存响应，不是 `c.json()` 构造的，`c.header()`
+ * 只写进 preparedHeaders、不会出现在返回值上，只能写在 Response 自己的 headers 里。
+ */
+function setResponseServerTiming(response: Response, segments: string[]): void {
+  try {
+    response.headers.set('Server-Timing', segments.join(', '));
+  } catch {
+    // headers 不可变时放弃观测，不影响响应
+  }
 }
 
 function adminSessionEdgeCacheRequest(userId: string, sessionVersion: number): Request {
@@ -523,8 +544,7 @@ export async function hasAdminSession(c: PublicContext): Promise<boolean> {
 }
 
 async function readAdminClientsSnapshotOverlay(c: PublicContext): Promise<AdminClientsSnapshotOverlay | null> {
-  const response = await c.env.LIVE_DATA
-    .get(c.env.LIVE_DATA.idFromName('global'))
+  const response = await liveDataStub(c.env.LIVE_DATA)
     .fetch(new Request('https://do/admin-clients-snapshot'));
   if (!response.ok) return null;
   const body = await response.json().catch(() => null);
@@ -690,8 +710,7 @@ async function publicApiRateLimit(c: PublicContext, bucket: string, maxRequests:
     if (!namespace) {
       return localPublicApiRateLimit(c, bucket, maxRequests);
     }
-    const doId = namespace.idFromName('public-api');
-    const stub = namespace.get(doId);
+    const stub = rateLimitStub(namespace, RATE_LIMIT_OBJECT_NAMES.publicApi);
     const response = await stub.fetch(new Request('https://do/rate-limit', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -718,8 +737,34 @@ async function publicApiRateLimit(c: PublicContext, bucket: string, maxRequests:
   }
 }
 
+/**
+ * 公开元数据读接口的限流。这类请求量大、可容忍跨机房近似计数，所以优先用
+ * Rate Limiting 绑定（本地计数，没有 DO 往返）；绑定未配置时保持原有强一致
+ * DO 行为，绑定调用异常时退回 isolate 本地计数。
+ */
+async function publicMetadataRateLimit(
+  c: PublicContext,
+  bucket: string,
+  maxRequests: number,
+): Promise<Response | null> {
+  const limiter = (c.env as unknown as { PUBLIC_METADATA_RATE_LIMITER?: MetadataRateLimiter })
+    .PUBLIC_METADATA_RATE_LIMITER;
+  if (limiter && typeof limiter.limit === 'function') {
+    try {
+      const result = await limiter.limit({ key: `${bucket}:${getClientIp(c)}` });
+      if (result.success) return null;
+      c.header('Retry-After', '60');
+      c.header('Cache-Control', 'no-store');
+      return c.json({ error: '公开 API 请求过于频繁，请 60 秒后再试' }, 429);
+    } catch {
+      return localPublicApiRateLimit(c, bucket, maxRequests);
+    }
+  }
+  return publicApiRateLimit(c, bucket, maxRequests);
+}
+
 export function guardPublicMetadata(c: PublicContext, bucket: string): Promise<Response | null> {
-  return publicApiRateLimit(c, `metadata:${bucket}`, PUBLIC_METADATA_RATE_LIMIT_MAX);
+  return publicMetadataRateLimit(c, `metadata:${bucket}`, PUBLIC_METADATA_RATE_LIMIT_MAX);
 }
 
 export function guardPublicHistory(c: PublicContext, bucket: string): Promise<Response | null> {
@@ -729,14 +774,15 @@ export function guardPublicHistory(c: PublicContext, bucket: string): Promise<Re
 /**
  * monitor 主题专用的历史限流桶。额度由调用方按节点数算（hex 的节点总览会按节点
  * 扇出 `series=ping` 请求，5s 一轮，沿用 60 次/分钟会误伤正常浏览），换算见
- * `monitorMetricsRateLimit()`。仍走同一个限流 DO，只是桶和额度不同。
+ * `monitorMetricsRateLimit()`。历史图表对跨机房强一致没有要求，这里和公开读接口
+ * 一样用 isolate 本地计数，避免每次 metrics 先付一次限流 DO 往返。
  */
-export function guardMonitorMetrics(
+export async function guardMonitorMetrics(
   c: PublicContext,
   bucket: string,
   maxRequests: number,
 ): Promise<Response | null> {
-  return publicApiRateLimit(c, `history:${bucket}`, maxRequests);
+  return localPublicApiRateLimit(c, `history:${bucket}`, maxRequests);
 }
 
 export function guardPublicLive(c: PublicContext): Promise<Response | null> {
@@ -1444,8 +1490,7 @@ publicRoutes.get('/public/bootstrap', async (c) => {
   const [settings, snapshot, live] = await Promise.all([
     getPublicSettings(getDatabase(c.env), fresh),
     getPublicClientsSnapshot(c, getDatabase(c.env), fresh, includeHidden),
-    c.env.LIVE_DATA
-      .get(c.env.LIVE_DATA.idFromName('global'))
+    liveDataStub(c.env.LIVE_DATA)
       .fetch(new Request(`https://do/live${includeHidden ? '?include_hidden=1' : ''}`, { method: 'GET' }))
       .then(response => readLiveSnapshot(response))
       .then(snapshot => snapshot ?? { online: [], count: 0 }),
@@ -1768,20 +1813,37 @@ publicRoutes.get('/legacy/nodes', async (c) => {
 
 // 实时数据 - 代理到 Durable Object
 publicRoutes.get('/live', async (c) => {
+  const startedAt = performance.now();
+  const rateLimitStarted = performance.now();
   const limited = await guardPublicLive(c);
   if (limited) return limited;
+  const rateLimitMs = performance.now() - rateLimitStarted;
   const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
   const cached = includeHidden ? null : await getPublicEdgeCache(c, PUBLIC_LIVE_CACHE_SECONDS);
-  if (cached) return cached;
+  if (cached) {
+    setResponseServerTiming(cached, [
+      `rate-limit;dur=${rateLimitMs.toFixed(1)}`,
+      'edge-cache;desc="hit";dur=0',
+      `total;dur=${(performance.now() - startedAt).toFixed(1)}`,
+    ]);
+    return cached;
+  }
 
-  const doId = c.env.LIVE_DATA.idFromName('global');
-  const stub = c.env.LIVE_DATA.get(doId);
+  const stub = liveDataStub(c.env.LIVE_DATA);
   const doUrl = new URL(c.req.url);
   if (includeHidden) doUrl.searchParams.set('include_hidden', '1');
   else doUrl.searchParams.delete('include_hidden');
+  const liveStarted = performance.now();
   const response = includeHidden
     ? privateJsonResponse(await (await stub.fetch(new Request(doUrl.toString(), c.req.raw))).json())
     : withPublicCacheHeader(c, await stub.fetch(new Request(doUrl.toString(), c.req.raw)), PUBLIC_LIVE_CACHE_SECONDS, 'miss');
+  const liveMs = performance.now() - liveStarted;
+  setResponseServerTiming(response, [
+    `rate-limit;dur=${rateLimitMs.toFixed(1)}`,
+    `live;dur=${liveMs.toFixed(1)}`,
+    'edge-cache;desc="miss";dur=0',
+    `total;dur=${(performance.now() - startedAt).toFixed(1)}`,
+  ]);
   if (!includeHidden) putPublicEdgeCache(c, response);
   return response;
 });

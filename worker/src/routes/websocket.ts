@@ -14,6 +14,8 @@ import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { hasAdminSession, getPublicClientsSnapshot, invalidatePublicMetadataCache } from './public';
 import { pushMonitorMetaToDo } from './monitor-compat';
 import { monitorNodeStatic } from '../utils/monitor-contract';
+import { liveDataStub } from '../utils/live-data-object';
+import { rateLimitStub } from '../utils/rate-limit-object';
 
 const wsRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 type WsContext = Context<{ Bindings: Bindings; Variables: Variables }>;
@@ -40,6 +42,16 @@ const LOCAL_WS_RATE_LIMIT_SWEEP_EVERY = 256;
 
 let localWsRateLimitSweepCounter = 0;
 const localWsRateLimitBuckets = new Map<string, { count: number; resetAt: number; lastSeenAt: number }>();
+
+/**
+ * 上一次成功推进 DO 的静态投影。快照与流量总量都带 isolate 缓存，命中时返回同一
+ * 个对象引用；两者都没变就说明 DO 里的投影也是最新的，可以直接跳过这次写入，
+ * 省掉 WS 建连路径上的一次 DO 往返（以及一次无意义的全量帧广播）。
+ */
+let lastMonitorMetaPush: {
+  snapshot: Awaited<ReturnType<typeof getPublicClientsSnapshot>>;
+  totals: Record<string, db.MonitorTrafficTotals>;
+} | null = null;
 
 export function invalidateLiveViewerSettingsCache(): void {
   // Kept for the settings save path; viewer tokens stay on the fast default.
@@ -108,7 +120,7 @@ async function syncAgentNetworkMetadata(c: WsContext, client: db.ClientIdentity,
   if (typeof patch.ipv6 === 'string') {
     safePatch.has_ipv6 = patch.ipv6.trim() !== '';
   }
-  const stub = c.env.LIVE_DATA.get(c.env.LIVE_DATA.idFromName('global'));
+  const stub = liveDataStub(c.env.LIVE_DATA);
   await stub.fetch(new Request('https://do/client-meta', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -186,8 +198,7 @@ async function enforceWsRateLimit(
   try {
     const namespace = c.env.RATE_LIMIT;
     if (!namespace) return localWsRateLimit(c, bucket, ip, max, windowMs, error, noStore);
-    const doId = namespace.idFromName(doName);
-    const stub = namespace.get(doId);
+    const stub = rateLimitStub(namespace, doName);
     const response = await stub.fetch(new Request('https://do/rate-limit', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -238,9 +249,9 @@ async function enforceLiveClientsRateLimit(c: WsContext, ip: string): Promise<Re
 }
 
 async function enforceMonitorWsRateLimit(c: WsContext, ip: string): Promise<Response | null> {
-  return enforceWsRateLimit(
+  // 建连限流不要求跨机房强一致：本地计数即可省掉一次限流 DO 往返。
+  return localWsRateLimit(
     c,
-    'monitor-ws',
     'monitor-ws',
     ip,
     MONITOR_WS_RATE_LIMIT_MAX,
@@ -297,8 +308,7 @@ wsRoutes.get('/clients/report', async (c) => {
     return c.json({ error: 'Invalid WebSocket Origin' }, 403);
   }
 
-  const doId = c.env.LIVE_DATA.idFromName('global');
-  const stub = c.env.LIVE_DATA.get(doId);
+  const stub = liveDataStub(c.env.LIVE_DATA);
 
   const url = new URL(c.req.url);
   url.pathname = '/';
@@ -338,14 +348,21 @@ wsRoutes.get('/ws', async (c) => {
   ]);
 
   // 建连时把静态投影推进 DO，保证首帧就是当前数据；之后只在 /api/nodes 被访问时
-  // 节流刷新（节点增删），运行期每帧都不再查库。
+  // 节流刷新（节点增删），运行期每帧都不再查库。快照和流量都命中缓存时投影没有
+  // 变化，跳过这次 DO 写入。
   try {
     const totals = await db.getTrafficTotals(database, snapshot.clients.map(client => client.uuid))
       .catch(() => ({} as Record<string, db.MonitorTrafficTotals>));
-    await pushMonitorMetaToDo(
-      c,
-      snapshot.clients.map(client => monitorNodeStatic(client, totals[client.uuid])),
-    );
+    const unchanged = lastMonitorMetaPush !== null
+      && lastMonitorMetaPush.snapshot === snapshot
+      && lastMonitorMetaPush.totals === totals;
+    if (!unchanged) {
+      await pushMonitorMetaToDo(
+        c,
+        snapshot.clients.map(client => monitorNodeStatic(client, totals[client.uuid])),
+      );
+      lastMonitorMetaPush = { snapshot, totals };
+    }
   } catch {
     // DO 写失败不阻塞建连：旧缓存仍能出帧，下一次 /api/nodes 会刷新。
   }
@@ -359,7 +376,7 @@ wsRoutes.get('/ws', async (c) => {
   if (admin) url.searchParams.set('admin', '1');
   if (gzip) url.searchParams.set('gzip', '1');
 
-  const stub = c.env.LIVE_DATA.get(c.env.LIVE_DATA.idFromName('global'));
+  const stub = liveDataStub(c.env.LIVE_DATA);
   return stub.fetch(new Request(url.toString(), c.req.raw));
 });
 
@@ -383,8 +400,7 @@ wsRoutes.get('/ws/live-token', async (c) => {
 
 wsRoutes.get('/ws/live', async (c) => {
   if (!isWebSocketUpgrade(c)) {
-    const doId = c.env.LIVE_DATA.idFromName('global');
-    const stub = c.env.LIVE_DATA.get(doId);
+    const stub = liveDataStub(c.env.LIVE_DATA);
     const url = new URL(c.req.url);
     const includeHidden = url.searchParams.get('include_hidden') === '1' && await hasAdminSession(c);
     if (includeHidden) url.searchParams.set('include_hidden', '1');
@@ -408,8 +424,7 @@ wsRoutes.get('/ws/live', async (c) => {
     return c.json({ error: 'Invalid viewer token' }, 403);
   }
 
-  const doId = c.env.LIVE_DATA.idFromName('global');
-  const stub = c.env.LIVE_DATA.get(doId);
+  const stub = liveDataStub(c.env.LIVE_DATA);
   const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
 
   const url = new URL(c.req.url);
@@ -425,16 +440,24 @@ wsRoutes.get('/ws/live', async (c) => {
 });
 
 wsRoutes.get('/live/clients', async (c) => {
+  const startedAt = performance.now();
   const limited = await enforceLiveClientsRateLimit(c, requestIp(c));
+  const rateLimitMs = performance.now() - startedAt;
   if (limited) return limited;
   const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
 
-  const doId = c.env.LIVE_DATA.idFromName('global');
-  const stub = c.env.LIVE_DATA.get(doId);
+  const stub = liveDataStub(c.env.LIVE_DATA);
 
+  const liveStarted = performance.now();
   const response = await stub.fetch(new Request(`https://do/live${includeHidden ? '?include_hidden=1' : ''}`, { method: 'GET' }));
   const snapshot = await readLiveSnapshot(response) ?? { online: [], count: 0 };
+  const liveMs = performance.now() - liveStarted;
   c.header('Cache-Control', includeHidden ? 'no-store' : `public, max-age=${LIVE_CLIENTS_CACHE_SECONDS}, s-maxage=${LIVE_CLIENTS_CACHE_SECONDS}, stale-while-revalidate=${LIVE_CLIENTS_CACHE_SECONDS * 2}`);
+  c.header('Server-Timing', [
+    `rate-limit;dur=${rateLimitMs.toFixed(1)}`,
+    `live;dur=${liveMs.toFixed(1)}`,
+    `total;dur=${(performance.now() - startedAt).toFixed(1)}`,
+  ].join(', '));
   return c.json(snapshot);
 });
 

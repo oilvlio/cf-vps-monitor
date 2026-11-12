@@ -6,6 +6,7 @@ import * as dispatch from './utils/notification-dispatch.ts';
 import * as offline from './utils/offline-notification.ts';
 import * as templates from './utils/notification-templates.ts';
 import { buildAdminSettings } from './settings/schema.ts';
+import { liveDataStub } from './utils/live-data-object.ts';
 import { createTestDatabase, rpc } from '../../scripts/test-support/postgres.mjs';
 import { loadTypeScriptFunctions } from '../../scripts/test-support/typescript.mjs';
 
@@ -69,7 +70,7 @@ async function harness({ offlineCount = 0, webhookFails = false, loadRules = 0 }
   const functions = await loadTypeScriptFunctions(new URL('./index.ts', import.meta.url), null, {
     ...dispatch, ...offline, ...templates, ...budgets,
     ...(budgets.ScheduledBudget ? { ScheduledBudget: class extends budgets.ScheduledBudget { constructor() { super({ now: () => clock }); } } } : {}),
-    Date: ClockDate, db: queries, getDatabase: () => connection, buildAdminSettings,
+    Date: ClockDate, db: queries, getDatabase: () => connection, buildAdminSettings, liveDataStub,
     bestEffortRecordHealthEvent: health, errorDetail: error => String(error),
     SCHEDULED_CURSOR_KEY: 'maintenance_cron_cursors',
     SCHEDULED_SETTING_KEYS: [...dispatch.NOTIFICATION_DISPATCH_SETTING_KEYS, 'maintenance_cron_cursors', 'maintenance_last_cleanup_at', 'record_preserve_time', 'ping_record_preserve_time', 'audit_log_preserve_time', 'offline_confirm_rounds'],

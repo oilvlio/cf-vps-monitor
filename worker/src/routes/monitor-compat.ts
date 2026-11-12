@@ -25,6 +25,7 @@ import { readLiveSnapshot } from '../utils/do-response';
 import type { PublicClient } from '../utils/public-client';
 import type { MonitorTrafficTotals } from '../db/types';
 import { readJsonWithLimit } from '../utils/request-body';
+import { liveDataStub } from '../utils/live-data-object';
 import {
   buildMonitorMetricsRows,
   buildMonitorNode,
@@ -333,8 +334,7 @@ function recordOrNull(value: unknown): Record<string, unknown> | null {
 
 async function readLive(c: MonitorContext): Promise<LiveSnapshot> {
   try {
-    const response = await c.env.LIVE_DATA
-      .get(c.env.LIVE_DATA.idFromName('global'))
+    const response = await liveDataStub(c.env.LIVE_DATA)
       .fetch(new Request('https://do/live', { method: 'GET' }));
     return await readLiveSnapshot(response) ?? { online: [], count: 0 };
   } catch {
@@ -371,7 +371,7 @@ export async function pushMonitorMetaToDo(
   c: MonitorContext,
   nodes: MonitorNodeStatic[],
 ): Promise<void> {
-  const stub = c.env.LIVE_DATA.get(c.env.LIVE_DATA.idFromName('global'));
+  const stub = liveDataStub(c.env.LIVE_DATA);
   await stub.fetch(new Request('https://do/monitor-meta', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

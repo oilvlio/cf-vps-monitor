@@ -30,6 +30,7 @@ import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
 import { getCloudflareClientIp } from '../utils/request-ip';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { readJsonWithLimit } from '../utils/request-body';
+import { liveDataStub } from '../utils/live-data-object';
 import { base64ToBytes } from '../utils/theme-package';
 import { historyBucketSec } from '../utils/history-bucket';
 import { buildMonitorMe } from '../utils/monitor-contract';
@@ -528,8 +529,7 @@ export async function hasAdminSession(c: PublicContext): Promise<boolean> {
 }
 
 async function readAdminClientsSnapshotOverlay(c: PublicContext): Promise<AdminClientsSnapshotOverlay | null> {
-  const response = await c.env.LIVE_DATA
-    .get(c.env.LIVE_DATA.idFromName('global'))
+  const response = await liveDataStub(c.env.LIVE_DATA)
     .fetch(new Request('https://do/admin-clients-snapshot'));
   if (!response.ok) return null;
   const body = await response.json().catch(() => null);
@@ -1476,8 +1476,7 @@ publicRoutes.get('/public/bootstrap', async (c) => {
   const [settings, snapshot, live] = await Promise.all([
     getPublicSettings(getDatabase(c.env), fresh),
     getPublicClientsSnapshot(c, getDatabase(c.env), fresh, includeHidden),
-    c.env.LIVE_DATA
-      .get(c.env.LIVE_DATA.idFromName('global'))
+    liveDataStub(c.env.LIVE_DATA)
       .fetch(new Request(`https://do/live${includeHidden ? '?include_hidden=1' : ''}`, { method: 'GET' }))
       .then(response => readLiveSnapshot(response))
       .then(snapshot => snapshot ?? { online: [], count: 0 }),
@@ -1806,8 +1805,7 @@ publicRoutes.get('/live', async (c) => {
   const cached = includeHidden ? null : await getPublicEdgeCache(c, PUBLIC_LIVE_CACHE_SECONDS);
   if (cached) return cached;
 
-  const doId = c.env.LIVE_DATA.idFromName('global');
-  const stub = c.env.LIVE_DATA.get(doId);
+  const stub = liveDataStub(c.env.LIVE_DATA);
   const doUrl = new URL(c.req.url);
   if (includeHidden) doUrl.searchParams.set('include_hidden', '1');
   else doUrl.searchParams.delete('include_hidden');

@@ -23,7 +23,7 @@ test('admin do-location proxies the DO location diagnostic', async () => {
   assert.equal(response.headers.get('Cache-Control'), 'private, no-store');
   const body = await response.json();
   assert.equal(body.status, 200);
-  assert.equal(body.durableObjectId, 'id-global');
+  assert.equal(body.durableObjectId, 'id-global-v2');
   assert.equal(body.traceColo, 'SIN');
   assert.deepEqual(requests, ['https://do/diagnostics/location']);
 });

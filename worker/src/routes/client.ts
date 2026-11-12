@@ -17,6 +17,7 @@ import { NOTIFICATION_DISPATCH_SETTING_KEYS, dispatchNotification } from '../uti
 import { getCloudflareClientIp, isPublicIpAddress } from '../utils/request-ip';
 import { hashAgentToken, isAgentTokenShape } from '../utils/client';
 import { readAcceptedCount, readClientReportResult, readRateLimitResult, type ClientReportResult } from '../utils/do-response';
+import { liveDataStub } from '../utils/live-data-object';
 import { invalidatePublicMetadataCache } from './public';
 
 const clientRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -231,8 +232,7 @@ function normalizeLiveAgentAuthClient(value: unknown): db.Client | null {
 
 function liveDataAuthStub(env: Bindings): DurableObjectStub | null {
   try {
-    const doId = env.LIVE_DATA.idFromName('global');
-    return env.LIVE_DATA.get(doId);
+    return liveDataStub(env.LIVE_DATA);
   } catch {
     return null;
   }
@@ -628,8 +628,7 @@ async function updateLiveReport(
     reportBody = { report };
   }
   if (!report) return { persisted: false, trafficImported: false };
-  const doId = c.env.LIVE_DATA.idFromName('global');
-  const stub = c.env.LIVE_DATA.get(doId);
+  const stub = liveDataStub(c.env.LIVE_DATA);
   const response = await stub.fetch(new Request('https://do/client-report', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -695,7 +694,7 @@ function buildSafeLiveBasicInfoClient(
 async function syncLiveBasicInfoMetadata(c: ClientContext, client: Record<string, unknown>): Promise<void> {
   const uuid = typeof client.uuid === 'string' ? client.uuid : '';
   if (!uuid) return;
-  const stub = c.env.LIVE_DATA.get(c.env.LIVE_DATA.idFromName('global'));
+  const stub = liveDataStub(c.env.LIVE_DATA);
   await stub.fetch(new Request('https://do/client-meta', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1244,8 +1243,7 @@ clientRoutes.post('/ping/result', clientIdentityAuth, async (c) => {
     }
     const taskMap = new Map(tasks.map(task => [task.id, task]));
 
-    const doId = c.env.LIVE_DATA.idFromName('global');
-    const stub = c.env.LIVE_DATA.get(doId);
+    const stub = liveDataStub(c.env.LIVE_DATA);
     const doResponse = await stub.fetch(new Request('https://do/ping-result', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

@@ -38,6 +38,7 @@ import { WEBHOOK_MESSAGE_MAX_CHARS } from '../utils/webhook';
 import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { readJsonWithLimit, readRequestBytesWithLimit } from '../utils/request-body';
+import { liveDataId, liveDataStub as liveDataObjectStub } from '../utils/live-data-object';
 import { bytesToBase64 } from '../utils/theme-package';
 import {
   auditLoginFailure,
@@ -416,7 +417,7 @@ function hideAdminClientToken(client: db.Client): Omit<db.Client, 'token' | 'tok
 }
 
 function liveDataStub(c: AdminContext) {
-  return c.env.LIVE_DATA.get(c.env.LIVE_DATA.idFromName('global'));
+  return liveDataObjectStub(c.env.LIVE_DATA);
 }
 
 async function readAdminClientsSnapshot(c: AdminContext): Promise<AdminClientsSnapshot | null> {
@@ -562,8 +563,7 @@ async function getInstallToken(database: db.QueryDatabase, uuid: string): Promis
 
 async function refreshLivePingTasks(c: AdminContext): Promise<void> {
   try {
-    const doId = c.env.LIVE_DATA.idFromName('global');
-    const stub = c.env.LIVE_DATA.get(doId);
+    const stub = liveDataObjectStub(c.env.LIVE_DATA);
     await stub.fetch(new Request('https://do/ping-tasks-refresh', { method: 'POST' }));
   } catch {
     // The DO cache is short-lived; admin writes should not fail if refresh signalling is unavailable.
@@ -572,8 +572,7 @@ async function refreshLivePingTasks(c: AdminContext): Promise<void> {
 
 async function refreshLiveAgentPolicy(c: AdminContext): Promise<void> {
   try {
-    const doId = c.env.LIVE_DATA.idFromName('global');
-    const stub = c.env.LIVE_DATA.get(doId);
+    const stub = liveDataObjectStub(c.env.LIVE_DATA);
     await stub.fetch(new Request('https://do/policy-refresh', { method: 'POST' }));
   } catch {
     // Agent policy caches are short-lived; admin writes should not fail if refresh signalling is unavailable.
@@ -582,8 +581,7 @@ async function refreshLiveAgentPolicy(c: AdminContext): Promise<void> {
 
 async function broadcastLiveMetadataChanged(c: AdminContext, detail: Record<string, unknown>): Promise<void> {
   try {
-    const doId = c.env.LIVE_DATA.idFromName('global');
-    const stub = c.env.LIVE_DATA.get(doId);
+    const stub = liveDataObjectStub(c.env.LIVE_DATA);
     await stub.fetch(new Request('https://do/metadata-refresh', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -803,8 +801,7 @@ async function runAgentTokenHygieneProbe(database: AppDatabase, checkedAt: strin
 
 async function runDoProbe(c: AdminContext, checkedAt: string): Promise<HealthEvent> {
   try {
-    const doId = c.env.LIVE_DATA.idFromName('global');
-    const stub = c.env.LIVE_DATA.get(doId);
+    const stub = liveDataObjectStub(c.env.LIVE_DATA);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort('durable object fetch timed out'), 3_000);
     const response = await (async () => {
@@ -2199,8 +2196,7 @@ adminRoutes.post('/settings', async (c) => {
       livePolicySettingsChanged ||
       recordPersistenceSettingsChanged
     ) {
-      const doId = c.env.LIVE_DATA.idFromName('global');
-      const stub = c.env.LIVE_DATA.get(doId);
+      const stub = liveDataObjectStub(c.env.LIVE_DATA);
       if (livePolicySettingsChanged) {
         invalidateLiveViewerSettingsCache();
         background.push(stub.fetch(new Request('https://do/policy-refresh', { method: 'POST' })));
@@ -2788,11 +2784,11 @@ adminRoutes.get('/health', async (c) => {
 });
 
 adminRoutes.get('/do-location', async (c) => {
-  const id = c.env.LIVE_DATA.idFromName('global');
+  const id = liveDataId(c.env.LIVE_DATA);
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort('do location probe timed out'), 5_000);
   try {
-    const response = await c.env.LIVE_DATA.get(id).fetch(new Request('https://do/diagnostics/location', {
+    const response = await liveDataObjectStub(c.env.LIVE_DATA).fetch(new Request('https://do/diagnostics/location', {
       method: 'GET',
       signal: controller.signal,
     }));

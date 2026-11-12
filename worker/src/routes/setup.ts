@@ -10,6 +10,7 @@ import * as db from '../db/queries';
 import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
 import { getCloudflareClientIp } from '../utils/request-ip';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
+import { liveDataStub } from '../utils/live-data-object';
 import { BUNDLED_SUPABASE_MIGRATIONS, type BundledMigration } from '../generated/supabase-migrations';
 
 type SetupCheckStatus = 'ok' | 'warning' | 'error' | 'pending' | 'disabled';
@@ -167,8 +168,7 @@ function secretsCheck(env: Bindings): SetupCheck {
 
 async function durableObjectsCheck(env: Bindings): Promise<SetupCheck> {
   try {
-    const doId = env.LIVE_DATA.idFromName('global');
-    const stub = env.LIVE_DATA.get(doId);
+    const stub = liveDataStub(env.LIVE_DATA);
     const response = await fetchDurableObjectWithTimeout(stub, new Request('https://do/live', { method: 'GET' }));
     if (!response.ok) {
       return setupCheck('durable_objects', 'error', `LIVE_DATA returned HTTP ${response.status}`);

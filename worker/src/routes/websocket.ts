@@ -14,6 +14,7 @@ import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { hasAdminSession, getPublicClientsSnapshot, invalidatePublicMetadataCache } from './public';
 import { pushMonitorMetaToDo } from './monitor-compat';
 import { monitorNodeStatic } from '../utils/monitor-contract';
+import { liveDataStub } from '../utils/live-data-object';
 
 const wsRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 type WsContext = Context<{ Bindings: Bindings; Variables: Variables }>;
@@ -118,7 +119,7 @@ async function syncAgentNetworkMetadata(c: WsContext, client: db.ClientIdentity,
   if (typeof patch.ipv6 === 'string') {
     safePatch.has_ipv6 = patch.ipv6.trim() !== '';
   }
-  const stub = c.env.LIVE_DATA.get(c.env.LIVE_DATA.idFromName('global'));
+  const stub = liveDataStub(c.env.LIVE_DATA);
   await stub.fetch(new Request('https://do/client-meta', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -307,8 +308,7 @@ wsRoutes.get('/clients/report', async (c) => {
     return c.json({ error: 'Invalid WebSocket Origin' }, 403);
   }
 
-  const doId = c.env.LIVE_DATA.idFromName('global');
-  const stub = c.env.LIVE_DATA.get(doId);
+  const stub = liveDataStub(c.env.LIVE_DATA);
 
   const url = new URL(c.req.url);
   url.pathname = '/';
@@ -376,7 +376,7 @@ wsRoutes.get('/ws', async (c) => {
   if (admin) url.searchParams.set('admin', '1');
   if (gzip) url.searchParams.set('gzip', '1');
 
-  const stub = c.env.LIVE_DATA.get(c.env.LIVE_DATA.idFromName('global'));
+  const stub = liveDataStub(c.env.LIVE_DATA);
   return stub.fetch(new Request(url.toString(), c.req.raw));
 });
 
@@ -400,8 +400,7 @@ wsRoutes.get('/ws/live-token', async (c) => {
 
 wsRoutes.get('/ws/live', async (c) => {
   if (!isWebSocketUpgrade(c)) {
-    const doId = c.env.LIVE_DATA.idFromName('global');
-    const stub = c.env.LIVE_DATA.get(doId);
+    const stub = liveDataStub(c.env.LIVE_DATA);
     const url = new URL(c.req.url);
     const includeHidden = url.searchParams.get('include_hidden') === '1' && await hasAdminSession(c);
     if (includeHidden) url.searchParams.set('include_hidden', '1');
@@ -425,8 +424,7 @@ wsRoutes.get('/ws/live', async (c) => {
     return c.json({ error: 'Invalid viewer token' }, 403);
   }
 
-  const doId = c.env.LIVE_DATA.idFromName('global');
-  const stub = c.env.LIVE_DATA.get(doId);
+  const stub = liveDataStub(c.env.LIVE_DATA);
   const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
 
   const url = new URL(c.req.url);
@@ -446,8 +444,7 @@ wsRoutes.get('/live/clients', async (c) => {
   if (limited) return limited;
   const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
 
-  const doId = c.env.LIVE_DATA.idFromName('global');
-  const stub = c.env.LIVE_DATA.get(doId);
+  const stub = liveDataStub(c.env.LIVE_DATA);
 
   const response = await stub.fetch(new Request(`https://do/live${includeHidden ? '?include_hidden=1' : ''}`, { method: 'GET' }));
   const snapshot = await readLiveSnapshot(response) ?? { online: [], count: 0 };

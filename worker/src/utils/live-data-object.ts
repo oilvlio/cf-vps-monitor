@@ -15,11 +15,12 @@
  */
 
 import type { Bindings } from '../index';
+import { APAC_DO_LOCATION_HINT } from './durable-object-placement';
 
 export const LIVE_DATA_OBJECT_NAME = 'global-v2';
 
 /** 亚太（新加坡）。若实际落点不理想，可改回更宽泛的 `apac`。 */
-export const LIVE_DATA_LOCATION_HINT: DurableObjectLocationHint = 'apac-se';
+export const LIVE_DATA_LOCATION_HINT: DurableObjectLocationHint = APAC_DO_LOCATION_HINT;
 
 export function liveDataId(namespace: Bindings['LIVE_DATA']): DurableObjectId {
   return namespace.idFromName(LIVE_DATA_OBJECT_NAME);

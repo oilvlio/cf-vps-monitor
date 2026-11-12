@@ -39,6 +39,7 @@ import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { readJsonWithLimit, readRequestBytesWithLimit } from '../utils/request-body';
 import { liveDataId, liveDataStub as liveDataObjectStub, legacyLiveDataId } from '../utils/live-data-object';
+import { RATE_LIMIT_OBJECT_NAMES, rateLimitStub } from '../utils/rate-limit-object';
 import { bytesToBase64 } from '../utils/theme-package';
 import {
   auditLoginFailure,
@@ -833,8 +834,7 @@ async function runRateLimitProbe(c: AdminContext, checkedAt: string): Promise<He
     return healthEvent('rate_limit_probe', 'error', 'RATE_LIMIT binding is missing; falling back to per-isolate limits', checkedAt);
   }
   try {
-    const doId = namespace.idFromName('admin-health');
-    const stub = namespace.get(doId);
+    const stub = rateLimitStub(namespace, RATE_LIMIT_OBJECT_NAMES.adminHealth);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort('rate limit durable object fetch timed out'), 3_000);
     const response = await (async () => {

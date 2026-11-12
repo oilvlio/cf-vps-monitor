@@ -27,18 +27,28 @@ test('LIVE_DATA stub uses the v2 object name and an APAC location hint', () => {
   assert.equal(calls[0].options.locationHint, 'apac-se');
 });
 
-test('no source file bypasses the shared LIVE_DATA object id', () => {
+const FORBIDDEN_OBJECT_IDS = [
+  "idFromName('global')",
+  "idFromName('public-api')",
+  "idFromName('agent-ingress')",
+  "idFromName('admin-health')",
+];
+
+test('no source file bypasses the shared LIVE_DATA / RATE_LIMIT object ids', () => {
   const srcRoot = fileURLToPath(new URL('..', import.meta.url));
   const offenders = [];
   const walk = (dir) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const full = join(dir, entry.name);
       if (entry.isDirectory()) walk(full);
-      else if (entry.name.endsWith('.ts') && readFileSync(full, 'utf8').includes("idFromName('global')")) {
-        offenders.push(full);
+      else if (entry.name.endsWith('.ts')) {
+        const source = readFileSync(full, 'utf8');
+        for (const pattern of FORBIDDEN_OBJECT_IDS) {
+          if (source.includes(pattern)) offenders.push(`${full}: ${pattern}`);
+        }
       }
     }
   };
   walk(srcRoot);
-  assert.deepEqual(offenders, [], 'LIVE_DATA 的 id 只能在 utils/live-data-object.ts 里拼');
+  assert.deepEqual(offenders, [], 'DO 的 id 只能在 utils/live-data-object.ts / utils/rate-limit-object.ts 里拼');
 });

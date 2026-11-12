@@ -31,6 +31,7 @@ import { getCloudflareClientIp } from '../utils/request-ip';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { readJsonWithLimit } from '../utils/request-body';
 import { liveDataStub } from '../utils/live-data-object';
+import { RATE_LIMIT_OBJECT_NAMES, rateLimitStub } from '../utils/rate-limit-object';
 import { base64ToBytes } from '../utils/theme-package';
 import { historyBucketSec } from '../utils/history-bucket';
 import { buildMonitorMe } from '../utils/monitor-contract';
@@ -695,8 +696,7 @@ async function publicApiRateLimit(c: PublicContext, bucket: string, maxRequests:
     if (!namespace) {
       return localPublicApiRateLimit(c, bucket, maxRequests);
     }
-    const doId = namespace.idFromName('public-api');
-    const stub = namespace.get(doId);
+    const stub = rateLimitStub(namespace, RATE_LIMIT_OBJECT_NAMES.publicApi);
     const response = await stub.fetch(new Request('https://do/rate-limit', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

@@ -18,6 +18,7 @@ import { getCloudflareClientIp, isPublicIpAddress } from '../utils/request-ip';
 import { hashAgentToken, isAgentTokenShape } from '../utils/client';
 import { readAcceptedCount, readClientReportResult, readRateLimitResult, type ClientReportResult } from '../utils/do-response';
 import { liveDataStub } from '../utils/live-data-object';
+import { RATE_LIMIT_OBJECT_NAMES, rateLimitStub } from '../utils/rate-limit-object';
 import { invalidatePublicMetadataCache } from './public';
 
 const clientRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -853,8 +854,7 @@ async function enforceAgentBucketRateLimit(
   try {
     const namespace = c.env.RATE_LIMIT;
     if (!namespace) return localAgentRateLimit(c, localKey, max, AGENT_RATE_LIMIT_WINDOW_MS);
-    const doId = namespace.idFromName('agent-ingress');
-    const stub = namespace.get(doId);
+    const stub = rateLimitStub(namespace, RATE_LIMIT_OBJECT_NAMES.agentIngress);
     const response = await stub.fetch(new Request('https://do/rate-limit', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

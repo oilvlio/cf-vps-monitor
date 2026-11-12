@@ -447,6 +447,25 @@ function injectApiBase(html: string): string {
   return insertBeforeHeadClose(html, tag);
 }
 
+/**
+ * 首页的 `/api/nodes` 要等主题 JS 执行、并且 `/api/me`、主题配置都返回后才发起，
+ * 首屏会多等一个串行的 200–300ms。提前在 HTML 里 preload，让它和 JS 下载并行。
+ *
+ * 主题的 fetch 用 `credentials: 'include'`，所以这里必须用 `use-credentials`；
+ * 否则凭据模式不匹配，预加载的响应不会被复用（Network 面板会出现
+ * "preloaded but not used"），等于白打一次请求。
+ */
+function injectApiPreload(html: string): string {
+  if (/<link\b[^>]*rel\s*=\s*["']preload["'][^>]*\/api\/nodes/i.test(html)
+    || /<link\b[^>]*\/api\/nodes[^>]*rel\s*=\s*["']preload["']/i.test(html)) {
+    return html;
+  }
+  return insertBeforeHeadClose(
+    html,
+    '<link rel="preload" as="fetch" href="/api/nodes" crossorigin="use-credentials">',
+  );
+}
+
 function injectBackground(html: string, desktop: string, mobile: string): string {
   const desktopUrl = desktop.trim();
   const mobileUrl = mobile.trim();
@@ -480,6 +499,7 @@ export function transformThemeHtml(html: string, options: TransformThemeHtmlOpti
   output = injectTitle(output, options.siteTitle);
   output = injectFavicon(output, options.favicon);
   output = injectApiBase(output);
+  output = injectApiPreload(output);
   output = injectBackground(output, options.backgroundDesktop, options.backgroundMobile);
   return output;
 }

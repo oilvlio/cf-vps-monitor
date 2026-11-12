@@ -81,6 +81,16 @@ const options = {
   assert.doesNotMatch(monitor, /<base /);
   assert.doesNotMatch(monitor, /bridge/);
   assert.match(monitor, /<title>站点名<\/title>/);
+  // 首屏 /api/nodes preload：主题 fetch 用 credentials: 'include'，凭据模式必须匹配。
+  assert.match(monitor, /<link rel="preload" as="fetch" href="\/api\/nodes" crossorigin="use-credentials">/);
+  assert.equal((monitor.match(/href="\/api\/nodes"/g) || []).length, 1, 'preload 不应重复注入');
+  // 已经有主题自己写的 preload 时保持原样。
+  const already = '<head><link rel="preload" as="fetch" href="/api/nodes"></head>';
+  assert.equal(
+    (transformThemeHtml(already, options).match(/preload/g) || []).length,
+    1,
+    '重复执行也不应叠加 preload',
+  );
 }
 
 console.log('third-party-theme utils tests passed');

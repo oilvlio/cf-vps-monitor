@@ -760,14 +760,15 @@ export function guardPublicHistory(c: PublicContext, bucket: string): Promise<Re
 /**
  * monitor 主题专用的历史限流桶。额度由调用方按节点数算（hex 的节点总览会按节点
  * 扇出 `series=ping` 请求，5s 一轮，沿用 60 次/分钟会误伤正常浏览），换算见
- * `monitorMetricsRateLimit()`。仍走同一个限流 DO，只是桶和额度不同。
+ * `monitorMetricsRateLimit()`。历史图表对跨机房强一致没有要求，这里和公开读接口
+ * 一样用 isolate 本地计数，避免每次 metrics 先付一次限流 DO 往返。
  */
-export function guardMonitorMetrics(
+export async function guardMonitorMetrics(
   c: PublicContext,
   bucket: string,
   maxRequests: number,
 ): Promise<Response | null> {
-  return publicApiRateLimit(c, `history:${bucket}`, maxRequests);
+  return localPublicApiRateLimit(c, `history:${bucket}`, maxRequests);
 }
 
 export function guardPublicLive(c: PublicContext): Promise<Response | null> {

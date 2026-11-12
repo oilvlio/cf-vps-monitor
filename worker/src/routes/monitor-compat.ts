@@ -114,6 +114,45 @@ async function recordSampleSeconds(database: db.QueryDatabase): Promise<number> 
   }
 }
 
+// ping 任务列表和落库间隔很少变化，但每次 metrics 都会各查一次 Supabase。按
+// isolate 缓存 30 秒，热路径上就能和区间查询并行、只留一次真正的数据库往返。
+const MONITOR_METRICS_META_CACHE_MS = 30_000;
+let monitorPingTasksCache: {
+  value: Awaited<ReturnType<typeof db.listPingTasks>>;
+  expiresAt: number;
+} | null = null;
+let monitorRecordSampleCache: { value: number; expiresAt: number } | null = null;
+
+/** 测试用：清空 metrics 的元数据缓存。 */
+export function clearMonitorMetricsMetaCache(): void {
+  monitorPingTasksCache = null;
+  monitorRecordSampleCache = null;
+}
+
+async function cachedPingTasks(
+  database: db.QueryDatabase,
+): Promise<{ tasks: Awaited<ReturnType<typeof db.listPingTasks>>; hit: boolean }> {
+  const now = Date.now();
+  if (monitorPingTasksCache && monitorPingTasksCache.expiresAt > now) {
+    return { tasks: monitorPingTasksCache.value, hit: true };
+  }
+  const tasks = await db.listPingTasks(database).catch(() => []);
+  monitorPingTasksCache = { value: tasks, expiresAt: now + MONITOR_METRICS_META_CACHE_MS };
+  return { tasks, hit: false };
+}
+
+async function cachedRecordSampleSeconds(
+  database: db.QueryDatabase,
+): Promise<{ value: number; hit: boolean }> {
+  const now = Date.now();
+  if (monitorRecordSampleCache && monitorRecordSampleCache.expiresAt > now) {
+    return { value: monitorRecordSampleCache.value, hit: true };
+  }
+  const value = await recordSampleSeconds(database);
+  monitorRecordSampleCache = { value, expiresAt: now + MONITOR_METRICS_META_CACHE_MS };
+  return { value, hit: false };
+}
+
 function jsonWithCache(c: MonitorContext, value: unknown, seconds: number): Response {
   c.header(
     'Cache-Control',
@@ -366,11 +405,15 @@ monitorCompatRoutes.get('/nodes/:id/metrics', async (c) => {
   const id = (c.req.param('id') || '').trim();
   if (!id) return c.json({ error: '缺少节点 id' }, 400);
 
+  const startedAt = performance.now();
   const limited = await guardMonitorMetrics(c, 'monitor-metrics', monitorMetricsLimit());
+  const rateLimitMs = performance.now() - startedAt;
   if (limited) return limited;
 
+  const snapshotAt = performance.now();
   const database = getDatabase(c.env);
   const snapshot = await getPublicClientsSnapshot(c, database, false, false);
+  const snapshotMs = performance.now() - snapshotAt;
   monitorKnownNodeCount = snapshot.clients.length;
   // 契约里的 id 是整数，DB 主键是 UUID：按同一套哈希映射回来，避免把哈希值当
   // UUID 查库。
@@ -394,17 +437,33 @@ monitorCompatRoutes.get('/nodes/:id/metrics', async (c) => {
   const start = new Date(startSec * 1000).toISOString();
   const end = new Date(endMs).toISOString();
 
-  // 键里带 startSec：窗口起点一变（跨过 step 边界），旧桶自然失效。
-  const allTasks = await db.listPingTasks(database).catch(() => []);
-  const tasks = monitorTasksForClient(allTasks, uuid);
+  // 键里带 startSec：窗口起点一变（跨过 step 边界），旧桶自然失效。任务列表
+  // 不放进键里：它在 30 秒缓存内基本不变，提前命中比多查一次 Supabase 划算。
+  const cacheKey = `${uuid}|${hours}|${step}|${series}|${startSec}`;
+  const cached = monitorHistoryCacheGet(cacheKey);
+  if (cached !== undefined) {
+    c.header('Server-Timing', [
+      `rate-limit;dur=${rateLimitMs.toFixed(1)}`,
+      `snapshot;dur=${snapshotMs.toFixed(1)}`,
+      'history;desc="memory";dur=0',
+      `total;dur=${(performance.now() - startedAt).toFixed(1)}`,
+    ].join(', '));
+    return jsonWithCache(c, cached, MONITOR_HISTORY_CACHE_SECONDS);
+  }
+
+  // 任务列表与落库间隔互不依赖，并行取；命中 30 秒缓存时不再触达数据库。
+  const metaAt = performance.now();
+  const [pingTasksResult, sampleResult] = await Promise.all([
+    cachedPingTasks(database),
+    cachedRecordSampleSeconds(database),
+  ]);
+  const metaMs = performance.now() - metaAt;
+  const tasks = monitorTasksForClient(pingTasksResult.tasks, uuid);
   const taskIds = monitorTaskIds(tasks);
   const taskOrder = new Map(taskIds.map((taskId, index) => [taskId, index]));
-  const cacheKey = `${uuid}|${hours}|${step}|${series}|${startSec}|${taskIds.join(',')}`;
-  const cached = monitorHistoryCacheGet(cacheKey);
-  if (cached !== undefined) return jsonWithCache(c, cached, MONITOR_HISTORY_CACHE_SECONDS);
+  const sampleSec = sampleResult.value;
 
-  const sampleSec = await recordSampleSeconds(database);
-
+  const queryAt = performance.now();
   const [records, byTask] = await Promise.all([
     series === 'ping'
       ? Promise.resolve([])
@@ -416,6 +475,7 @@ monitorCompatRoutes.get('/nodes/:id/metrics', async (c) => {
       : db.getPingRecordsForTasksRangeBucketed(database, uuid, taskIds, start, end, step, PING_BUCKET_LIMIT)
         .catch(() => ({} as Record<string, never[]>)),
   ]);
+  const queryMs = performance.now() - queryAt;
 
   const metrics = series === 'ping' ? [] : buildMonitorMetricsRows(records, step);
   const { ping, loss } = series === 'metrics'
@@ -429,6 +489,13 @@ monitorCompatRoutes.get('/nodes/:id/metrics', async (c) => {
     loss,
   };
   monitorHistoryCacheSet(cacheKey, payload);
+  c.header('Server-Timing', [
+    `rate-limit;dur=${rateLimitMs.toFixed(1)}`,
+    `snapshot;dur=${snapshotMs.toFixed(1)}`,
+    `meta;dur=${metaMs.toFixed(1)};desc="${pingTasksResult.hit && sampleResult.hit ? 'cache' : 'database'}"`,
+    `query;dur=${queryMs.toFixed(1)}`,
+    `total;dur=${(performance.now() - startedAt).toFixed(1)}`,
+  ].join(', '));
   return jsonWithCache(c, payload, MONITOR_HISTORY_CACHE_SECONDS);
 });
 

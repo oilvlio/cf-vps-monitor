@@ -353,10 +353,22 @@ export async function getRecordsByTimeRangeAggregated(
  * 打开页面时只打一次 Supabase。失败不缓存，避免把一次网络抖动放大成 10 秒空值。
  */
 const TRAFFIC_TOTALS_TTL_MS = 10_000;
+// 游客、管理员（含隐藏节点）、/api/ws 会带不同的节点集合；单槽缓存会互相顶掉，
+// 留几条就能覆盖这些常见视角。
+const TRAFFIC_TOTALS_CACHE_MAX_ENTRIES = 4;
 type TrafficTotals = Record<string, t.MonitorTrafficTotals>;
-type TrafficTotalsCacheEntry = { key: string; at: number; value: TrafficTotals };
-const trafficTotalsCache = new WeakMap<object, TrafficTotalsCacheEntry>();
-const trafficTotalsInflight = new WeakMap<object, { key: string; promise: Promise<TrafficTotals> }>();
+type TrafficTotalsCacheEntry = { at: number; value: TrafficTotals };
+const trafficTotalsCache = new WeakMap<object, Map<string, TrafficTotalsCacheEntry>>();
+const trafficTotalsInflight = new WeakMap<object, Map<string, Promise<TrafficTotals>>>();
+
+function cacheFor<T>(bucket: WeakMap<object, Map<string, T>>, env: object): Map<string, T> {
+  let map = bucket.get(env);
+  if (!map) {
+    map = new Map();
+    bucket.set(env, map);
+  }
+  return map;
+}
 
 export type TrafficTotalsLookup = { cached?: boolean };
 
@@ -369,27 +381,37 @@ export async function getTrafficTotals(
   // 节点集合相同即同一份数据；排序让调用方传参顺序不影响命中。
   const key = [...clients].sort().join('\n');
 
-  const cached = trafficTotalsCache.get(env);
-  if (cached && cached.key === key && Date.now() - cached.at < TRAFFIC_TOTALS_TTL_MS) {
+  const cache = cacheFor(trafficTotalsCache, env);
+  const cached = cache.get(key);
+  if (cached && Date.now() - cached.at < TRAFFIC_TOTALS_TTL_MS) {
     if (lookup) lookup.cached = true;
+    // Map 的插入顺序当 LRU：命中后移到末尾，避免热视角被冷视角挤掉。
+    cache.delete(key);
+    cache.set(key, cached);
     return cached.value;
   }
 
-  const pending = trafficTotalsInflight.get(env);
-  if (pending && pending.key === key) {
+  const inflight = cacheFor(trafficTotalsInflight, env);
+  const pending = inflight.get(key);
+  if (pending) {
     if (lookup) lookup.cached = true;
-    return pending.promise;
+    return pending;
   }
 
   const promise = sba.getSupabaseTrafficTotals(database.env, clients)
     .then(value => {
-      trafficTotalsCache.set(env, { key, at: Date.now(), value });
+      cache.delete(key);
+      cache.set(key, { at: Date.now(), value });
+      if (cache.size > TRAFFIC_TOTALS_CACHE_MAX_ENTRIES) {
+        const oldest = cache.keys().next().value;
+        if (oldest !== undefined) cache.delete(oldest);
+      }
       return value;
     })
     .finally(() => {
-      if (trafficTotalsInflight.get(env)?.promise === promise) trafficTotalsInflight.delete(env);
+      if (inflight.get(key) === promise) inflight.delete(key);
     });
-  trafficTotalsInflight.set(env, { key, promise });
+  inflight.set(key, promise);
   return promise;
 }
 

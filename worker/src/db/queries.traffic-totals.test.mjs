@@ -64,21 +64,33 @@ const database = { provider: 'supabase-api', env };
   assert.equal(lookup.cached, true);
 }
 
+// --- 不同视角的集合交替出现时不能互相顶掉 ---
+{
+  const before = calls;
+  await getTrafficTotals(database, ['g1', 'g2']);
+  await getTrafficTotals(database, ['g1', 'g2', 'g3']);
+  await getTrafficTotals(database, ['g1', 'g2']);
+  await getTrafficTotals(database, ['g1', 'g2', 'g3']);
+  assert.equal(calls, before + 2, '两个视角都应在缓存里，交替访问不应重复查询');
+}
+
 // --- 失败的请求不缓存，下一次仍会重试 ---
 {
+  const before = calls;
   failNext = true;
   await assert.rejects(getTrafficTotals(database, ['e']));
   failNext = false;
   const lookup = {};
   await getTrafficTotals(database, ['e'], lookup);
-  assert.equal(calls, 5, '失败不应该留下 10 秒的空缓存');
+  assert.equal(calls, before + 2, '失败不应该留下 10 秒的空缓存');
   assert.notEqual(lookup.cached, true);
 }
 
 // --- 不同部署环境（不同 env 对象）互不影响 ---
 {
+  const before = calls;
   await getTrafficTotals({ provider: 'supabase-api', env: { marker: 'other-env' } }, ['a', 'b']);
-  assert.equal(calls, 6);
+  assert.equal(calls, before + 1);
 }
 
 console.log('traffic totals cache tests passed');

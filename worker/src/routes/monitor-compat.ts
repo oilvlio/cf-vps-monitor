@@ -53,6 +53,61 @@ const HISTORY_BUCKET_LIMIT = 1500;
 const PING_BUCKET_LIMIT = 1200;
 const THEME_CONFIG_MAX_BYTES = 32 * 1024;
 const THEME_CONFIG_SETTING_PREFIX = 'monitor_theme_config:';
+// 主题配置只在管理员保存时变化；按 isolate 缓存 5 秒，避免每次页面加载都查一次
+// Supabase。GET 仍然 no-store，管理员保存后会主动清掉本地缓存。
+const THEME_CONFIG_CACHE_MS = 5_000;
+const themeConfigCache = new Map<string, { value: Record<string, unknown>; expiresAt: number }>();
+
+function themeConfigCacheGet(short: string): Record<string, unknown> | undefined {
+  const entry = themeConfigCache.get(short);
+  if (!entry) return undefined;
+  if (entry.expiresAt <= Date.now()) {
+    themeConfigCache.delete(short);
+    return undefined;
+  }
+  return entry.value;
+}
+
+function themeConfigCacheSet(short: string, value: Record<string, unknown>): void {
+  if (themeConfigCache.size >= 64) {
+    const oldest = themeConfigCache.keys().next().value;
+    if (oldest !== undefined) themeConfigCache.delete(oldest);
+  }
+  themeConfigCache.set(short, { value, expiresAt: Date.now() + THEME_CONFIG_CACHE_MS });
+}
+
+/** 测试和保存路径用：清掉一个（或全部）主题配置缓存。 */
+export function clearThemeConfigCache(short?: string): void {
+  if (short) themeConfigCache.delete(short);
+  else themeConfigCache.clear();
+}
+
+async function loadThemeConfig(
+  database: db.QueryDatabase,
+  short: string,
+): Promise<Record<string, unknown>> {
+  const saved = await db.getSetting(database, `${THEME_CONFIG_SETTING_PREFIX}${short}`).catch(() => null);
+  if (saved !== null) {
+    try {
+      const config = recordOrNull(JSON.parse(saved));
+      if (config && new TextEncoder().encode(JSON.stringify(config)).byteLength <= THEME_CONFIG_MAX_BYTES) {
+        return config;
+      }
+    } catch {
+      // Ignore malformed stored values and fall back to the uploaded theme record.
+    }
+  }
+  const theme = await db.getTheme(database, short).catch(() => null);
+  if (!theme?.config_json) return {};
+
+  try {
+    const config = recordOrNull(JSON.parse(theme.config_json));
+    if (!config || JSON.stringify(config).length > THEME_CONFIG_MAX_BYTES) return {};
+    return config;
+  } catch {
+    return {};
+  }
+}
 // 历史桶在 10s 内不会变化（records 按 record_persist_interval_sec 批量落库），
 // 而主题的实时视图是 5s 一轮、且延迟/丢包视图会按节点扇出请求。用一层进程内
 // 缓存吸收同一 isolate 内的重复查询：同一节点的同一查询 10s 内最多触达一次
@@ -503,32 +558,12 @@ monitorCompatRoutes.get('/themes/:short/config', async (c) => {
   const short = (c.req.param('short') || '').trim();
   if (!short) return jsonWithCache(c, {}, 60);
 
-  const database = getDatabase(c.env);
-  const saved = await db.getSetting(database, `${THEME_CONFIG_SETTING_PREFIX}${short}`).catch(() => null);
-  if (saved !== null) {
-    try {
-      const config = recordOrNull(JSON.parse(saved));
-      if (config && new TextEncoder().encode(JSON.stringify(config)).byteLength <= THEME_CONFIG_MAX_BYTES) {
-        return jsonWithCache(c, config, 0);
-      }
-    } catch {
-      // Ignore malformed stored values and fall back to the uploaded theme record.
-    }
+  let config = themeConfigCacheGet(short);
+  if (config === undefined) {
+    config = await loadThemeConfig(getDatabase(c.env), short);
+    themeConfigCacheSet(short, config);
   }
-  const theme = await db.getTheme(database, short).catch(() => null);
-  if (!theme?.config_json) return jsonWithCache(c, {}, 60);
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(theme.config_json);
-  } catch {
-    return jsonWithCache(c, {}, 60);
-  }
-  const config = recordOrNull(parsed);
-  if (config && JSON.stringify(config).length > THEME_CONFIG_MAX_BYTES) {
-    return jsonWithCache(c, {}, 60);
-  }
-  return jsonWithCache(c, config ?? {}, 60);
+  return jsonWithCache(c, config, 0);
 });
 
 monitorCompatRoutes.put('/themes/:short/config', async (c) => {
@@ -551,5 +586,8 @@ monitorCompatRoutes.put('/themes/:short/config', async (c) => {
     return c.json({ error: '主题配置过大' }, 413);
   }
   await db.setSetting(getDatabase(c.env), `${THEME_CONFIG_SETTING_PREFIX}${short}`, serialized);
-  return c.json({ success: true }, 200, { 'Cache-Control': 'no-store' });
+  clearThemeConfigCache(short);
+  // 主题当前只检查 PUT 状态码、不读响应体；把新配置带回来是为了让其他客户端
+  // （或以后版本的主题）保存后立刻用上新值，而不必等 5 秒缓存过期。
+  return c.json({ success: true, config }, 200, { 'Cache-Control': 'no-store' });
 });

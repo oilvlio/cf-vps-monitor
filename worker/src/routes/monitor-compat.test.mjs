@@ -135,7 +135,7 @@ const loader = createWorkerLoader({
   },
 });
 
-const { monitorCompatRoutes, clearMonitorHistoryCache, clearMonitorMetricsMetaCache } = loader.load('worker/src/routes/monitor-compat.ts');
+const { monitorCompatRoutes, clearMonitorHistoryCache, clearMonitorMetricsMetaCache, clearThemeConfigCache } = loader.load('worker/src/routes/monitor-compat.ts');
 const { monitorNumericId } = loader.load('worker/src/utils/monitor-contract.ts');
 // 契约里的 id 是整数（UUID 经 monitorNumericId 映射），路径与查找都用这个。
 const ID1 = monitorNumericId('node-1');
@@ -307,11 +307,22 @@ const get = path => monitorCompatRoutes.request(path, { method: 'GET' }, env);
       body: JSON.stringify(config),
     }, env);
     assert.equal(saved.status, 200);
-    assert.equal((await saved.json()).success, true);
+    const savedBody = await saved.json();
+    assert.equal(savedBody.success, true);
+    assert.deepEqual(savedBody.config, config, 'PUT 响应应直接带回新配置');
 
     const loaded = await get(path);
     assert.equal(loaded.headers.get('Cache-Control'), 'private, no-store');
     assert.deepEqual(await loaded.json(), config);
+
+    // 5 秒 isolate 缓存：直接改库后立即 GET 仍返回旧值，保存路径清缓存后才更新。
+    monitorThemeConfigs.set(
+      'monitor_theme_config:LuminaPlus',
+      JSON.stringify({ accent: '#000' }),
+    );
+    assert.deepEqual(await (await get(path)).json(), config, '5 秒内应复用 isolate 缓存');
+    clearThemeConfigCache('LuminaPlus');
+    assert.deepEqual(await (await get(path)).json(), { accent: '#000' });
   } finally {
     adminAllowed = false;
   }

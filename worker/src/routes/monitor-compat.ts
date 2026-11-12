@@ -19,6 +19,7 @@ import type { Context } from 'hono';
 import type { Bindings, Variables } from '../index';
 import * as db from '../db/queries';
 import { getDatabase } from '../db/provider';
+import { getAdminSessionToken } from '../auth/session';
 import type { LiveSnapshot } from '../utils/do-response';
 import { readLiveSnapshot } from '../utils/do-response';
 import type { PublicClient } from '../utils/public-client';
@@ -121,6 +122,55 @@ function jsonWithCache(c: MonitorContext, value: unknown, seconds: number): Resp
   return c.json(value);
 }
 
+// 匿名访客的 /api/nodes 边缘缓存：命中时整条链路（限流 + LIVE_DATA DO + Supabase）
+// 都可以跳过。实时数字由 WebSocket 推送，几秒的静态元数据滞后对首页没有影响。
+const NODES_ANON_CACHE_SECONDS = 4;
+const NODES_CACHE_HEADER = 'X-CF-VPS-Monitor-Nodes-Cache';
+const NODES_CACHED_AT_HEADER = 'X-CF-VPS-Monitor-Nodes-Cached-At';
+
+/** 固定缓存键：主题会在 URL 上带随机 query 绕过浏览器缓存，不能让它切碎边缘缓存。 */
+function anonNodesCacheRequest(c: MonitorContext): Request {
+  return new Request(new URL('/api/nodes', c.req.url).toString(), { method: 'GET' });
+}
+
+async function getAnonNodesCache(c: MonitorContext): Promise<Response | null> {
+  if (typeof caches === 'undefined') return null;
+  try {
+    const cached = await caches.default.match(anonNodesCacheRequest(c));
+    if (!cached) return null;
+    const cachedAt = Number(cached.headers.get(NODES_CACHED_AT_HEADER) || 0);
+    if (!Number.isFinite(cachedAt) || Date.now() - cachedAt > NODES_ANON_CACHE_SECONDS * 1000) return null;
+    const headers = new Headers(cached.headers);
+    headers.delete(NODES_CACHED_AT_HEADER);
+    // 命中后仍是 2 秒的浏览器缓存，与原行为一致。
+    headers.set('Cache-Control', 'public, max-age=2, s-maxage=2');
+    headers.set(NODES_CACHE_HEADER, 'hit');
+    headers.set('Server-Timing', 'edge-cache;desc="hit";dur=0');
+    return new Response(cached.body, { status: cached.status, headers });
+  } catch {
+    return null;
+  }
+}
+
+function putAnonNodesCache(c: MonitorContext, response: Response): void {
+  if (typeof caches === 'undefined') return;
+  try {
+    const copy = response.clone();
+    const headers = new Headers(copy.headers);
+    headers.set(NODES_CACHED_AT_HEADER, String(Date.now()));
+    headers.set('Cache-Control', `public, max-age=${NODES_ANON_CACHE_SECONDS}, s-maxage=${NODES_ANON_CACHE_SECONDS}`);
+    headers.set(NODES_CACHE_HEADER, 'stored');
+    const put = caches.default.put(
+      anonNodesCacheRequest(c),
+      new Response(copy.body, { status: copy.status, headers }),
+    );
+    if (c.executionCtx?.waitUntil) c.executionCtx.waitUntil(put.catch(() => undefined));
+    else void put.catch(() => undefined);
+  } catch {
+    // 边缘缓存只是省一次 DO/Supabase 往返，失败不影响响应正确性。
+  }
+}
+
 function recordOrNull(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -212,6 +262,14 @@ async function timed<T>(work: () => Promise<T>): Promise<{ ms: number; value: T 
 
 monitorCompatRoutes.get('/nodes', async (c) => {
   const startedAt = performance.now();
+  // 只有匿名访客能共享边缘缓存。带管理员会话的请求要保留 admin 位，必须绕过
+  // 缓存直达数据层。缓存命中时连限流一起跳过：命中本身不产生 DO/Supabase 成本。
+  const anonymous = !getAdminSessionToken(c);
+  if (anonymous) {
+    const cached = await getAnonNodesCache(c);
+    if (cached) return cached;
+  }
+
   // 限流现在走 Rate Limiting 绑定（本地计数，约 0ms），所以先挡超限请求再取数：
   // 被限流的请求不会再去读 LIVE_DATA DO，也不会触发管理员校验。
   const rateLimitStarted = performance.now();
@@ -276,7 +334,10 @@ monitorCompatRoutes.get('/nodes', async (c) => {
   // The public theme home polls this endpoint while its store is hydrated.
   // Keep edge/browser caching short so a fresh Agent sample is not hidden
   // behind a stale nodes snapshot.
-  return jsonWithCache(c, { admin, nodes }, admin ? 0 : 2);
+  if (anonymous && !admin) c.header(NODES_CACHE_HEADER, 'miss');
+  const response = jsonWithCache(c, { admin, nodes }, admin ? 0 : 2);
+  if (anonymous && !admin) putAnonNodesCache(c, response);
+  return response;
 });
 
 // LuminaPlus' native theme-management page uses the hub's admin-only endpoint.

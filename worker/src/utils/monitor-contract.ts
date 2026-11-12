@@ -237,6 +237,7 @@ export type MonitorNodeStatic = {
   name: string;
   sort: number;
   public: boolean;
+  /** ISO 3166-1 alpha-2，识别不出时为空串（见 monitorCountryCode）。 */
   country: string;
   group: string;
   public_remark: string;
@@ -263,6 +264,29 @@ export type MonitorNodeStatic = {
   total_tx: number;
 };
 
+/**
+ * monitor 契约的 `country` 必须是 ISO 3166-1 alpha-2（或空串）。
+ *
+ * 主题按国家码分组：monitor-theme-hex 的 `regionKey` 要求 `/^[A-Z]{2}$/` 且
+ * `Intl.DisplayNames` 认得（见 src/lib/groups.ts），其它值一律归到「未知地区」。
+ * 参考实现（/root/monitor）直接存 `ipinfo.io/{ip}/country` 返回的两位码。
+ *
+ * cf-vps 存的 `client.region` 是给面板展示的 `城市, 省/州, 国家码`，两个构造点
+ * 都把国家码放在最后一段：
+ * - routes/websocket.ts 的 requestRegion：`[cf.city, cf.region, cf.country]`
+ * - do/live-data.ts 的 regionFromGeoJsBody：`[city, region, country_code]`
+ * 所以取最后一段并校验即可；只接受末段是为了避免把两位数的城市名误当国家码。
+ */
+export function monitorCountryCode(region: unknown): string {
+  const text = typeof region === 'string' ? region.trim() : '';
+  if (!text) return '';
+  const parts = text.split(',').map(part => part.trim()).filter(Boolean);
+  const code = (parts[parts.length - 1] || '').toUpperCase();
+  // ZZ（ISO 的「未知」）与 XX（Cloudflare 等使用的占位）都不是真实国家，
+  // 主题也会把它们当未知地区，这里直接输出空串。
+  return /^[A-Z]{2}$/.test(code) && code !== 'ZZ' && code !== 'XX' ? code : '';
+}
+
 export function monitorNodeStatic(
   client: PublicClient,
   traffic?: Pick<MonitorTraffic, 'day_rx' | 'day_tx' | 'total_rx' | 'total_tx'> | null,
@@ -274,7 +298,7 @@ export function monitorNodeStatic(
     name: client.name,
     sort: client.sort_order ?? 0,
     public: !client.hidden,
-    country: client.region || '',
+    country: monitorCountryCode(client.region),
     group: client.group || '',
     public_remark: client.public_remark || '',
     os: client.os || '',
@@ -384,6 +408,7 @@ export type MonitorNode = {
   public: boolean;
   online: boolean;
   metrics: Record<string, unknown> | null;
+  /** ISO 3166-1 alpha-2，识别不出时为空串（见 monitorCountryCode）。 */
   country: string;
   group: string;
   public_remark: string;

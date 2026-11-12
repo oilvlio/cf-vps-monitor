@@ -24,6 +24,7 @@ const {
   buildMonitorPingRows,
   buildMonitorProbes,
   monitorNodeStatic,
+  monitorCountryCode,
   monitorTrafficWithTotals,
   monitorTaskIds,
   monitorTasksForClient,
@@ -290,6 +291,27 @@ const withTotals = monitorTrafficWithTotals(onlineLive, totals);
 assert.equal(withTotals.month_rx, 9 * 1024 ** 3);
 assert.equal(withTotals.day_rx, 100);
 assert.equal(withTotals.total_tx, 5e11);
+
+// --- 契约 country 只输出 ISO 3166-1 alpha-2 ---
+// 主题（如 monitor-theme-hex 的 regionKey）只认两位大写码，否则全部归到「未知地区」。
+// cf-vps 的 region 是展示串，国家码在最后一段；已是两位码时原样透传。
+assert.equal(monitorCountryCode('JP'), 'JP');
+assert.equal(monitorCountryCode('Kwai Chung, HK'), 'HK');
+assert.equal(monitorCountryCode('Kwai Chung, Hong Kong, HK'), 'HK');
+assert.equal(monitorCountryCode('  City ,  Region ,  sg '), 'SG');
+assert.equal(monitorCountryCode('Singapore'), '', '没有国家码的展示串不应猜测');
+assert.equal(monitorCountryCode('未知'), '');
+assert.equal(monitorCountryCode(''), '');
+assert.equal(monitorCountryCode(null), '');
+assert.equal(monitorCountryCode(undefined), '');
+assert.equal(monitorCountryCode(42), '');
+assert.equal(monitorCountryCode('ZZ'), '', 'ISO 未知码按未知地区处理');
+assert.equal(monitorCountryCode('XX'), '', '占位码按未知地区处理');
+assert.equal(monitorCountryCode('T1'), '', 'Tor 等非 ISO 值不应透传');
+
+// 静态投影吃的是同一条规则：展示串也不会漏进契约。
+assert.equal(monitorNodeStatic({ ...client, region: 'Kwai Chung, HK' }, totals).country, 'HK');
+assert.equal(monitorNodeStatic({ ...client, region: 'Singapore' }, totals).country, '');
 
 // --- ping 行 ---
 const pingResult = buildMonitorPingRows({

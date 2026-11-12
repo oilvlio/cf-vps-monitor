@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { LIVE_DATA_OBJECT_NAME } from '../src/utils/live-data-object.ts';
 import { createRuntimeFixture, eventually } from '../test-support/runtime-fixture.mjs';
 
 function reportAndAck(ws, report) {
@@ -33,7 +34,7 @@ test('native Durable Object storage retains offline HTTP and WebSocket metrics a
   ];
   const getStub = async () => {
     const namespace = await f.mf.getDurableObjectNamespace('LIVE_DATA');
-    return namespace.get(namespace.idFromName('global'));
+    return namespace.get(namespace.idFromName(LIVE_DATA_OBJECT_NAME));
   };
   let stub = await getStub();
   const mutate = (path, value, method = 'POST') => stub.fetch(`https://do/${path}`, { method, body: JSON.stringify(value) });

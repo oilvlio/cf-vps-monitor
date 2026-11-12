@@ -38,7 +38,7 @@ import { WEBHOOK_MESSAGE_MAX_CHARS } from '../utils/webhook';
 import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
 import { readJsonWithLimit, readRequestBytesWithLimit } from '../utils/request-body';
-import { liveDataId, liveDataStub as liveDataObjectStub } from '../utils/live-data-object';
+import { liveDataId, liveDataStub as liveDataObjectStub, legacyLiveDataId } from '../utils/live-data-object';
 import { bytesToBase64 } from '../utils/theme-package';
 import {
   auditLoginFailure,
@@ -2803,6 +2803,32 @@ adminRoutes.get('/do-location', async (c) => {
       error: 'DO location probe failed',
       detail: errorDetail(error),
       durableObjectId: id.toString(),
+    }, 502, { 'Cache-Control': 'private, no-store' });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+});
+
+adminRoutes.get('/do-retire-legacy', async (c) => {
+  const legacyId = legacyLiveDataId(c.env.LIVE_DATA);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort('legacy DO retire timed out'), 5_000);
+  try {
+    const response = await c.env.LIVE_DATA.get(legacyId).fetch(new Request('https://do/retire', {
+      method: 'POST',
+      signal: controller.signal,
+    }));
+    const body = await response.json().catch(() => null) as Record<string, unknown> | null;
+    return c.json({
+      status: response.status,
+      legacyObjectId: legacyId.toString(),
+      ...(body && typeof body === 'object' ? body : {}),
+    }, 200, { 'Cache-Control': 'private, no-store' });
+  } catch (error) {
+    return c.json({
+      error: 'Legacy DO retire failed',
+      detail: errorDetail(error),
+      legacyObjectId: legacyId.toString(),
     }, 502, { 'Cache-Control': 'private, no-store' });
   } finally {
     clearTimeout(timeoutId);

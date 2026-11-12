@@ -28,3 +28,13 @@ export function liveDataId(namespace: Bindings['LIVE_DATA']): DurableObjectId {
 export function liveDataStub(namespace: Bindings['LIVE_DATA']) {
   return namespace.get(liveDataId(namespace), { locationHint: LIVE_DATA_LOCATION_HINT });
 }
+
+/**
+ * 迁移前的对象名，只用于一次性退役旧对象：它还挂着 agent 的长连接，需要主动
+ * 断开让 agent 重连到新对象。平时不要再用它读写实时数据。
+ */
+export const LEGACY_LIVE_DATA_OBJECT_NAME = 'global';
+
+export function legacyLiveDataId(namespace: Bindings['LIVE_DATA']): DurableObjectId {
+  return namespace.idFromName(LEGACY_LIVE_DATA_OBJECT_NAME);
+}

@@ -867,6 +867,30 @@ export class LiveDataDO {
   }
 
   /**
+   * 一次性迁移工具：把对象上所有仍然连着的会话踢下线。
+   *
+   * 换对象名之后，agent 的长连接还挂在旧对象上；而 agent 只有在连接断开时才会
+   * 重连（`runWebSocketReporter` 的循环），于是旧对象继续收上报、新对象一直是空的。
+   * 主动 close 后 agent 会在几秒内重连到新对象。close 码用 1012（服务重启），
+   * agent 只对 401/403 做长退避，不会因此等 10 分钟。
+   */
+  private retireSessions(): Response {
+    const sockets = this.state.getWebSockets();
+    let closed = 0;
+    for (const socket of sockets) {
+      try {
+        socket.close(1012, 'Live data object retired');
+        closed += 1;
+      } catch {
+        // 已经断开的连接忽略
+      }
+    }
+    this.sessions.clear();
+    this.sessionRoles.clear();
+    return Response.json({ closed, total: sockets.length });
+  }
+
+  /**
    * monitor hub 的 WS 帧：`{admin, nodes}`（与 /api/nodes 同形）。
    * 只用 DO 内存里的静态投影 + 实时报告拼装，**不查库**；节奏跟随 agent 上报。
    * `admin` 取该连接建连时的身份，不能存在共享 meta 里——否则会广播给所有人。
@@ -2211,6 +2235,10 @@ export class LiveDataDO {
 
     if (request.method === 'GET' && url.pathname === '/diagnostics/location') {
       return this.reportLocation(request);
+    }
+
+    if (request.method === 'POST' && url.pathname === '/retire') {
+      return this.retireSessions();
     }
 
     if (request.method === 'POST' && url.pathname === '/clients-restore') {

@@ -826,6 +826,47 @@ export class LiveDataDO {
   }
 
   /**
+   * 诊断用：报告这个 DO 实际所在的 Cloudflare colo。
+   *
+   * DO 没有公开的“查询位置”接口；`request.cf` 在 DO 内部也可能为空，或只是入口
+   * 请求的机房。让 DO 自己发一个出站请求到 Cloudflare 的 trace 端点，出站请求
+   * 从 DO 所在数据中心发出，响应里的 `colo=` 就是 DO 的位置（至少是极近的机房）。
+   */
+  private async reportLocation(request: Request): Promise<Response> {
+    const cf = (request as Request & { cf?: { colo?: string; country?: string } }).cf;
+    let traceColo: string | null = null;
+    let traceError: string | null = null;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort('do location trace timed out'), 3_000);
+    try {
+      const response = await fetch('https://www.cloudflare.com/cdn-cgi/trace', {
+        signal: controller.signal,
+        headers: { 'User-Agent': 'cf-vps-monitor-do-location' },
+      });
+      if (!response.ok) {
+        traceError = `trace HTTP ${response.status}`;
+      } else {
+        const text = await response.text();
+        traceColo = text.split('\n')
+          .map(line => line.trim())
+          .find(line => line.startsWith('colo='))
+          ?.slice('colo='.length) || null;
+      }
+    } catch (error) {
+      traceError = error instanceof Error ? error.message : String(error);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+    return Response.json({
+      cfColo: cf?.colo ?? null,
+      cfCountry: cf?.country ?? null,
+      traceColo,
+      traceError,
+      checkedAt: new Date().toISOString(),
+    }, { headers: { 'Cache-Control': 'no-store' } });
+  }
+
+  /**
    * monitor hub 的 WS 帧：`{admin, nodes}`（与 /api/nodes 同形）。
    * 只用 DO 内存里的静态投影 + 实时报告拼装，**不查库**；节奏跟随 agent 上报。
    * `admin` 取该连接建连时的身份，不能存在共享 meta 里——否则会广播给所有人。
@@ -2167,6 +2208,10 @@ export class LiveDataDO {
   async fetch(request: Request): Promise<Response> {
     await this.httpClientsReady;
     const url = new URL(request.url);
+
+    if (request.method === 'GET' && url.pathname === '/diagnostics/location') {
+      return this.reportLocation(request);
+    }
 
     if (request.method === 'POST' && url.pathname === '/clients-restore') {
       return this.restoreClients(request);

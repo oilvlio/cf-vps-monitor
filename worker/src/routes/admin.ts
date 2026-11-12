@@ -2787,6 +2787,32 @@ adminRoutes.get('/health', async (c) => {
   return c.json(result.body, result.status);
 });
 
+adminRoutes.get('/do-location', async (c) => {
+  const id = c.env.LIVE_DATA.idFromName('global');
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort('do location probe timed out'), 5_000);
+  try {
+    const response = await c.env.LIVE_DATA.get(id).fetch(new Request('https://do/diagnostics/location', {
+      method: 'GET',
+      signal: controller.signal,
+    }));
+    const body = await response.json().catch(() => null) as Record<string, unknown> | null;
+    return c.json({
+      status: response.status,
+      durableObjectId: id.toString(),
+      ...(body && typeof body === 'object' ? body : {}),
+    }, 200, { 'Cache-Control': 'private, no-store' });
+  } catch (error) {
+    return c.json({
+      error: 'DO location probe failed',
+      detail: errorDetail(error),
+      durableObjectId: id.toString(),
+    }, 502, { 'Cache-Control': 'private, no-store' });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+});
+
 adminRoutes.get('/capacity', async (c) => {
   const forceCounts = c.req.query('refresh_counts') === 'true' || c.req.query('refresh_counts') === '1';
   const database = getDatabase(c.env);

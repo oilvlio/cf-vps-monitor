@@ -41,6 +41,16 @@ const LOCAL_WS_RATE_LIMIT_SWEEP_EVERY = 256;
 let localWsRateLimitSweepCounter = 0;
 const localWsRateLimitBuckets = new Map<string, { count: number; resetAt: number; lastSeenAt: number }>();
 
+/**
+ * 上一次成功推进 DO 的静态投影。快照与流量总量都带 isolate 缓存，命中时返回同一
+ * 个对象引用；两者都没变就说明 DO 里的投影也是最新的，可以直接跳过这次写入，
+ * 省掉 WS 建连路径上的一次 DO 往返（以及一次无意义的全量帧广播）。
+ */
+let lastMonitorMetaPush: {
+  snapshot: Awaited<ReturnType<typeof getPublicClientsSnapshot>>;
+  totals: Record<string, db.MonitorTrafficTotals>;
+} | null = null;
+
 export function invalidateLiveViewerSettingsCache(): void {
   // Kept for the settings save path; viewer tokens stay on the fast default.
 }
@@ -238,9 +248,9 @@ async function enforceLiveClientsRateLimit(c: WsContext, ip: string): Promise<Re
 }
 
 async function enforceMonitorWsRateLimit(c: WsContext, ip: string): Promise<Response | null> {
-  return enforceWsRateLimit(
+  // 建连限流不要求跨机房强一致：本地计数即可省掉一次限流 DO 往返。
+  return localWsRateLimit(
     c,
-    'monitor-ws',
     'monitor-ws',
     ip,
     MONITOR_WS_RATE_LIMIT_MAX,
@@ -338,14 +348,21 @@ wsRoutes.get('/ws', async (c) => {
   ]);
 
   // 建连时把静态投影推进 DO，保证首帧就是当前数据；之后只在 /api/nodes 被访问时
-  // 节流刷新（节点增删），运行期每帧都不再查库。
+  // 节流刷新（节点增删），运行期每帧都不再查库。快照和流量都命中缓存时投影没有
+  // 变化，跳过这次 DO 写入。
   try {
     const totals = await db.getTrafficTotals(database, snapshot.clients.map(client => client.uuid))
       .catch(() => ({} as Record<string, db.MonitorTrafficTotals>));
-    await pushMonitorMetaToDo(
-      c,
-      snapshot.clients.map(client => monitorNodeStatic(client, totals[client.uuid])),
-    );
+    const unchanged = lastMonitorMetaPush !== null
+      && lastMonitorMetaPush.snapshot === snapshot
+      && lastMonitorMetaPush.totals === totals;
+    if (!unchanged) {
+      await pushMonitorMetaToDo(
+        c,
+        snapshot.clients.map(client => monitorNodeStatic(client, totals[client.uuid])),
+      );
+      lastMonitorMetaPush = { snapshot, totals };
+    }
   } catch {
     // DO 写失败不阻塞建连：旧缓存仍能出帧，下一次 /api/nodes 会刷新。
   }

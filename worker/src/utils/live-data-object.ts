@@ -15,7 +15,9 @@
  */
 
 import type { Bindings } from '../index';
-import { APAC_DO_LOCATION_HINT } from './durable-object-placement';
+// 显式 `.ts` 扩展名：这个模块会被 `worker/test/*-runtime.test.mjs` 用 Node 原生
+// 加载（不走 test-support 的自定义 loader），原生 ESM 不解析无扩展名的相对路径。
+import { APAC_DO_LOCATION_HINT } from './durable-object-placement.ts';
 
 export const LIVE_DATA_OBJECT_NAME = 'global-v2';
 

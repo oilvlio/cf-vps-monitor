@@ -7,7 +7,8 @@
  */
 
 import type { Bindings } from '../index';
-import { APAC_DO_LOCATION_HINT } from './durable-object-placement';
+// 同上：显式 `.ts` 扩展名以兼容 Node 原生加载。
+import { APAC_DO_LOCATION_HINT } from './durable-object-placement.ts';
 
 /** 迁移前后的对象名，调用方只应使用这里的 v2 名字。 */
 export const RATE_LIMIT_OBJECT_NAMES = {

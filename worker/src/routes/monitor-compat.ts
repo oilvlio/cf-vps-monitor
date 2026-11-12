@@ -265,6 +265,66 @@ function putAnonNodesCache(c: MonitorContext, response: Response): void {
   }
 }
 
+// 匿名访客的历史曲线边缘缓存：主题在 /traffic 与详情页会按节点扇出请求，同一
+// 数据中心里第二个访客起直接命中。键只保留 hours/step/series，忽略主题加上的
+// 随机 query，避免把同一份数据切成无数份。
+const METRICS_ANON_CACHE_SECONDS = 10;
+const METRICS_CACHE_HEADER = 'X-CF-VPS-Monitor-Metrics-Cache';
+const METRICS_CACHED_AT_HEADER = 'X-CF-VPS-Monitor-Metrics-Cached-At';
+
+function anonMetricsCacheRequest(
+  c: MonitorContext,
+  id: string,
+  hours: number,
+  step: number,
+  series: string,
+): Request {
+  const url = new URL(`/api/nodes/${encodeURIComponent(id)}/metrics`, c.req.url);
+  url.search = '';
+  url.searchParams.set('hours', String(hours));
+  url.searchParams.set('step', String(step));
+  url.searchParams.set('series', series);
+  return new Request(url.toString(), { method: 'GET' });
+}
+
+async function getAnonMetricsCache(cacheRequest: Request): Promise<Response | null> {
+  if (typeof caches === 'undefined') return null;
+  try {
+    const cached = await caches.default.match(cacheRequest);
+    if (!cached) return null;
+    const cachedAt = Number(cached.headers.get(METRICS_CACHED_AT_HEADER) || 0);
+    if (!Number.isFinite(cachedAt) || Date.now() - cachedAt > METRICS_ANON_CACHE_SECONDS * 1000) return null;
+    const headers = new Headers(cached.headers);
+    headers.delete(METRICS_CACHED_AT_HEADER);
+    headers.set('Cache-Control', `public, max-age=${METRICS_ANON_CACHE_SECONDS}, s-maxage=${METRICS_ANON_CACHE_SECONDS}`);
+    headers.set(METRICS_CACHE_HEADER, 'hit');
+    headers.set('Server-Timing', 'edge-cache;desc="hit";dur=0');
+    return new Response(cached.body, { status: cached.status, headers });
+  } catch {
+    return null;
+  }
+}
+
+function putAnonMetricsCache(c: MonitorContext, cacheRequest: Request, response: Response): void {
+  response.headers.set(METRICS_CACHE_HEADER, 'miss');
+  if (typeof caches === 'undefined') return;
+  try {
+    const copy = response.clone();
+    const headers = new Headers(copy.headers);
+    headers.set(METRICS_CACHED_AT_HEADER, String(Date.now()));
+    headers.set('Cache-Control', `public, max-age=${METRICS_ANON_CACHE_SECONDS}, s-maxage=${METRICS_ANON_CACHE_SECONDS}`);
+    headers.set(METRICS_CACHE_HEADER, 'stored');
+    const put = caches.default.put(
+      cacheRequest,
+      new Response(copy.body, { status: copy.status, headers }),
+    );
+    if (c.executionCtx?.waitUntil) c.executionCtx.waitUntil(put.catch(() => undefined));
+    else void put.catch(() => undefined);
+  } catch {
+    // 边缘缓存只是省一次 Supabase 往返，失败不影响响应正确性。
+  }
+}
+
 function recordOrNull(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -460,6 +520,20 @@ monitorCompatRoutes.get('/nodes/:id/metrics', async (c) => {
   const id = (c.req.param('id') || '').trim();
   if (!id) return c.json({ error: '缺少节点 id' }, 400);
 
+  const hours = monitorHours(c.req.query('hours'));
+  const step = monitorStep(hours, c.req.query('points'));
+  const series = (c.req.query('series') || '').trim();
+
+  // 匿名请求先看边缘缓存；管理员会话可能带额外可见性，不读写共享缓存。
+  const anonymous = !(await hasAdminSession(c));
+  const metricsCacheRequest = anonymous
+    ? anonMetricsCacheRequest(c, id, hours, step, series)
+    : null;
+  if (metricsCacheRequest) {
+    const cached = await getAnonMetricsCache(metricsCacheRequest);
+    if (cached) return cached;
+  }
+
   const startedAt = performance.now();
   const limited = await guardMonitorMetrics(c, 'monitor-metrics', monitorMetricsLimit());
   const rateLimitMs = performance.now() - startedAt;
@@ -477,13 +551,11 @@ monitorCompatRoutes.get('/nodes/:id/metrics', async (c) => {
     ? snapshot.clients.find(candidate => monitorNumericId(candidate.uuid) === numericId)
     : undefined;
   if (!client) {
-    return jsonWithCache(c, { metrics: [], ping: [], step: 60, probes: {}, loss: {} }, 30);
+    const response = jsonWithCache(c, { metrics: [], ping: [], step: 60, probes: {}, loss: {} }, 30);
+    if (metricsCacheRequest) putAnonMetricsCache(c, metricsCacheRequest, response);
+    return response;
   }
   const uuid = client.uuid;
-
-  const hours = monitorHours(c.req.query('hours'));
-  const step = monitorStep(hours, c.req.query('points'));
-  const series = (c.req.query('series') || '').trim();
 
   const endMs = Date.now();
   // 与 hub 一致：窗口起点吸附到 step 网格，第一个点因此是完整桶。
@@ -503,7 +575,9 @@ monitorCompatRoutes.get('/nodes/:id/metrics', async (c) => {
       'history;desc="memory";dur=0',
       `total;dur=${(performance.now() - startedAt).toFixed(1)}`,
     ].join(', '));
-    return jsonWithCache(c, cached, MONITOR_HISTORY_CACHE_SECONDS);
+    const response = jsonWithCache(c, cached, MONITOR_HISTORY_CACHE_SECONDS);
+    if (metricsCacheRequest) putAnonMetricsCache(c, metricsCacheRequest, response);
+    return response;
   }
 
   // 任务列表与落库间隔互不依赖，并行取；命中 30 秒缓存时不再触达数据库。
@@ -551,7 +625,9 @@ monitorCompatRoutes.get('/nodes/:id/metrics', async (c) => {
     `query;dur=${queryMs.toFixed(1)}`,
     `total;dur=${(performance.now() - startedAt).toFixed(1)}`,
   ].join(', '));
-  return jsonWithCache(c, payload, MONITOR_HISTORY_CACHE_SECONDS);
+  const response = jsonWithCache(c, payload, MONITOR_HISTORY_CACHE_SECONDS);
+  if (metricsCacheRequest) putAnonMetricsCache(c, metricsCacheRequest, response);
+  return response;
 });
 
 monitorCompatRoutes.get('/themes/:short/config', async (c) => {

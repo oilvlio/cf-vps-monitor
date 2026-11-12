@@ -51,6 +51,11 @@ const PUBLIC_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const PUBLIC_METADATA_RATE_LIMIT_MAX = 120;
 const PUBLIC_HISTORY_RATE_LIMIT_MAX = 60;
 const PUBLIC_LIVE_RATE_LIMIT_MAX = 180;
+
+/** `[[ratelimits]]` 绑定；旧部署/测试没有这个绑定时退回 RATE_LIMIT DO。 */
+type MetadataRateLimiter = {
+  limit(options: { key: string }): Promise<{ success: boolean }>;
+};
 const PUBLIC_ADMIN_RECOVERY_RATE_LIMIT_MAX = 5;
 const PUBLIC_METADATA_CACHE_SECONDS = 30;
 const PUBLIC_HISTORY_CACHE_SECONDS = 10;
@@ -718,8 +723,34 @@ async function publicApiRateLimit(c: PublicContext, bucket: string, maxRequests:
   }
 }
 
+/**
+ * 公开元数据读接口的限流。这类请求量大、可容忍跨机房近似计数，所以优先用
+ * Rate Limiting 绑定（本地计数，没有 DO 往返）；绑定未配置时保持原有强一致
+ * DO 行为，绑定调用异常时退回 isolate 本地计数。
+ */
+async function publicMetadataRateLimit(
+  c: PublicContext,
+  bucket: string,
+  maxRequests: number,
+): Promise<Response | null> {
+  const limiter = (c.env as unknown as { PUBLIC_METADATA_RATE_LIMITER?: MetadataRateLimiter })
+    .PUBLIC_METADATA_RATE_LIMITER;
+  if (limiter && typeof limiter.limit === 'function') {
+    try {
+      const result = await limiter.limit({ key: `${bucket}:${getClientIp(c)}` });
+      if (result.success) return null;
+      c.header('Retry-After', '60');
+      c.header('Cache-Control', 'no-store');
+      return c.json({ error: '公开 API 请求过于频繁，请 60 秒后再试' }, 429);
+    } catch {
+      return localPublicApiRateLimit(c, bucket, maxRequests);
+    }
+  }
+  return publicApiRateLimit(c, bucket, maxRequests);
+}
+
 export function guardPublicMetadata(c: PublicContext, bucket: string): Promise<Response | null> {
-  return publicApiRateLimit(c, `metadata:${bucket}`, PUBLIC_METADATA_RATE_LIMIT_MAX);
+  return publicMetadataRateLimit(c, `metadata:${bucket}`, PUBLIC_METADATA_RATE_LIMIT_MAX);
 }
 
 export function guardPublicHistory(c: PublicContext, bucket: string): Promise<Response | null> {

@@ -212,27 +212,19 @@ async function timed<T>(work: () => Promise<T>): Promise<{ ms: number; value: T 
 
 monitorCompatRoutes.get('/nodes', async (c) => {
   const startedAt = performance.now();
-  // 限流（RATE_LIMIT DO）和数据读取（LIVE_DATA DO + 快照）互不依赖，串行会让每次
-  // 首页轮询白等两个跨机房往返。这里同时发起，限流照旧优先决定是否 429。
+  // 限流现在走 Rate Limiting 绑定（本地计数，约 0ms），所以先挡超限请求再取数：
+  // 被限流的请求不会再去读 LIVE_DATA DO，也不会触发管理员校验。
   const rateLimitStarted = performance.now();
-  const guardTask = guardPublicMetadata(c, 'monitor-nodes')
-    .then(value => ({ value, ms: performance.now() - rateLimitStarted }));
+  const limited = await guardPublicMetadata(c, 'monitor-nodes');
+  if (limited) return limited;
+  const rateLimitMs = performance.now() - rateLimitStarted;
 
   const database = getDatabase(c.env);
-  const dataTask = Promise.all([
+  const [snapshotResult, liveResult, adminResult] = await Promise.all([
     timed(() => getPublicClientsSnapshot(c, database, false, false)),
     timed(() => readLive(c)),
     timed(() => hasAdminSession(c)),
   ]);
-
-  const guard = await guardTask;
-  if (guard.value) {
-    // 已发出的读取让它自己结束，不要拖慢 429 响应。
-    dataTask.catch(() => undefined);
-    return guard.value;
-  }
-  const rateLimitMs = guard.ms;
-  const [snapshotResult, liveResult, adminResult] = await dataTask;
   const snapshot = snapshotResult.value;
   const live = liveResult.value;
   const admin = adminResult.value;

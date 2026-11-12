@@ -164,6 +164,17 @@ export function themeContentType(path: string): string {
   return 'application/octet-stream';
 }
 
+/**
+ * Vite/Rolldown 的构建产物在文件名里带内容哈希（`index-CP_ec1xO.js`），内容变了
+ * 文件名就会变，可以放心长缓存；手写主题的 `/style.css`、`/assets/index.js` 之类
+ * 没有哈希，必须继续用短缓存，否则改完主题要等很久才能生效。
+ */
+export function isImmutableThemeAsset(path: string): boolean {
+  if (!path.startsWith('assets/')) return false;
+  const base = path.slice(path.lastIndexOf('/') + 1);
+  return /-[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+$/.test(base);
+}
+
 /** Normalize a hosted theme asset path; reject traversal, backslashes and long paths. */
 export function normalizeThemeAssetPath(path: string): string {
   const raw = String(path || '').replace(/^\/+/, '');
@@ -191,6 +202,7 @@ export async function fetchThemeFile(
   transform?: (text: string) => string,
   /** 同一份文件按格式改写时会产出不同字节，缓存键要分开。 */
   cacheVariant = '1',
+  immutable = false,
 ): Promise<Response> {
   // 改写后的内容单独占一个缓存键，避免与历史缓存的正文字节混淆。
   const cacheKey = new Request(transform ? `${cacheUrl}?rewritten=${cacheVariant}` : cacheUrl, { method: 'GET' });
@@ -252,7 +264,7 @@ export async function fetchThemeFile(
 
   const headers = new Headers({
     'Content-Type': contentType,
-    'Cache-Control': `public, max-age=${cacheSeconds}`,
+    'Cache-Control': `public, max-age=${cacheSeconds}${immutable ? ', immutable' : ''}`,
     'X-Content-Type-Options': 'nosniff',
   });
   const etag = upstream.headers.get('ETag');
@@ -328,6 +340,7 @@ export async function fetchPublishedThemeFile(
   contentType: string,
   cacheSeconds: number,
   transform?: (text: string) => string,
+  immutable = false,
 ): Promise<Response> {
   const cache = typeof caches !== 'undefined' ? caches.default : null;
   const key = new Request(`https://third-party-theme-cache.local/repo/${theme.owner}/${theme.repo}/${relativePath}${transform ? '?rewritten=2' : ''}`);
@@ -381,7 +394,7 @@ export async function fetchPublishedThemeFile(
   }
   const response = new Response(body, { headers: {
     'Content-Type': contentType,
-    'Cache-Control': `public, max-age=${cacheSeconds}`,
+    'Cache-Control': `public, max-age=${cacheSeconds}${immutable ? ', immutable' : ''}`,
     'X-Content-Type-Options': 'nosniff',
     'Server-Timing': `theme-archive;dur=${decompressMs};desc="${decompressMs > 0 ? 'decompress' : 'memory'}"`,
   } });

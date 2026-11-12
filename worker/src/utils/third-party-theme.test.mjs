@@ -8,6 +8,7 @@ const {
   serializeThirdPartyThemeSettings,
   rewriteThemeAssetPaths,
   transformThemeHtml,
+  isImmutableThemeAsset,
 } = createWorkerLoader().load('worker/src/utils/third-party-theme.ts');
 
 const options = {
@@ -72,6 +73,16 @@ const options = {
   assert.match(rewriteThemeAssetPaths(luminaStore), /Sa=2e3,Ca=3e4,wa=8e3,Ta=160/);
   const unrelatedStore = 'var Sa=2e3,Ca=3e4,wa=8e3,Ta=160;function run(){Ao().catch(()=>{})}';
   assert.match(rewriteThemeAssetPaths(unrelatedStore), /Sa=2e3,Ca=3e4,wa=8e3,Ta=160/);
+}
+
+// --- 只有 assets/ 下的内容哈希产物才能长缓存 ---
+{
+  assert.equal(isImmutableThemeAsset('assets/index-CP_ec1xO.js'), true);
+  assert.equal(isImmutableThemeAsset('assets/inter-latin-wght-normal-Dx4kXJAl.woff2'), true);
+  assert.equal(isImmutableThemeAsset('assets/index.js'), false, '没有哈希的文件不能 immutable');
+  assert.equal(isImmutableThemeAsset('assets/chunk-ABC.js'), false, '哈希太短不认');
+  assert.equal(isImmutableThemeAsset('images/foo-abcdefgh.png'), false, '只有 assets/ 下的产物走长缓存');
+  assert.equal(isImmutableThemeAsset('style.css'), false);
 }
 
 // --- HTML 注入：Monitor 不注入 base / 桥接脚本 ---

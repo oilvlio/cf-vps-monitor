@@ -142,8 +142,8 @@ async function getAnonNodesCache(c: MonitorContext): Promise<Response | null> {
     if (!Number.isFinite(cachedAt) || Date.now() - cachedAt > NODES_ANON_CACHE_SECONDS * 1000) return null;
     const headers = new Headers(cached.headers);
     headers.delete(NODES_CACHED_AT_HEADER);
-    // 命中后仍是 2 秒的浏览器缓存，与原行为一致。
-    headers.set('Cache-Control', 'public, max-age=2, s-maxage=2');
+    // 与边缘缓存 TTL 对齐：慢设备上主题 JS 执行较久时，预加载的响应也还在新鲜期内。
+    headers.set('Cache-Control', `public, max-age=${NODES_ANON_CACHE_SECONDS}, s-maxage=${NODES_ANON_CACHE_SECONDS}`);
     headers.set(NODES_CACHE_HEADER, 'hit');
     headers.set('Server-Timing', 'edge-cache;desc="hit";dur=0');
     return new Response(cached.body, { status: cached.status, headers });
@@ -334,9 +334,11 @@ monitorCompatRoutes.get('/nodes', async (c) => {
   // The public theme home polls this endpoint while its store is hydrated.
   // Keep edge/browser caching short so a fresh Agent sample is not hidden
   // behind a stale nodes snapshot.
-  if (anonymous && !admin) c.header(NODES_CACHE_HEADER, 'miss');
-  const response = jsonWithCache(c, { admin, nodes }, admin ? 0 : 2);
-  if (anonymous && !admin) putAnonNodesCache(c, response);
+  if (!anonymous || admin) return jsonWithCache(c, { admin, nodes }, 0);
+  // 匿名访客的浏览器缓存与边缘缓存用同一个 TTL，保证 preload 的响应能被主题复用。
+  c.header(NODES_CACHE_HEADER, 'miss');
+  const response = jsonWithCache(c, { admin, nodes }, NODES_ANON_CACHE_SECONDS);
+  putAnonNodesCache(c, response);
   return response;
 });
 

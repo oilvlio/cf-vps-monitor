@@ -153,8 +153,8 @@ const get = path => monitorCompatRoutes.request(path, { method: 'GET' }, env);
 {
   const res = await get('/nodes');
   assert.equal(res.status, 200);
-  assert.match(res.headers.get('Cache-Control'), /max-age=2/);
-  assert.match(res.headers.get('Cache-Control'), /s-maxage=2/);
+  assert.match(res.headers.get('Cache-Control'), /max-age=4/);
+  assert.match(res.headers.get('Cache-Control'), /s-maxage=4/);
   const body = await res.json();
   assert.equal(body.admin, false);
   assert.equal(body.nodes.length, 2);

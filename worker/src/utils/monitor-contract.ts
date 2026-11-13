@@ -430,12 +430,8 @@ function buildMonitorLiveMetrics(
   const memTotal = numberValue(live, 'ram_total') ?? staticNode.mem_total ?? 0;
   const swapTotal = numberValue(live, 'swap_total') ?? staticNode.swap_total ?? 0;
   const diskTotal = numberValue(live, 'disk_total') ?? staticNode.disk_total ?? 0;
-  const load = numberValue(live, 'load') ?? 0;
-  const load5 = numberValue(live, 'load5') ?? 0;
-  const load15 = numberValue(live, 'load15') ?? 0;
-  return {
+  const metrics: Record<string, unknown> = {
     cpu: numberValue(live, 'cpu') ?? 0,
-    load: [load, load5, load15],
     mem_total: memTotal,
     mem_used: numberValue(live, 'ram') ?? 0,
     swap_total: swapTotal,
@@ -453,6 +449,16 @@ function buildMonitorLiveMetrics(
     month_rx: traffic.month_rx,
     month_tx: traffic.month_tx,
   };
+  // 负载不可用（探针显式报 null，比如 lxcfs 未虚拟化 loadavg 的容器）时整个
+  // load 键缺省，与 monitor 一致（agent 没报 load 就没有这个键）；不能伪装成
+  // [0,0,0]，主题会把 0 读成「负载 0.00」而不是「无数据」。
+  const load1 = numberValue(live, 'load');
+  const load5 = numberValue(live, 'load5');
+  const load15 = numberValue(live, 'load15');
+  if (load1 != null && load5 != null && load15 != null) {
+    metrics.load = [load1, load5, load15];
+  }
+  return metrics;
 }
 
 export type BuildMonitorNodeArgs = {

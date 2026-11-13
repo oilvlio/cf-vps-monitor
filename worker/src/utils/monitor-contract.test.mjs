@@ -241,6 +241,19 @@ assert.equal(online.last_seen_ago, 0);
 assert.ok(online.metrics);
 assert.equal(online.metrics.cpu, 12.5);
 eq(online.metrics.load, [0.5, 0.4, 0.3]);
+// 探针显式报 load: null（lxcfs 未虚拟化 loadavg 等）时，load 键整个缺省，
+// 与 monitor 一致；不能伪装成 [0,0,0]。
+const loadUnavailable = buildMonitorNode({
+  client,
+  live: { ...onlineLive, load: null, load5: null, load15: null },
+  online: true,
+  lastReportMs: NOW - 3000,
+  traffic: { month_rx: 9 * 1024 ** 3, month_tx: 5 * 1024 ** 3, day_rx: 100, day_tx: 50, total_rx: 1e12, total_tx: 5e11 },
+  nowMs: NOW,
+  siteUrl: 'https://status.example',
+});
+assert.ok(loadUnavailable.metrics);
+assert.equal('load' in loadUnavailable.metrics, false, 'load 不可用时该键必须缺省');
 assert.equal(online.metrics.mem_total, 2 * 1024 ** 3);
 assert.equal(online.metrics.swap_used, 1024 ** 2);
 assert.equal(online.metrics.net_rx, 12345);

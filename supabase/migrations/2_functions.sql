@@ -3153,7 +3153,9 @@ set search_path = public
 as $$
 declare
   tid integer;
-  safe_bucket integer := least(greatest(coalesce(input_bucket_sec, 900), 60), 3600);
+  -- 桶宽上限给到一天：monitor 兼容层的 step 可达 10080（7 天窗口 + points 下限 60），
+  -- 桶宽被压到 3600 时 SQL 的桶和适配器的网格对不上。
+  safe_bucket integer := least(greatest(coalesce(input_bucket_sec, 900), 60), 86400);
   safe_limit integer := least(greatest(coalesce(input_limit, 1000), 1), 1000);
   result jsonb := '{}'::jsonb;
 begin
@@ -3194,7 +3196,9 @@ begin
               and (input_end is null or time <= input_end::timestamptz)
           ) raw
           group by bucket_start
-          order by time asc
+          -- 超出 limit 时丢最老的桶、保留最新的（与 metrics 的 cfm_records_range_aggregated
+          -- 一致）：图表右侧的最新数据不能因为截断消失。外层 jsonb_agg 仍按时间升序输出。
+          order by bucket_start desc
           limit safe_limit
         ) row_data
       ), '[]'::jsonb)
@@ -3825,7 +3829,9 @@ stable
 set search_path = public
 as $$
 declare
-  safe_bucket integer := least(greatest(coalesce(input_bucket_sec, 60), 60), 3600);
+  -- 桶宽上限给到一天：monitor 兼容层的 step 可达 10080（7 天窗口 + points 下限 60），
+  -- 桶宽被压到 3600 时 SQL 的桶和适配器的网格对不上。
+  safe_bucket integer := least(greatest(coalesce(input_bucket_sec, 60), 60), 86400);
   safe_limit integer := least(greatest(coalesce(input_limit, 2000), 1), 4000);
   safe_sample integer := least(greatest(coalesce(input_sample_sec, 60), 3), 3600);
 begin

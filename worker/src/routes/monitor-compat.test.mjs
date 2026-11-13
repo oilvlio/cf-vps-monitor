@@ -142,7 +142,7 @@ const loader = createWorkerLoader({
 });
 
 const { monitorCompatRoutes, clearMonitorHistoryCache, clearMonitorMetricsMetaCache, clearThemeConfigCache } = loader.load('worker/src/routes/monitor-compat.ts');
-const { monitorNumericId } = loader.load('worker/src/utils/monitor-contract.ts');
+const { monitorNumericId } = loader.load('worker/src/monitor/contract.ts');
 // 契约里的 id 是整数（UUID 经 monitorNumericId 映射），路径与查找都用这个。
 const ID1 = monitorNumericId('node-1');
 const ID2 = monitorNumericId('node-2');

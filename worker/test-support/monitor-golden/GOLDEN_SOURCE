@@ -1,0 +1,30 @@
+hub-golden.json 为 monitor 主题契约的形状黄金样本（键集合 + 类型 + 单位不变量）。
+
+权威来源：
+- monitor 仓库 src/api.rs 的 node_view()（公开视图）、PUBLIC_METRICS、me()、
+  metrics() 响应包络，src/db.rs 的 metrics()/close_bucket() 行形状；
+- 版本锚点：monitor/web-theme.pin 记录的 v1.4.2
+  50e006ac62d2b41e53768edc45a561eba84965df401fc28f4a08c648267e3a04；
+- 主题侧的对照物：Monitor-Theme-LuminaPlus 的 src/dev/mockApi.ts 与
+  src/types/models.ts（它的 zod 是 .catch() 降级，只能当参照，不能当检查器）。
+
+刷新方式（二选一）：
+
+1) 从运行中的 hub 录制（推荐，最贴近真实）：
+
+   node scripts/refresh-monitor-golden.mjs --from-hub-url http://127.0.0.1:8080
+
+   需要有可访问的 hub（本仓库的上游 monitor 可直接 cargo run），
+   脚本会请求 /api/me、/api/nodes、/api/nodes/<在线节点>/metrics?hours=6
+   与 ?series=ping，抽取形状后写回本文件。
+   注意：`--from-hub-url` 的 hub 版本必须与上面的 pin 一致，否则先升级 pin。
+
+2) 从 themes 仓库的 preview/hub.js 录制：
+
+   node scripts/refresh-monitor-golden.mjs --from-capture ./capture.json
+
+   capture.json 是 {"me":..., "nodes":..., "metrics":..., "ping":...} 的
+   原始响应快照（可由 preview/hub.js 或线上 hub 录制）。themes 仓库不在
+   本机时先用方式 1。
+
+更新后必须同时更新本文件的 pin 与 hub-golden.json 的 contractVersion。

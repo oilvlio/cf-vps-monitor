@@ -30,7 +30,8 @@ import { compactLiveReport, serializedBytes } from '../utils/live-report-state';
 import { evaluateHistoryCapacity } from '../utils/history-capacity';
 import { MAX_BACKUP_BYTES } from '../utils/backup';
 import { measureRestoredClientSnapshot, restoredClientMetadata } from '../utils/restore-client-snapshot';
-import { buildMonitorNodeFromStatic, type MonitorNodeStatic } from '../utils/monitor-contract';
+import { buildMonitorNodeFromStatic, monitorNodeStatic, type MonitorNodeStatic } from '../monitor/contract';
+import { toPublicClient } from '../utils/public-client';
 import { gzipSync, strToU8 } from 'fflate';
 
 // 客户端状态
@@ -124,8 +125,9 @@ const ADMIN_CLIENTS_SNAPSHOT_KEY = 'admin-clients:snapshot';
 const MONITOR_FRAME_MIN_INTERVAL_MS = 2_000;
 const MONITOR_WS_HEARTBEAT_MS = 15_000;
 const MONITOR_WS_HEARTBEAT_KEY = 'monitor:ws_heartbeat_at';
-const MONITOR_META_MAX_BYTES = 256 * 1024;
-const MONITOR_META_STORAGE_KEY = 'monitor:meta';
+// monitor 静态投影与当日/累计流量的自刷新间隔。DO 不再依赖 Worker 推送，
+// 有订阅者时按这个节奏自行从元数据/数据库派生。
+const MONITOR_DATA_REFRESH_MS = 60_000;
 const AGENT_AUTH_SNAPSHOT_PREFIX = 'agent-auth:';
 const AGENT_AUTH_UUID_PREFIX = 'agent-auth-uuid:';
 const GEO_REGION_CACHE_MS = 48 * 60 * 60 * 1000;
@@ -178,13 +180,6 @@ interface AgentPolicyMessage {
 
 function isObjectPayload(value: unknown): value is JsonObject {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-/** monitor 静态投影的最小形状校验：数字 id + UUID 关联字段。 */
-function isMonitorStaticNode(value: unknown): value is MonitorNodeStatic {
-  return isObjectPayload(value)
-    && typeof value.id === 'number' && Number.isInteger(value.id)
-    && typeof value.uuid === 'string' && value.uuid !== '';
 }
 
 function stringField(source: JsonObject, key: string): string {
@@ -468,11 +463,15 @@ export class LiveDataDO {
   private adminClientsUpdatedAt: number | null = null;
   private adminClientsSnapshot: AdminClientsSnapshot | null = null;
   private adminClientMetadata = new Map<string, JsonObject>();
-  // monitor 主题的静态节点投影（由 Worker 在 /api/nodes 与 /api/ws 建连时推进来）。
-  // 每帧只合入实时数据，不查库；持久化是为了 hibernation 唤醒后还能立刻出帧。
-  // 只存公开节点；admin 是每个订阅连接自己的属性（见 SessionAttachment.admin）。
-  private monitorMeta: MonitorNodeStatic[] | null = null;
-  private monitorMetaReady: Promise<void> | null = null;
+  // monitor 主题的静态节点投影：由本对象从 admin 元数据（缺失时回退数据库）自行
+  // 派生，不再由 Worker 推送。每帧只合入实时数据；`monitorTrafficTotals` 按
+  // MONITOR_DATA_REFRESH_MS 节流刷新，且只在存在 monitor 订阅者时才刷新。
+  // 只保留公开节点；admin 是每个订阅连接自己的属性（见 SessionAttachment.admin）。
+  private monitorStaticNodes: MonitorNodeStatic[] | null = null;
+  private monitorTrafficTotals: Record<string, db.MonitorTrafficTotals> = {};
+  private monitorDataRefreshedAt = 0;
+  private monitorDataPending: Promise<void> | null = null;
+  private monitorRefreshBroadcastPending = false;
   private monitorFrameAt = 0;
   private trafficResetDays = new Map<string, number>();
   private trafficResetDaysAt = 0;
@@ -802,27 +801,83 @@ export class LiveDataDO {
     }
   }
 
-  /** hibernation 唤醒后把持久化的静态投影读回内存。 */
-  private ensureMonitorMeta(): Promise<void> {
-    if (this.monitorMeta) return Promise.resolve();
-    if (this.monitorMetaReady) return this.monitorMetaReady;
-    this.monitorMetaReady = this.state.storage
-      .get<unknown>(MONITOR_META_STORAGE_KEY)
-      .then((value) => {
-        // 兼容两种持久化形态：当前是节点数组；早期版本是 { admin, nodes }。
-        const rawNodes = Array.isArray(value)
-          ? value
-          : isObjectPayload(value) && Array.isArray(value.nodes) ? value.nodes : null;
-        if (rawNodes) {
-          this.monitorMeta = rawNodes.filter((node): node is MonitorNodeStatic =>
-            isMonitorStaticNode(node));
+  /**
+   * 从 admin 元数据派生 monitor 的静态投影。
+   *
+   * `adminClientMetadata` 存的是完整的 `db.Client` 行（见 writeAdminClientsSnapshot），
+   * 字段足够覆盖 monitor 的静态部分；hidden 节点在这里过滤掉，保证不会随帧广播
+   * 给访客。
+   */
+  private buildMonitorStaticNodes(): MonitorNodeStatic[] {
+    const nodes: MonitorNodeStatic[] = [];
+    for (const raw of this.adminClientMetadata.values()) {
+      if (!isObjectPayload(raw)) continue;
+      const client = toPublicClient(raw as unknown as Parameters<typeof toPublicClient>[0]);
+      if (!client.uuid || client.hidden) continue;
+      nodes.push(monitorNodeStatic(client, this.monitorTrafficTotals[client.uuid]));
+    }
+    // 与 /api/nodes 的排序一致：sort_order 升序，同序按名字。
+    nodes.sort((left, right) => left.sort - right.sort || left.name.localeCompare(right.name));
+    return nodes;
+  }
+
+  /**
+   * 有 monitor 订阅者时刷新静态投影与当日/累计流量。
+   *
+   * 元数据优先取 `adminClientMetadata`（随 admin 操作更新并持久化）；冷启动且从未
+   * 有管理员操作过时，DO 自己查一次 `listClients` 兜底，避免首帧为空。
+   * 失败时保留上一份投影，并在下一个刷新周期重试。
+   */
+  private refreshMonitorData(now: number): Promise<void> {
+    if (this.monitorDataPending) return this.monitorDataPending;
+    this.monitorDataPending = (async () => {
+      try {
+        const database = this.getQueryDatabase();
+        if (database && this.adminClientMetadata.size === 0) {
+          const clients = await db.listClients(database).catch(() => []);
+          if (clients.length > 0) {
+            this.adminClientMetadata = new Map(
+              clients.map(client => [String(client.uuid), client as unknown as JsonObject]),
+            );
+          }
         }
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        this.monitorMetaReady = null;
-      });
-    return this.monitorMetaReady;
+        const uuids = [...this.adminClientMetadata.keys()];
+        if (database && uuids.length > 0) {
+          // getTrafficTotals 自带 10s 缓存，这里再按 60s 节流，热路径上不会每帧查库。
+          this.monitorTrafficTotals = await db.getTrafficTotals(database, uuids)
+            .catch(() => ({} as Record<string, db.MonitorTrafficTotals>));
+        }
+      } catch {
+        // 保持上一份投影；读取失败不应打断广播。
+      } finally {
+        this.monitorStaticNodes = this.buildMonitorStaticNodes();
+        this.monitorDataRefreshedAt = now;
+      }
+    })().catch(() => undefined).finally(() => {
+      this.monitorDataPending = null;
+    });
+    return this.monitorDataPending;
+  }
+
+  /** 等待静态投影可用；过期时顺带刷新一次（建连/心跳路径用）。 */
+  private async readyMonitorData(): Promise<void> {
+    const now = Date.now();
+    if (this.monitorStaticNodes === null || now - this.monitorDataRefreshedAt >= MONITOR_DATA_REFRESH_MS) {
+      await this.refreshMonitorData(now);
+    }
+  }
+
+  /** 元数据变更后标记投影过期，下一次广播会先刷新再补一帧。 */
+  private invalidateMonitorData(): void {
+    this.monitorDataRefreshedAt = 0;
+  }
+
+  private hasOpenMonitorSubscriber(): boolean {
+    for (const [id, role] of this.sessionRoles) {
+      if (role !== 'monitor') continue;
+      if (this.sessions.get(id)?.readyState === WebSocket.READY_STATE_OPEN) return true;
+    }
+    return false;
   }
 
   /**
@@ -893,10 +948,10 @@ export class LiveDataDO {
   /**
    * monitor hub 的 WS 帧：`{admin, nodes}`（与 /api/nodes 同形）。
    * 只用 DO 内存里的静态投影 + 实时报告拼装，**不查库**；节奏跟随 agent 上报。
-   * `admin` 取该连接建连时的身份，不能存在共享 meta 里——否则会广播给所有人。
+   * `admin` 取该连接建连时的身份，不能存在共享投影里——否则会广播给所有人。
    */
   private buildMonitorFrameText(nowMs: number, admin: boolean): string {
-    const meta = this.monitorMeta;
+    const meta = this.monitorStaticNodes;
     if (!meta) return JSON.stringify({ admin, nodes: [] });
     const nodes = meta.map((node) => {
       // online 只看 this.clients（在线上报表）；lastKnownClients 是离线保留值，
@@ -933,9 +988,30 @@ export class LiveDataDO {
   }
 
   private broadcastMonitorFrame(force = false): void {
+    // 没有 monitor 订阅者就不刷新也不出帧：totals 的数据库查询只在有观看者时发生。
+    if (!this.hasOpenMonitorSubscriber()) return;
     const now = Date.now();
     if (!force && now - this.monitorFrameAt < MONITOR_FRAME_MIN_INTERVAL_MS) return;
     this.monitorFrameAt = now;
+    // 投影或 totals 过期时先刷新，刷新后再补一帧，让节点增删/流量立刻可见。
+    const stale = now - this.monitorDataRefreshedAt >= MONITOR_DATA_REFRESH_MS;
+    if (this.monitorStaticNodes === null || stale) {
+      if (!this.monitorRefreshBroadcastPending) {
+        this.monitorRefreshBroadcastPending = true;
+        this.state.waitUntil(
+          this.refreshMonitorData(now)
+            .then(() => {
+              this.monitorRefreshBroadcastPending = false;
+              this.broadcastMonitorFrame(true);
+            })
+            .catch(() => {
+              this.monitorRefreshBroadcastPending = false;
+            }),
+        );
+      }
+      // 还没有任何投影时不发空帧：等刷新完成后的补帧。
+      if (this.monitorStaticNodes === null) return;
+    }
     for (const [id, session] of this.sessions) {
       if (this.sessionRoles.get(id) !== 'monitor') continue;
       if (session.readyState !== WebSocket.READY_STATE_OPEN) continue;
@@ -1587,6 +1663,8 @@ export class LiveDataDO {
   }
 
   private broadcastMetadataChanged(detail: JsonObject = {}, audience: 'all' | 'public' | 'admin' = 'all') {
+    // 节点增删/改名后静态投影要重建：标记过期，广播时的刷新会重建并补帧。
+    this.invalidateMonitorData();
     const timestamp = Date.now();
     for (const target of ['public', 'admin'] as const) {
       if (audience !== 'all' && audience !== target) continue;
@@ -1926,6 +2004,8 @@ export class LiveDataDO {
   private async storeAdminClientsSnapshot(snapshot: AdminClientsSnapshot): Promise<void> {
     await this.state.storage.put(ADMIN_CLIENTS_SNAPSHOT_KEY, snapshot);
     this.rememberAdminClientsSnapshot(snapshot);
+    // 元数据是 monitor 静态投影的来源，写入后让下一帧重建。
+    this.invalidateMonitorData();
   }
 
   private async writeAdminClientsSnapshot(request: Request): Promise<Response> {
@@ -2330,32 +2410,6 @@ export class LiveDataDO {
       return Response.json({ success: true });
     }
 
-    // monitor 主题 /api/ws 的静态节点缓存：由 Worker 在 /api/nodes 与 WS 建连时推进来。
-    // 之后每帧只用内存里的这份 + 实时报告，不查库。
-    if (request.method === 'POST' && url.pathname === '/monitor-meta') {
-      const raw = await request.text();
-      if (raw.length > MONITOR_META_MAX_BYTES) {
-        return new Response('Payload Too Large', { status: 413 });
-      }
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        return new Response('Bad Request', { status: 400 });
-      }
-      if (!isObjectPayload(parsed) || !Array.isArray(parsed.nodes)) {
-        return new Response('Bad Request', { status: 400 });
-      }
-      const nodes = parsed.nodes.filter((node): node is MonitorNodeStatic =>
-        isMonitorStaticNode(node));
-      this.monitorMeta = nodes;
-      this.state.waitUntil(
-        this.state.storage.put(MONITOR_META_STORAGE_KEY, nodes).catch(() => undefined),
-      );
-      this.broadcastMonitorFrame(true);
-      return new Response(null, { status: 204 });
-    }
-
     if (request.method === 'GET' && url.pathname === '/policy') {
       return Response.json(await this.buildAgentPolicy(Date.now(), false));
     }
@@ -2424,8 +2478,9 @@ export class LiveDataDO {
           this.runBackground('do_agent_policy', this.broadcastAgentPolicy(now, true));
         }
       } else if (role === 'monitor') {
-        // 首帧必须在 101 之前排好：先补上持久化缓存，再推一份全量快照。
-        this.state.waitUntil(this.ensureMonitorMeta().then(() => this.sendMonitorFrame(server)));
+        // 首帧必须是当前数据：先自派生静态投影与流量，再推一份全量快照。
+        await this.readyMonitorData();
+        this.state.waitUntil(this.sendMonitorFrame(server));
         this.state.waitUntil(this.scheduleExpiryAlarm(now));
         if (activeViewersBefore === 0) {
           this.runBackground('do_agent_policy', this.broadcastAgentPolicy(now, true));
@@ -2575,7 +2630,7 @@ export class LiveDataDO {
     if (hasMonitorSubscribers) {
       const heartbeatAt = await this.state.storage.get<number>(MONITOR_WS_HEARTBEAT_KEY);
       if (typeof heartbeatAt !== 'number' || !Number.isFinite(heartbeatAt) || heartbeatAt <= now) {
-        await this.ensureMonitorMeta();
+        await this.readyMonitorData();
         await this.state.storage.put(MONITOR_WS_HEARTBEAT_KEY, now + MONITOR_WS_HEARTBEAT_MS);
         // An unchanged snapshot still serves as a keepalive for clients that
         // declare the stream timed out when no node happens to report.

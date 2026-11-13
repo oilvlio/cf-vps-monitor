@@ -15,32 +15,27 @@
  */
 
 import { Hono } from 'hono';
-import type { Context } from 'hono';
+import { createAnonEdgeCache } from '../monitor/cache/edge-cache';
+import { TtlCache } from '../monitor/cache/ttl-cache';
+import { loadMonitorMetrics, clearMetricsMetaCache, findMonitorClient } from '../monitor/services/metrics';
+import { loadNodes, type MonitorContext } from '../monitor/services/nodes';
+import {
+  loadThemeConfig,
+  THEME_CONFIG_MAX_BYTES,
+  THEME_CONFIG_SETTING_PREFIX,
+} from '../monitor/services/theme-config';
+import { recordOrNull } from '../monitor/services/json';
 import type { Bindings, Variables } from '../index';
 import * as db from '../db/queries';
 import { getDatabase } from '../db/provider';
 import { getAdminSessionToken } from '../auth/session';
-import type { LiveSnapshot } from '../utils/do-response';
-import { readLiveSnapshot } from '../utils/do-response';
-import type { PublicClient } from '../utils/public-client';
-import type { MonitorTrafficTotals } from '../db/types';
 import { readJsonWithLimit } from '../utils/request-body';
-import { liveDataStub } from '../utils/live-data-object';
 import {
-  buildMonitorMetricsRows,
-  buildMonitorNode,
-  buildMonitorPingRows,
-  buildMonitorProbes,
   monitorHours,
   monitorMetricsRateLimit,
   monitorNumericId,
-  monitorNodeStatic,
   monitorStep,
-  monitorTaskIds,
-  monitorTasksForClient,
-  monitorTrafficWithTotals,
-  type MonitorNodeStatic,
-} from '../utils/monitor-contract';
+} from '../monitor/contract';
 import {
   getPublicClientsSnapshot,
   guardMonitorMetrics,
@@ -48,34 +43,13 @@ import {
   hasAdminSession,
 } from './public';
 
-type MonitorContext = Context<{ Bindings: Bindings; Variables: Variables }>;
+/** 测试用：清空 metrics 的元数据缓存（实现已搬到 services/metrics）。 */
+export { clearMetricsMetaCache as clearMonitorMetricsMetaCache };
 
-const HISTORY_BUCKET_LIMIT = 1500;
-const PING_BUCKET_LIMIT = 1200;
-const THEME_CONFIG_MAX_BYTES = 32 * 1024;
-const THEME_CONFIG_SETTING_PREFIX = 'monitor_theme_config:';
 // 主题配置只在管理员保存时变化；按 isolate 缓存 5 秒，避免每次页面加载都查一次
 // Supabase。GET 仍然 no-store，管理员保存后会主动清掉本地缓存。
 const THEME_CONFIG_CACHE_MS = 5_000;
-const themeConfigCache = new Map<string, { value: Record<string, unknown>; expiresAt: number }>();
-
-function themeConfigCacheGet(short: string): Record<string, unknown> | undefined {
-  const entry = themeConfigCache.get(short);
-  if (!entry) return undefined;
-  if (entry.expiresAt <= Date.now()) {
-    themeConfigCache.delete(short);
-    return undefined;
-  }
-  return entry.value;
-}
-
-function themeConfigCacheSet(short: string, value: Record<string, unknown>): void {
-  if (themeConfigCache.size >= 64) {
-    const oldest = themeConfigCache.keys().next().value;
-    if (oldest !== undefined) themeConfigCache.delete(oldest);
-  }
-  themeConfigCache.set(short, { value, expiresAt: Date.now() + THEME_CONFIG_CACHE_MS });
-}
+const themeConfigCache = new TtlCache<Record<string, unknown>>(THEME_CONFIG_CACHE_MS, 64);
 
 /** 测试和保存路径用：清掉一个（或全部）主题配置缓存。 */
 export function clearThemeConfigCache(short?: string): void {
@@ -83,60 +57,16 @@ export function clearThemeConfigCache(short?: string): void {
   else themeConfigCache.clear();
 }
 
-async function loadThemeConfig(
-  database: db.QueryDatabase,
-  short: string,
-): Promise<Record<string, unknown>> {
-  const saved = await db.getSetting(database, `${THEME_CONFIG_SETTING_PREFIX}${short}`).catch(() => null);
-  if (saved !== null) {
-    try {
-      const config = recordOrNull(JSON.parse(saved));
-      if (config && new TextEncoder().encode(JSON.stringify(config)).byteLength <= THEME_CONFIG_MAX_BYTES) {
-        return config;
-      }
-    } catch {
-      // Ignore malformed stored values and fall back to the uploaded theme record.
-    }
-  }
-  const theme = await db.getTheme(database, short).catch(() => null);
-  if (!theme?.config_json) return {};
-
-  try {
-    const config = recordOrNull(JSON.parse(theme.config_json));
-    if (!config || JSON.stringify(config).length > THEME_CONFIG_MAX_BYTES) return {};
-    return config;
-  } catch {
-    return {};
-  }
-}
 // 历史桶在 10s 内不会变化（records 按 record_persist_interval_sec 批量落库），
 // 而主题的实时视图是 5s 一轮、且延迟/丢包视图会按节点扇出请求。用一层进程内
 // 缓存吸收同一 isolate 内的重复查询：同一节点的同一查询 10s 内最多触达一次
 // 数据库，同一 NAT 后面的多个访客也能共享。
 const MONITOR_HISTORY_CACHE_SECONDS = 10;
 const MONITOR_HISTORY_CACHE_MAX_ENTRIES = 256;
-const monitorHistoryCache = new Map<string, { value: unknown; expiresAt: number }>();
-
-function monitorHistoryCacheGet(key: string): unknown {
-  const entry = monitorHistoryCache.get(key);
-  if (!entry) return undefined;
-  if (entry.expiresAt <= Date.now()) {
-    monitorHistoryCache.delete(key);
-    return undefined;
-  }
-  return entry.value;
-}
-
-function monitorHistoryCacheSet(key: string, value: unknown): void {
-  if (monitorHistoryCache.size >= MONITOR_HISTORY_CACHE_MAX_ENTRIES) {
-    const oldestKey = monitorHistoryCache.keys().next().value;
-    if (oldestKey) monitorHistoryCache.delete(oldestKey);
-  }
-  monitorHistoryCache.set(key, {
-    value,
-    expiresAt: Date.now() + MONITOR_HISTORY_CACHE_SECONDS * 1000,
-  });
-}
+const monitorHistoryCache = new TtlCache<unknown>(
+  MONITOR_HISTORY_CACHE_SECONDS * 1000,
+  MONITOR_HISTORY_CACHE_MAX_ENTRIES,
+);
 
 /** 测试用：清空进程内历史缓存。 */
 export function clearMonitorHistoryCache(): void {
@@ -152,63 +82,6 @@ function monitorMetricsLimit(): number {
   return monitorMetricsRateLimit(monitorKnownNodeCount);
 }
 
-// records 的落库间隔来自后台设置（record_persist_interval_sec，默认 120s）；
-// 一条记录代表这段时间的数据，metrics 的 minutes 需要它才能折算准确。
-const RECORD_SAMPLE_SETTING_KEY = 'record_persist_interval_sec';
-const DEFAULT_RECORD_SAMPLE_SEC = 120;
-const MIN_RECORD_SAMPLE_SEC = 3;
-const MAX_RECORD_SAMPLE_SEC = 3600;
-
-async function recordSampleSeconds(database: db.QueryDatabase): Promise<number> {
-  try {
-    const settings = await db.getSettingsByKeys(database, [RECORD_SAMPLE_SETTING_KEY]);
-    const value = Number(settings[RECORD_SAMPLE_SETTING_KEY]);
-    if (!Number.isFinite(value)) return DEFAULT_RECORD_SAMPLE_SEC;
-    return Math.min(MAX_RECORD_SAMPLE_SEC, Math.max(MIN_RECORD_SAMPLE_SEC, Math.floor(value)));
-  } catch {
-    return DEFAULT_RECORD_SAMPLE_SEC;
-  }
-}
-
-// ping 任务列表和落库间隔很少变化，但每次 metrics 都会各查一次 Supabase。按
-// isolate 缓存 30 秒，热路径上就能和区间查询并行、只留一次真正的数据库往返。
-const MONITOR_METRICS_META_CACHE_MS = 30_000;
-let monitorPingTasksCache: {
-  value: Awaited<ReturnType<typeof db.listPingTasks>>;
-  expiresAt: number;
-} | null = null;
-let monitorRecordSampleCache: { value: number; expiresAt: number } | null = null;
-
-/** 测试用：清空 metrics 的元数据缓存。 */
-export function clearMonitorMetricsMetaCache(): void {
-  monitorPingTasksCache = null;
-  monitorRecordSampleCache = null;
-}
-
-async function cachedPingTasks(
-  database: db.QueryDatabase,
-): Promise<{ tasks: Awaited<ReturnType<typeof db.listPingTasks>>; hit: boolean }> {
-  const now = Date.now();
-  if (monitorPingTasksCache && monitorPingTasksCache.expiresAt > now) {
-    return { tasks: monitorPingTasksCache.value, hit: true };
-  }
-  const tasks = await db.listPingTasks(database).catch(() => []);
-  monitorPingTasksCache = { value: tasks, expiresAt: now + MONITOR_METRICS_META_CACHE_MS };
-  return { tasks, hit: false };
-}
-
-async function cachedRecordSampleSeconds(
-  database: db.QueryDatabase,
-): Promise<{ value: number; hit: boolean }> {
-  const now = Date.now();
-  if (monitorRecordSampleCache && monitorRecordSampleCache.expiresAt > now) {
-    return { value: monitorRecordSampleCache.value, hit: true };
-  }
-  const value = await recordSampleSeconds(database);
-  monitorRecordSampleCache = { value, expiresAt: now + MONITOR_METRICS_META_CACHE_MS };
-  return { value, hit: false };
-}
-
 function jsonWithCache(c: MonitorContext, value: unknown, seconds: number): Response {
   c.header(
     'Cache-Control',
@@ -222,47 +95,24 @@ function jsonWithCache(c: MonitorContext, value: unknown, seconds: number): Resp
 const NODES_ANON_CACHE_SECONDS = 4;
 const NODES_CACHE_HEADER = 'X-CF-VPS-Monitor-Nodes-Cache';
 const NODES_CACHED_AT_HEADER = 'X-CF-VPS-Monitor-Nodes-Cached-At';
+const anonNodesEdgeCache = createAnonEdgeCache({
+  seconds: NODES_ANON_CACHE_SECONDS,
+  header: NODES_CACHE_HEADER,
+  cachedAtHeader: NODES_CACHED_AT_HEADER,
+});
 
 /** 固定缓存键：主题会在 URL 上带随机 query 绕过浏览器缓存，不能让它切碎边缘缓存。 */
 function anonNodesCacheRequest(c: MonitorContext): Request {
   return new Request(new URL('/api/nodes', c.req.url).toString(), { method: 'GET' });
 }
 
-async function getAnonNodesCache(c: MonitorContext): Promise<Response | null> {
-  if (typeof caches === 'undefined') return null;
+function waitUntilFrom(c: MonitorContext): ((task: Promise<unknown>) => void) | undefined {
   try {
-    const cached = await caches.default.match(anonNodesCacheRequest(c));
-    if (!cached) return null;
-    const cachedAt = Number(cached.headers.get(NODES_CACHED_AT_HEADER) || 0);
-    if (!Number.isFinite(cachedAt) || Date.now() - cachedAt > NODES_ANON_CACHE_SECONDS * 1000) return null;
-    const headers = new Headers(cached.headers);
-    headers.delete(NODES_CACHED_AT_HEADER);
-    // 与边缘缓存 TTL 对齐：慢设备上主题 JS 执行较久时，预加载的响应也还在新鲜期内。
-    headers.set('Cache-Control', `public, max-age=${NODES_ANON_CACHE_SECONDS}, s-maxage=${NODES_ANON_CACHE_SECONDS}`);
-    headers.set(NODES_CACHE_HEADER, 'hit');
-    headers.set('Server-Timing', 'edge-cache;desc="hit";dur=0');
-    return new Response(cached.body, { status: cached.status, headers });
+    const ctx = c.executionCtx;
+    return ctx?.waitUntil ? (task: Promise<unknown>) => ctx.waitUntil(task) : undefined;
   } catch {
-    return null;
-  }
-}
-
-function putAnonNodesCache(c: MonitorContext, response: Response): void {
-  if (typeof caches === 'undefined') return;
-  try {
-    const copy = response.clone();
-    const headers = new Headers(copy.headers);
-    headers.set(NODES_CACHED_AT_HEADER, String(Date.now()));
-    headers.set('Cache-Control', `public, max-age=${NODES_ANON_CACHE_SECONDS}, s-maxage=${NODES_ANON_CACHE_SECONDS}`);
-    headers.set(NODES_CACHE_HEADER, 'stored');
-    const put = caches.default.put(
-      anonNodesCacheRequest(c),
-      new Response(copy.body, { status: copy.status, headers }),
-    );
-    if (c.executionCtx?.waitUntil) c.executionCtx.waitUntil(put.catch(() => undefined));
-    else void put.catch(() => undefined);
-  } catch {
-    // 边缘缓存只是省一次 DO/Supabase 往返，失败不影响响应正确性。
+    // 无 ExecutionContext（本地/测试）时退化为直接等待。
+    return undefined;
   }
 }
 
@@ -272,6 +122,11 @@ function putAnonNodesCache(c: MonitorContext, response: Response): void {
 const METRICS_ANON_CACHE_SECONDS = 10;
 const METRICS_CACHE_HEADER = 'X-CF-VPS-Monitor-Metrics-Cache';
 const METRICS_CACHED_AT_HEADER = 'X-CF-VPS-Monitor-Metrics-Cached-At';
+const anonMetricsEdgeCache = createAnonEdgeCache({
+  seconds: METRICS_ANON_CACHE_SECONDS,
+  header: METRICS_CACHE_HEADER,
+  cachedAtHeader: METRICS_CACHED_AT_HEADER,
+});
 
 function anonMetricsCacheRequest(
   c: MonitorContext,
@@ -288,131 +143,7 @@ function anonMetricsCacheRequest(
   return new Request(url.toString(), { method: 'GET' });
 }
 
-async function getAnonMetricsCache(cacheRequest: Request): Promise<Response | null> {
-  if (typeof caches === 'undefined') return null;
-  try {
-    const cached = await caches.default.match(cacheRequest);
-    if (!cached) return null;
-    const cachedAt = Number(cached.headers.get(METRICS_CACHED_AT_HEADER) || 0);
-    if (!Number.isFinite(cachedAt) || Date.now() - cachedAt > METRICS_ANON_CACHE_SECONDS * 1000) return null;
-    const headers = new Headers(cached.headers);
-    headers.delete(METRICS_CACHED_AT_HEADER);
-    headers.set('Cache-Control', `public, max-age=${METRICS_ANON_CACHE_SECONDS}, s-maxage=${METRICS_ANON_CACHE_SECONDS}`);
-    headers.set(METRICS_CACHE_HEADER, 'hit');
-    headers.set('Server-Timing', 'edge-cache;desc="hit";dur=0');
-    return new Response(cached.body, { status: cached.status, headers });
-  } catch {
-    return null;
-  }
-}
-
-function putAnonMetricsCache(c: MonitorContext, cacheRequest: Request, response: Response): void {
-  response.headers.set(METRICS_CACHE_HEADER, 'miss');
-  if (typeof caches === 'undefined') return;
-  try {
-    const copy = response.clone();
-    const headers = new Headers(copy.headers);
-    headers.set(METRICS_CACHED_AT_HEADER, String(Date.now()));
-    headers.set('Cache-Control', `public, max-age=${METRICS_ANON_CACHE_SECONDS}, s-maxage=${METRICS_ANON_CACHE_SECONDS}`);
-    headers.set(METRICS_CACHE_HEADER, 'stored');
-    const put = caches.default.put(
-      cacheRequest,
-      new Response(copy.body, { status: copy.status, headers }),
-    );
-    if (c.executionCtx?.waitUntil) c.executionCtx.waitUntil(put.catch(() => undefined));
-    else void put.catch(() => undefined);
-  } catch {
-    // 边缘缓存只是省一次 Supabase 往返，失败不影响响应正确性。
-  }
-}
-
-function recordOrNull(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
-async function readLive(c: MonitorContext): Promise<LiveSnapshot> {
-  try {
-    const response = await liveDataStub(c.env.LIVE_DATA)
-      .fetch(new Request('https://do/live', { method: 'GET' }));
-    return await readLiveSnapshot(response) ?? { online: [], count: 0 };
-  } catch {
-    return { online: [], count: 0 };
-  }
-}
-
-function liveEntryFor(live: LiveSnapshot, uuid: string): Record<string, unknown> | null {
-  return recordOrNull(live.data?.[uuid]) ?? recordOrNull(live.last_known?.[uuid]);
-}
-
-function numberFrom(source: Record<string, unknown> | null, key: string): number {
-  const value = source?.[key];
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (typeof value === 'string' && value.trim() !== '') {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return 0;
-}
-
-/**
- * 把 monitor 的「静态节点投影」推进 Durable Object，供 `/api/ws` 逐帧合并实时数据。
- * 推送是节流的：DO 的缓存过期与否由这里控制，不是每帧都写。
- *
- * 这里只推**公开**节点（`getPublicClientsSnapshot(..., includeHidden=false)`），
- * 且**不带 admin**：`admin` 是每个订阅者自己的身份，由 `/api/ws` 在建连时作为
- * 连接属性传给 DO。共享缓存里存一份 admin 位会被广播给所有访客。
- */
-const MONITOR_META_PUSH_INTERVAL_MS = 30_000;
-let monitorMetaPushedAt = 0;
-
-export async function pushMonitorMetaToDo(
-  c: MonitorContext,
-  nodes: MonitorNodeStatic[],
-): Promise<void> {
-  const stub = liveDataStub(c.env.LIVE_DATA);
-  await stub.fetch(new Request('https://do/monitor-meta', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ nodes }),
-  }));
-}
-
-/** 节流后异步推送（不阻塞响应）。`force` 用于 WebSocket 建连：那一刻必须是最新的。 */
-export function scheduleMonitorMetaPush(
-  c: MonitorContext,
-  clients: readonly PublicClient[],
-  totals?: Record<string, MonitorTrafficTotals> | null,
-  force = false,
-): void {
-  const now = Date.now();
-  if (!force && now - monitorMetaPushedAt < MONITOR_META_PUSH_INTERVAL_MS) return;
-  monitorMetaPushedAt = now;
-  const nodes = clients.map(client => monitorNodeStatic(client, totals?.[client.uuid]));
-  const task = pushMonitorMetaToDo(c, nodes).catch(() => undefined);
-  try {
-    c.executionCtx.waitUntil(task);
-  } catch {
-    // 无 ExecutionContext（本地/测试）时忽略。
-  }
-}
-
-function siteUrl(c: MonitorContext): string {
-  try {
-    return new URL(c.req.url).origin;
-  } catch {
-    return '';
-  }
-}
-
 export const monitorCompatRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
-
-async function timed<T>(work: () => Promise<T>): Promise<{ ms: number; value: T }> {
-  const startedAt = performance.now();
-  const value = await work();
-  return { ms: performance.now() - startedAt, value };
-}
 
 monitorCompatRoutes.get('/nodes', async (c) => {
   const startedAt = performance.now();
@@ -420,7 +151,7 @@ monitorCompatRoutes.get('/nodes', async (c) => {
   // 缓存直达数据层。缓存命中时连限流一起跳过：命中本身不产生 DO/Supabase 成本。
   const anonymous = !getAdminSessionToken(c);
   if (anonymous) {
-    const cached = await getAnonNodesCache(c);
+    const cached = await anonNodesEdgeCache.get(anonNodesCacheRequest(c));
     if (cached) return cached;
   }
 
@@ -432,55 +163,18 @@ monitorCompatRoutes.get('/nodes', async (c) => {
   const rateLimitMs = performance.now() - rateLimitStarted;
 
   const database = getDatabase(c.env);
-  const [snapshotResult, liveResult, adminResult] = await Promise.all([
-    timed(() => getPublicClientsSnapshot(c, database, false, false)),
-    timed(() => readLive(c)),
-    timed(() => hasAdminSession(c)),
-  ]);
-  const snapshot = snapshotResult.value;
-  const live = liveResult.value;
-  const admin = adminResult.value;
-
-  const onlineSet = new Set(live.online);
-  const nowMs = Date.now();
-  monitorKnownNodeCount = snapshot.clients.length;
-  // day_* / total_* 一次批量取；失败时退回 0，而不是让整个节点列表报错。
-  const totalsLookup: db.TrafficTotalsLookup = {};
-  const totalsResult = await timed(() => db.getTrafficTotals(
-    database,
-    snapshot.clients.map(client => client.uuid),
-    totalsLookup,
-  ).catch(() => ({} as Record<string, MonitorTrafficTotals>)));
-  const totals = totalsResult.value;
-  const nodes = [...snapshot.clients]
-    .sort((left, right) => {
-      const orderDiff = (left.sort_order || 0) - (right.sort_order || 0);
-      return orderDiff !== 0 ? orderDiff : left.name.localeCompare(right.name);
-    })
-    .map((client: PublicClient) => {
-      const entry = liveEntryFor(live, client.uuid);
-      return buildMonitorNode({
-        client,
-        live: entry,
-        online: onlineSet.has(client.uuid),
-        lastReportMs: numberFrom(entry, 'lastReportTime'),
-        traffic: monitorTrafficWithTotals(entry, totals[client.uuid]),
-        nowMs,
-        siteUrl: siteUrl(c),
-      });
-    });
-
-  // 顺带刷新 DO 的静态缓存，让已连着的 /api/ws 客户端也能看到节点增删。
-  scheduleMonitorMetaPush(c, snapshot.clients, totals);
+  const loaded = await loadNodes(c, database);
+  const { admin, clients: snapshotClients, nodes } = loaded;
+  monitorKnownNodeCount = snapshotClients.length;
 
   // 分段耗时放在响应头里，线上直接对 Network 面板就能定位慢在哪一段；
   // `traffic-totals` 的 desc 还顺手标出这次是否命中 10s 缓存。
   c.header('Server-Timing', [
     `rate-limit;dur=${rateLimitMs.toFixed(1)}`,
-    `snapshot;dur=${snapshotResult.ms.toFixed(1)}`,
-    `live;dur=${liveResult.ms.toFixed(1)}`,
-    `admin;dur=${adminResult.ms.toFixed(1)}`,
-    `traffic-totals;dur=${totalsResult.ms.toFixed(1)};desc="${totalsLookup.cached ? 'cache' : 'database'}"`,
+    `snapshot;dur=${loaded.timings.snapshot.toFixed(1)}`,
+    `live;dur=${loaded.timings.live.toFixed(1)}`,
+    `admin;dur=${loaded.timings.admin.toFixed(1)}`,
+    `traffic-totals;dur=${loaded.timings.totals.toFixed(1)};desc="${loaded.totalsCacheHit ? 'cache' : 'database'}"`,
     `total;dur=${(performance.now() - startedAt).toFixed(1)}`,
   ].join(', '));
 
@@ -492,7 +186,7 @@ monitorCompatRoutes.get('/nodes', async (c) => {
   // 匿名访客的浏览器缓存与边缘缓存用同一个 TTL，保证 preload 的响应能被主题复用。
   c.header(NODES_CACHE_HEADER, 'miss');
   const response = jsonWithCache(c, { admin, nodes }, NODES_ANON_CACHE_SECONDS);
-  putAnonNodesCache(c, response);
+  anonNodesEdgeCache.put(waitUntilFrom(c), anonNodesCacheRequest(c), response);
   return response;
 });
 
@@ -530,7 +224,7 @@ monitorCompatRoutes.get('/nodes/:id/metrics', async (c) => {
     ? anonMetricsCacheRequest(c, id, hours, step, series)
     : null;
   if (metricsCacheRequest) {
-    const cached = await getAnonMetricsCache(metricsCacheRequest);
+    const cached = await anonMetricsEdgeCache.get(metricsCacheRequest);
     if (cached) return cached;
   }
 
@@ -546,13 +240,10 @@ monitorCompatRoutes.get('/nodes/:id/metrics', async (c) => {
   monitorKnownNodeCount = snapshot.clients.length;
   // 契约里的 id 是整数，DB 主键是 UUID：按同一套哈希映射回来，避免把哈希值当
   // UUID 查库。
-  const numericId = Number(id);
-  const client = Number.isInteger(numericId)
-    ? snapshot.clients.find(candidate => monitorNumericId(candidate.uuid) === numericId)
-    : undefined;
+  const client = findMonitorClient(snapshot.clients, id);
   if (!client) {
     const response = jsonWithCache(c, { metrics: [], ping: [], step: 60, probes: {}, loss: {} }, 30);
-    if (metricsCacheRequest) putAnonMetricsCache(c, metricsCacheRequest, response);
+    if (metricsCacheRequest) anonMetricsEdgeCache.put(waitUntilFrom(c), metricsCacheRequest, response);
     return response;
   }
   const uuid = client.uuid;
@@ -567,7 +258,7 @@ monitorCompatRoutes.get('/nodes/:id/metrics', async (c) => {
   // 键里带 startSec：窗口起点一变（跨过 step 边界），旧桶自然失效。任务列表
   // 不放进键里：它在 30 秒缓存内基本不变，提前命中比多查一次 Supabase 划算。
   const cacheKey = `${uuid}|${hours}|${step}|${series}|${startSec}`;
-  const cached = monitorHistoryCacheGet(cacheKey);
+  const cached = monitorHistoryCache.get(cacheKey);
   if (cached !== undefined) {
     c.header('Server-Timing', [
       `rate-limit;dur=${rateLimitMs.toFixed(1)}`,
@@ -576,57 +267,23 @@ monitorCompatRoutes.get('/nodes/:id/metrics', async (c) => {
       `total;dur=${(performance.now() - startedAt).toFixed(1)}`,
     ].join(', '));
     const response = jsonWithCache(c, cached, MONITOR_HISTORY_CACHE_SECONDS);
-    if (metricsCacheRequest) putAnonMetricsCache(c, metricsCacheRequest, response);
+    if (metricsCacheRequest) anonMetricsEdgeCache.put(waitUntilFrom(c), metricsCacheRequest, response);
     return response;
   }
 
-  // 任务列表与落库间隔互不依赖，并行取；命中 30 秒缓存时不再触达数据库。
-  const metaAt = performance.now();
-  const [pingTasksResult, sampleResult] = await Promise.all([
-    cachedPingTasks(database),
-    cachedRecordSampleSeconds(database),
-  ]);
-  const metaMs = performance.now() - metaAt;
-  const tasks = monitorTasksForClient(pingTasksResult.tasks, uuid);
-  const taskIds = monitorTaskIds(tasks);
-  const taskOrder = new Map(taskIds.map((taskId, index) => [taskId, index]));
-  const sampleSec = sampleResult.value;
-
-  const queryAt = performance.now();
-  const [records, byTask] = await Promise.all([
-    series === 'ping'
-      ? Promise.resolve([])
-      : db.getRecordsByTimeRangeAggregated(
-        database, uuid, start, end, step, HISTORY_BUCKET_LIMIT, sampleSec,
-      ).catch(() => []),
-    series === 'metrics' || taskIds.length === 0
-      ? Promise.resolve({})
-      : db.getPingRecordsForTasksRangeBucketed(database, uuid, taskIds, start, end, step, PING_BUCKET_LIMIT)
-        .catch(() => ({} as Record<string, never[]>)),
-  ]);
-  const queryMs = performance.now() - queryAt;
-
-  const metrics = series === 'ping' ? [] : buildMonitorMetricsRows(records, step);
-  const { ping, loss } = series === 'metrics'
-    ? { ping: [], loss: {} }
-    : buildMonitorPingRows(byTask, step, taskOrder);
-  const payload = {
-    metrics,
-    ping,
-    step,
-    probes: series === 'metrics' ? {} : buildMonitorProbes(tasks),
-    loss,
-  };
-  monitorHistoryCacheSet(cacheKey, payload);
+  // 任务列表、落库间隔与区间历史都由 services/metrics 装配。
+  const loaded = await loadMonitorMetrics(database, uuid, { start, end, step, series });
+  const payload = loaded.payload;
+  monitorHistoryCache.set(cacheKey, payload);
   c.header('Server-Timing', [
     `rate-limit;dur=${rateLimitMs.toFixed(1)}`,
     `snapshot;dur=${snapshotMs.toFixed(1)}`,
-    `meta;dur=${metaMs.toFixed(1)};desc="${pingTasksResult.hit && sampleResult.hit ? 'cache' : 'database'}"`,
-    `query;dur=${queryMs.toFixed(1)}`,
+    `meta;dur=${loaded.metaMs.toFixed(1)};desc="${loaded.metaCacheHit ? 'cache' : 'database'}"`,
+    `query;dur=${loaded.queryMs.toFixed(1)}`,
     `total;dur=${(performance.now() - startedAt).toFixed(1)}`,
   ].join(', '));
   const response = jsonWithCache(c, payload, MONITOR_HISTORY_CACHE_SECONDS);
-  if (metricsCacheRequest) putAnonMetricsCache(c, metricsCacheRequest, response);
+  if (metricsCacheRequest) anonMetricsEdgeCache.put(waitUntilFrom(c), metricsCacheRequest, response);
   return response;
 });
 
@@ -634,10 +291,10 @@ monitorCompatRoutes.get('/themes/:short/config', async (c) => {
   const short = (c.req.param('short') || '').trim();
   if (!short) return jsonWithCache(c, {}, 60);
 
-  let config = themeConfigCacheGet(short);
+  let config = themeConfigCache.get(short);
   if (config === undefined) {
     config = await loadThemeConfig(getDatabase(c.env), short);
-    themeConfigCacheSet(short, config);
+    themeConfigCache.set(short, config);
   }
   return jsonWithCache(c, config, 0);
 });

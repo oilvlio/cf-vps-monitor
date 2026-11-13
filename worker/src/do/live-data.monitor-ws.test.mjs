@@ -16,24 +16,49 @@ const METRICS_KEYS = [
   'net_rx', 'net_tx', 'tcp', 'udp', 'procs', 'uptime', 'total_rx', 'total_tx', 'month_rx', 'month_tx',
 ];
 
-const STATIC_NODES = [
+// 完整的 db.Client 行：DO 的静态投影直接由 admin 元数据派生（不再由 Worker 推送）。
+const CLIENTS = [
   {
-    id: 101, uuid: 'node-1', name: '东京', sort: 1, public: true, country: 'JP', group: '亚洲',
-    public_remark: '直连', os: 'Debian', kernel: '6.12.0', arch: 'x86_64', virt: 'kvm',
-    cpu_name: 'EPYC', cpu_cores: 2, mem_total: 2 * GIB, swap_total: GIB, disk_total: 40 * GIB,
-    agent_version: '1.2.0', billing_cycle: 'monthly', currency: 'CNY', price: 29.9,
-    expires_at: '2030-01-11', traffic_limit: 1024 * GIB, traffic_mode: 'sum',
-    traffic_reset_day: 1, day_rx: 0, day_tx: 0, total_rx: 0, total_tx: 0,
+    uuid: 'node-1', name: '东京', sort_order: 1, hidden: false,
+    region: 'JP', group: '亚洲', public_remark: '直连',
+    os: 'Debian', kernel_version: '6.12.0', arch: 'x86_64', virtualization: 'kvm',
+    cpu_name: 'EPYC', cpu_cores: 2,
+    mem_total: 2 * GIB, swap_total: GIB, disk_total: 40 * GIB,
+    version: '1.2.0', billing_cycle: 30, currency: 'CNY', price: 29.9,
+    expired_at: '2030-01-11T00:00:00.000Z',
+    traffic_limit: 1024 * GIB, traffic_limit_type: 'sum', traffic_reset_day: 1,
   },
   {
-    id: 202, uuid: 'node-2', name: '离线节点', sort: 2, public: true, country: 'US', group: '',
-    public_remark: '', os: 'Debian', kernel: '6.1', arch: 'x86_64', virt: 'kvm',
+    uuid: 'node-2', name: '离线节点', sort_order: 2, hidden: false,
+    region: 'US', group: '', public_remark: '',
+    os: 'Debian', kernel_version: '6.1', arch: 'x86_64', virtualization: 'kvm',
     cpu_name: 'Xeon', cpu_cores: 1, mem_total: GIB, swap_total: 0, disk_total: 20 * GIB,
-    agent_version: '1.0.0', billing_cycle: 'yearly', currency: 'USD', price: 5,
-    expires_at: null, traffic_limit: 0, traffic_mode: 'sum',
-    traffic_reset_day: 1, day_rx: 0, day_tx: 0, total_rx: 0, total_tx: 0,
+    version: '1.0.0', billing_cycle: 365, currency: 'USD', price: 5,
+    expired_at: '', traffic_limit: 0, traffic_limit_type: 'sum', traffic_reset_day: 1,
+  },
+  {
+    // 隐藏节点：留在 admin 元数据里，但绝不能进 monitor 帧。
+    uuid: 'node-hidden', name: '隐藏节点', sort_order: 3, hidden: true,
+    region: 'JP', group: '', public_remark: '',
+    os: 'Debian', kernel_version: '6.1', arch: 'x86_64', virtualization: 'kvm',
+    cpu_name: 'Xeon', cpu_cores: 1, mem_total: GIB, swap_total: 0, disk_total: 20 * GIB,
+    version: '1.0.0', billing_cycle: 30, currency: 'CNY', price: 5,
+    expired_at: '', traffic_limit: 0, traffic_limit_type: 'sum', traffic_reset_day: 1,
   },
 ];
+
+const TOTALS = {
+  'node-1': { day_rx: 100, day_tx: 50, total_rx: 1e12, total_tx: 5e11 },
+  'node-2': { day_rx: 0, day_tx: 0, total_rx: 2e9, total_tx: 1e9 },
+  'node-hidden': { day_rx: 0, day_tx: 0, total_rx: 0, total_tx: 0 },
+};
+
+const ADMIN_SNAPSHOT = {
+  clients: CLIENTS,
+  updatedAt: 1,
+  removed: [],
+  complete: true,
+};
 
 function monitoredSocket({ gzip = false, admin = false, id = 'monitor-1', role = 'monitor' } = {}) {
   let attachment = { role, clientId: id, clientName: id, hidden: false, gzip, admin };
@@ -62,7 +87,7 @@ function frameJson(frame) {
   return JSON.parse(strFromU8(gunzipSync(new Uint8Array(frame))));
 }
 
-function fixture({ storageEntries = [] } = {}) {
+function fixture({ storageEntries = [], listClients } = {}) {
   let now = Date.parse('2027-01-15T00:00:00.000Z');
   class Clock extends Date {
     constructor(...args) { super(...(args.length ? args : [now])); }
@@ -74,6 +99,10 @@ function fixture({ storageEntries = [] } = {}) {
     db: {
       getSettingsByKeys: async () => ({ record_enabled: 'false' }),
       listPublicClientRows: async () => [],
+      listClients: async () => listClients ?? CLIENTS,
+      getTrafficTotals: async (_database, uuids) => Object.fromEntries(
+        uuids.map(uuid => [uuid, TOTALS[uuid] ?? { day_rx: 0, day_tx: 0, total_rx: 0, total_tx: 0 }]),
+      ),
       getSetting: async () => null,
       setSetting: async () => {},
       listPingTasks: async () => [],
@@ -92,13 +121,20 @@ function fixture({ storageEntries = [] } = {}) {
     },
   });
   const { LiveDataDO } = loader.load('worker/src/do/live-data.ts');
+  const { monitorNumericId } = loader.load('worker/src/monitor/contract.ts');
   const object = new LiveDataDO(storage.state, {});
   return {
-    object, storage,
+    object, storage, monitorNumericId,
     get now() { return now; },
     advance(ms) { now += ms; },
     cold: () => new LiveDataDO(storage.state, {}),
   };
+}
+
+/** 等 DO 的冷启动元数据与 monitor 静态投影就绪（替代旧的 /monitor-meta 推送）。 */
+async function ready(object) {
+  await object.httpClientsReady;
+  await object.readyMonitorData();
 }
 
 function seedLive(object, now) {
@@ -127,81 +163,82 @@ function seedLive(object, now) {
       timestamp: now - 5 * 3600 * 1000,
     },
   });
+  // 隐藏节点也有实时上报，但静态投影会把它过滤掉。
+  object.clients.set('node-hidden', {
+    uuid: 'node-hidden',
+    name: '隐藏节点',
+    hidden: true,
+    lastReportTime: now - 1000,
+    lastReport: { cpu: 1, net_total_up: 1, net_total_down: 1, timestamp: now - 1000 },
+  });
 }
 
-async function pushMeta(object, body) {
-  return object.fetch(new Request('https://do/monitor-meta', {
+test('静态投影由 admin 快照派生：冷启动即可出帧，无需 Worker 推送', async () => {
+  const f = fixture({ storageEntries: [['admin-clients:snapshot', ADMIN_SNAPSHOT]] });
+  await ready(f.object);
+
+  const socket = monitoredSocket({ admin: true });
+  f.object.registerSession(socket.ws, socket.ws.deserializeAttachment());
+  f.object.broadcastMonitorFrame(true);
+  await f.storage.drain();
+
+  assert.equal(socket.frames.length, 1);
+  const frame = frameJson(socket.frames[0]);
+  assert.equal(frame.admin, true);
+  assert.deepEqual(frame.nodes.map(node => node.id), [f.monitorNumericId('node-1'), f.monitorNumericId('node-2')]);
+
+  const online = frame.nodes[0];
+  assert.equal(online.day_rx, 100);
+  assert.equal(online.day_tx, 50);
+  assert.equal(online.total_rx, 1e12);
+  assert.equal(online.total_tx, 5e11);
+});
+
+test('admin 元数据更新后，已连接的 monitor 无需 Worker 推送即可收到新投影', async () => {
+  const f = fixture({ storageEntries: [['admin-clients:snapshot', ADMIN_SNAPSHOT]] });
+  await ready(f.object);
+
+  const socket = monitoredSocket();
+  f.object.registerSession(socket.ws, socket.ws.deserializeAttachment());
+  f.object.broadcastMonitorFrame(true);
+  await f.storage.drain();
+  assert.equal(frameJson(socket.frames[0]).nodes.length, 2);
+
+  // 与后台的两步一致：先写快照，再发 metadata-refresh 通知变更。
+  await f.object.fetch(new Request('https://do/admin-clients-snapshot', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clients: [CLIENTS[0]], expected_version: 1 }),
+  }));
+  f.advance(3000);
+  await f.object.fetch(new Request('https://do/metadata-refresh', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    body: '{}',
   }));
-}
-
-test('monitor-meta 校验：缺 nodes 或非法 JSON 回 400', async () => {
-  const f = fixture();
-  const missing = await pushMeta(f.object, { admin: true });
-  assert.equal(missing.status, 400);
-  const bad = await f.object.fetch(new Request('https://do/monitor-meta', {
-    method: 'POST',
-    body: '{not json',
-  }));
-  assert.equal(bad.status, 400);
-});
-
-test('monitor-meta 丢弃 id 不是整数的节点（契约要求数字 id）', async () => {
-  const f = fixture();
-  const response = await pushMeta(f.object, {
-    admin: false,
-    nodes: [
-      ...STATIC_NODES,
-      { ...STATIC_NODES[0], id: 'node-1' },
-      { ...STATIC_NODES[0], id: 3.5 },
-      { ...STATIC_NODES[0], id: 303, uuid: '' },
-    ],
-  });
-  assert.equal(response.status, 204);
   await f.storage.drain();
-  const stored = await f.storage.state.storage.get('monitor:meta');
-  assert.deepEqual(stored.map(node => node.id), [101, 202]);
+
+  const latest = frameJson(socket.frames.at(-1));
+  assert.deepEqual(latest.nodes.map(node => node.id), [f.monitorNumericId('node-1')]);
 });
 
-test('monitor-meta 落库并可被冷启动读回', async () => {
+test('admin 快照缺失时回退数据库 listClients 派生投影', async () => {
   const f = fixture();
-  const response = await pushMeta(f.object, { nodes: STATIC_NODES });
-  assert.equal(response.status, 204);
+  await ready(f.object);
+
+  const socket = monitoredSocket();
+  f.object.registerSession(socket.ws, socket.ws.deserializeAttachment());
+  f.object.broadcastMonitorFrame(true);
   await f.storage.drain();
-  const stored = await f.storage.state.storage.get('monitor:meta');
-  assert.equal(Array.isArray(stored), true);
-  assert.equal(stored.length, 2);
 
-  const cold = f.cold();
-  const socket = monitoredSocket({ admin: true });
-  cold.registerSession(socket.ws, socket.ws.deserializeAttachment());
-  await cold.ensureMonitorMeta();
-  await cold.sendMonitorFrame(socket.ws);
   const frame = frameJson(socket.frames[0]);
-  assert.equal(frame.nodes.length, 2);
-  assert.equal(frame.admin, true);
+  // 依旧过滤隐藏节点。
+  assert.deepEqual(frame.nodes.map(node => node.id), [f.monitorNumericId('node-1'), f.monitorNumericId('node-2')]);
 });
 
-test('兼容旧版 {admin, nodes} 持久化形态', async () => {
-  const f = fixture({
-    storageEntries: [['monitor:meta', { admin: true, nodes: STATIC_NODES }]],
-  });
-  const cold = f.cold();
-  const socket = monitoredSocket({ admin: false });
-  cold.registerSession(socket.ws, socket.ws.deserializeAttachment());
-  await cold.ensureMonitorMeta();
-  await cold.sendMonitorFrame(socket.ws);
-  const frame = frameJson(socket.frames[0]);
-  assert.equal(frame.nodes.length, 2);
-  // 旧缓存里的 admin 不再生效：身份只看连接。
-  assert.equal(frame.admin, false);
-});
-
-test('admin 是每连接属性，不随共享 meta 广播', async () => {
-  const f = fixture();
-  await pushMeta(f.object, { nodes: STATIC_NODES });
+test('admin 是每连接属性，不随共享投影广播', async () => {
+  const f = fixture({ storageEntries: [['admin-clients:snapshot', ADMIN_SNAPSHOT]] });
+  await ready(f.object);
 
   const admin = monitoredSocket({ id: 'm-admin', admin: true });
   const guest = monitoredSocket({ id: 'm-guest', admin: false });
@@ -216,8 +253,8 @@ test('admin 是每连接属性，不随共享 meta 广播', async () => {
 });
 
 test('/api/ws 帧：{admin, nodes} 全量快照，静态字段 + 实时合并', async () => {
-  const f = fixture();
-  await pushMeta(f.object, { nodes: STATIC_NODES });
+  const f = fixture({ storageEntries: [['admin-clients:snapshot', ADMIN_SNAPSHOT]] });
+  await ready(f.object);
   seedLive(f.object, f.now);
 
   const socket = monitoredSocket({ admin: true });
@@ -234,7 +271,7 @@ test('/api/ws 帧：{admin, nodes} 全量快照，静态字段 + 实时合并', 
     assert.deepEqual(Object.keys(node).sort(), [...NODE_KEYS].sort());
   }
 
-  const online = frame.nodes.find(node => node.id === 101);
+  const online = frame.nodes.find(node => node.id === f.monitorNumericId('node-1'));
   assert.equal(online.online, true);
   assert.equal(online.name, '东京');
   assert.equal(online.sort, 1);
@@ -258,7 +295,7 @@ test('/api/ws 帧：{admin, nodes} 全量快照，静态字段 + 实时合并', 
   assert.equal(online.metrics.net_rx, 111);
   assert.equal(online.metrics.tcp, 30);
 
-  const offline = frame.nodes.find(node => node.id === 202);
+  const offline = frame.nodes.find(node => node.id === f.monitorNumericId('node-2'));
   assert.equal(offline.online, false);
   assert.equal(offline.metrics, null);
   assert.equal(offline.billing_cycle, 'yearly');
@@ -269,8 +306,8 @@ test('/api/ws 帧：{admin, nodes} 全量快照，静态字段 + 实时合并', 
 });
 
 test('?gzip 发 gzip 二进制帧，解压后与明文帧一致', async () => {
-  const f = fixture();
-  await pushMeta(f.object, { admin: false, nodes: STATIC_NODES });
+  const f = fixture({ storageEntries: [['admin-clients:snapshot', ADMIN_SNAPSHOT]] });
+  await ready(f.object);
   seedLive(f.object, f.now);
 
   const plain = monitoredSocket({ id: 'm-plain' });
@@ -291,15 +328,12 @@ test('?gzip 发 gzip 二进制帧，解压后与明文帧一致', async () => {
 });
 
 test('帧节流：2s 内只发一帧，超过间隔才补发', async () => {
-  const f = fixture();
-  await pushMeta(f.object, { admin: false, nodes: STATIC_NODES });
+  const f = fixture({ storageEntries: [['admin-clients:snapshot', ADMIN_SNAPSHOT]] });
+  await ready(f.object);
   seedLive(f.object, f.now);
 
   const socket = monitoredSocket();
   f.object.registerSession(socket.ws, socket.ws.deserializeAttachment());
-
-  // pushMeta 自己会 force 一帧（此刻还没有订阅者）。推进时钟，避开那次设置的节流窗口。
-  f.advance(3000);
 
   f.object.broadcastMonitorFrame(false);   // 第一帧
   await f.storage.drain();
@@ -322,8 +356,8 @@ test('帧节流：2s 内只发一帧，超过间隔才补发', async () => {
 });
 
 test('空闲期间定时推送快照，避免 Monitor WebSocket 被客户端判超时', async () => {
-  const f = fixture();
-  await pushMeta(f.object, { admin: false, nodes: STATIC_NODES });
+  const f = fixture({ storageEntries: [['admin-clients:snapshot', ADMIN_SNAPSHOT]] });
+  await ready(f.object);
   seedLive(f.object, f.now);
 
   const socket = monitoredSocket({ id: 'm-heartbeat' });
@@ -344,7 +378,7 @@ test('空闲期间定时推送快照，避免 Monitor WebSocket 被客户端判�
   await resumed.alarm();
   await f.storage.drain();
   assert.equal(socket.frames.length, 1);
-  assert.equal(frameJson(socket.frames[0]).nodes.length, STATIC_NODES.length);
+  assert.equal(frameJson(socket.frames[0]).nodes.length, 2);
   assert.equal(
     await f.storage.state.storage.get('monitor:ws_heartbeat_at'),
     f.now + 15_000,
@@ -375,8 +409,8 @@ test('Monitor 订阅者计入活跃观看人数，驱动 Agent 快速采样并�
 });
 
 test('首个 Monitor WebSocket 建连时向 Agent 推送 active 策略，最后断开后推送 idle 策略', async () => {
-  const f = fixture();
-  await pushMeta(f.object, { admin: false, nodes: STATIC_NODES });
+  const f = fixture({ storageEntries: [['admin-clients:snapshot', ADMIN_SNAPSHOT]] });
+  await f.object.httpClientsReady;
   const agent = monitoredSocket({ id: 'agent-policy', role: 'agent' });
   f.object.registerSession(agent.ws, agent.ws.deserializeAttachment());
 
@@ -404,9 +438,12 @@ test('首个 Monitor WebSocket 建连时向 Agent 推送 active 策略，最后�
   );
 });
 
-test('没有 monitor 订阅者时不产生帧，也不影响其它角色', async () => {
-  const f = fixture();
-  await pushMeta(f.object, { admin: false, nodes: STATIC_NODES });
+test('没有 monitor 订阅者时不产生帧，也不查库刷新 totals', async () => {
+  let totalsCalls = 0;
+  const f = fixture({ storageEntries: [['admin-clients:snapshot', ADMIN_SNAPSHOT]] });
+  await f.object.httpClientsReady;
+  const original = f.object.refreshMonitorData.bind(f.object);
+  f.object.refreshMonitorData = async (now) => { totalsCalls += 1; return original(now); };
 
   const viewer = monitoredSocket({ id: 'v1' });
   viewer.ws.deserializeAttachment = () => ({ role: 'viewer', clientId: 'v1', clientName: 'v1', hidden: false });
@@ -415,11 +452,12 @@ test('没有 monitor 订阅者时不产生帧，也不影响其它角色', async
   f.object.broadcastMonitorFrame(true);
   await f.storage.drain();
   assert.equal(viewer.frames.length, 0);
+  assert.equal(totalsCalls, 0, '没有 monitor 订阅者时不该触发 totals 刷新');
 });
 
-test('monitor 帧不含隐藏节点的实时明细（只出静态列表里的节点）', async () => {
-  const f = fixture();
-  await pushMeta(f.object, { admin: false, nodes: [STATIC_NODES[0]] });
+test('隐藏节点不出现在 monitor 帧里（即使有实时上报）', async () => {
+  const f = fixture({ storageEntries: [['admin-clients:snapshot', ADMIN_SNAPSHOT]] });
+  await ready(f.object);
   seedLive(f.object, f.now);
 
   const socket = monitoredSocket();
@@ -428,7 +466,7 @@ test('monitor 帧不含隐藏节点的实时明细（只出静态列表里的节
   await f.storage.drain();
 
   const frame = frameJson(socket.frames[0]);
-  assert.deepEqual(frame.nodes.map(node => node.id), [101]);
+  assert.deepEqual(frame.nodes.map(node => node.id), [f.monitorNumericId('node-1'), f.monitorNumericId('node-2')]);
 });
 
 console.log('live-data monitor ws tests passed');

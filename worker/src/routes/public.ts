@@ -34,7 +34,7 @@ import { liveDataStub } from '../utils/live-data-object';
 import { RATE_LIMIT_OBJECT_NAMES, rateLimitStub } from '../utils/rate-limit-object';
 import { base64ToBytes } from '../utils/theme-package';
 import { historyBucketSec } from '../utils/history-bucket';
-import { buildMonitorMe } from '../utils/monitor-contract';
+import { buildMonitorMe } from '../monitor/contract';
 
 const publicRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 type PublicContext = Context<{ Bindings: Bindings; Variables: Variables }>;

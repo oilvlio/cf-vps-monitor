@@ -48,7 +48,7 @@ const env = {
     get: () => ({
       fetch: async request => {
         if (!String(request?.url || '').endsWith('/live')) {
-          // 静态投影推送（scheduleMonitorMetaPush），不计入实时读取次数。
+          // 其它 DO 路径（如后台快照），不计入实时读取次数。
           return new Response('{}', { headers: { 'Content-Type': 'application/json' } });
         }
         liveCalls += 1;
@@ -115,7 +115,7 @@ const loader = createWorkerLoader({
 });
 
 const { monitorCompatRoutes } = loader.load('worker/src/routes/monitor-compat.ts');
-const { monitorNumericId } = loader.load('worker/src/utils/monitor-contract.ts');
+const { monitorNumericId } = loader.load('worker/src/monitor/contract.ts');
 const NODE_ID = monitorNumericId('node-1');
 
 const get = (query = '', headers) => monitorCompatRoutes.request(

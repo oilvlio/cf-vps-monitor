@@ -30,7 +30,7 @@ const {
   monitorTrafficWithTotals,
   monitorTaskIds,
   monitorTasksForClient,
-} = createWorkerLoader().load('worker/src/utils/monitor-contract.ts');
+} = createWorkerLoader().load('worker/src/monitor/contract.ts');
 
 // --- step: 预算公式与 preview/hub.js 的 history() 一致（hours 已 clamp 到 7d） ---
 // budget = clamp(points || 1440, 60, 1440); step = 60 * max(1, ceil(hours*3600/60/budget))

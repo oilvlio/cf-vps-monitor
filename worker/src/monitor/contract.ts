@@ -1,5 +1,5 @@
 /**
- * monitor 主题契约（hub 1.3.2 公开读接口）的纯投影逻辑。
+ * monitor 主题契约（hub 1.4.2 公开读接口）的纯投影逻辑。
  *
  * 契约以 monitor-probe/themes 仓库的 `preview/hub.js` 为准：那份假 hub 与 hub
  * 本体同步维护（"When the hub's public API changes, this file changes with it."），
@@ -17,8 +17,8 @@
  */
 
 import type { MonitorMetricsBucket, MonitorTrafficTotals, PingHistoryRecord, PingTask } from '../db/types';
-import type { PublicClient } from './public-client';
-import { trafficPeriodStart } from './traffic-samples';
+import type { PublicClient } from '../utils/public-client';
+import { trafficPeriodStart } from '../utils/traffic-samples';
 
 // 公开历史只暴露 7 天：rollup 的保留时间 record_preserve_time 默认且最大 168h
 // （见后台「保留时间」设置），再往前查只会得到空桶。monitor 的 history_days 和
@@ -28,6 +28,15 @@ export const MONITOR_MAX_HOURS = MONITOR_HISTORY_DAYS * 24;
 export const MONITOR_POINTS_MIN = 60;
 export const MONITOR_POINTS_MAX = 1440;
 export const MONITOR_POINTS_DEFAULT = 1440;
+
+/**
+ * 当前对齐的 monitor hub 契约版本（对外公开读接口的形状版本）。
+ *
+ * 权威锚点是 monitor 仓库的 `web-theme.pin`；widget 契约有任何形状变化时，
+ * 这里、`worker/test-support/monitor-golden/hub-golden.json` 和 GOLDEN_SOURCE
+ * 三处必须一起更新，否则 golden 测试会红灯。
+ */
+export const MONITOR_CONTRACT_VERSION = '1.4.2';
 
 // monitor 的具名账单周期（main.rs NAMED_CYCLES）：其余长度存为 `<n>m`，上限
 // 1200 个月（MAX_CYCLE，100 年）。

@@ -1,0 +1,173 @@
+{
+  "contractVersion": "1.4.2",
+  "generatedFrom": "monitor hub src/api.rs: node_view() public view, PUBLIC_METRICS, me(), metrics() envelope, db.rs metrics()/close_bucket() rows",
+  "sourcePin": "monitor/web-theme.pin v1.4.2 50e006ac62d2b41e53768edc45a561eba84965df401fc28f4a08c648267e3a04",
+  "notes": [
+    "形状（键集合 + 值类型）是权威部分；具体数值不参与比较。",
+    "数组元素的联合类型用数组表示，例如 [\"number\", \"null\"]。",
+    "keys 里的 null 表示该字段的键总是存在但值可为 null（类型见 types）。",
+    "optional 表示键可能缺省（例如 agent 未上报 load 时的 metrics.load）。"
+  ],
+  "endpoints": {
+    "me": {
+      "keys": ["authed", "github", "site_name", "public_page", "history_days", "site"],
+      "types": {
+        "authed": "boolean",
+        "github": "boolean",
+        "site_name": "string",
+        "public_page": "boolean",
+        "history_days": "number",
+        "site": "string"
+      }
+    },
+    "node": {
+      "keys": [
+        "id", "name", "country", "group", "public_remark", "sort", "public", "online",
+        "last_seen", "last_seen_ago", "metrics",
+        "os", "kernel", "arch", "virt", "cpu_name", "cpu_cores",
+        "mem_total", "swap_total", "disk_total", "agent_version",
+        "price", "currency", "billing_cycle", "expires_at", "expires_in",
+        "traffic_limit", "traffic_mode", "traffic_reset_day",
+        "total_rx", "total_tx", "month_rx", "month_tx", "month_used", "month_start",
+        "day_rx", "day_tx"
+      ],
+      "types": {
+        "id": "number",
+        "name": "string",
+        "country": "string",
+        "group": "string",
+        "public_remark": "string",
+        "sort": "number",
+        "public": "boolean",
+        "online": "boolean",
+        "last_seen": "number",
+        "last_seen_ago": ["number", "null"],
+        "metrics": ["object", "null"],
+        "os": "string",
+        "kernel": "string",
+        "arch": "string",
+        "virt": "string",
+        "cpu_name": "string",
+        "cpu_cores": "number",
+        "mem_total": "number",
+        "swap_total": "number",
+        "disk_total": "number",
+        "agent_version": "string",
+        "price": "number",
+        "currency": "string",
+        "billing_cycle": "string",
+        "expires_at": ["string", "null"],
+        "expires_in": ["number", "null"],
+        "traffic_limit": "number",
+        "traffic_mode": "string",
+        "traffic_reset_day": "number",
+        "total_rx": "number",
+        "total_tx": "number",
+        "month_rx": "number",
+        "month_tx": "number",
+        "month_used": "number",
+        "month_start": "string",
+        "day_rx": "number",
+        "day_tx": "number"
+      }
+    },
+    "nodeMetrics": {
+      "keys": [
+        "uptime", "cpu", "load", "mem_total", "mem_used", "swap_total", "swap_used",
+        "disk_total", "disk_used", "net_rx", "net_tx", "tcp", "udp", "procs",
+        "total_rx", "total_tx", "month_rx", "month_tx"
+      ],
+      "optional": ["load"],
+      "types": {
+        "uptime": "number",
+        "cpu": "number",
+        "load": "array",
+        "mem_total": "number",
+        "mem_used": "number",
+        "swap_total": "number",
+        "swap_used": "number",
+        "disk_total": "number",
+        "disk_used": "number",
+        "net_rx": "number",
+        "net_tx": "number",
+        "tcp": "number",
+        "udp": "number",
+        "procs": "number",
+        "total_rx": "number",
+        "total_tx": "number",
+        "month_rx": "number",
+        "month_tx": "number"
+      }
+    },
+    "metricsEnvelope": {
+      "keys": ["metrics", "ping", "probes", "loss", "step"],
+      "types": {
+        "metrics": "array",
+        "ping": "array",
+        "probes": "object",
+        "loss": "object",
+        "step": "number"
+      }
+    },
+    "metricsRow": {
+      "keys": [
+        "ts", "minutes", "cpu", "cpu_max", "mem_used", "disk_used",
+        "net_rx", "net_tx", "net_rx_max", "net_tx_max",
+        "swap_used", "tcp", "udp", "procs"
+      ],
+      "types": {
+        "ts": "number",
+        "minutes": "number",
+        "cpu": "number",
+        "cpu_max": "number",
+        "mem_used": "number",
+        "disk_used": "number",
+        "net_rx": "number",
+        "net_tx": "number",
+        "net_rx_max": "number",
+        "net_tx_max": "number",
+        "swap_used": "number",
+        "tcp": "number",
+        "udp": "number",
+        "procs": "number"
+      }
+    },
+    "pingRow": {
+      "keys": ["task_id", "ts", "latency", "band", "loss"],
+      "required": ["task_id", "ts", "latency"],
+      "types": {
+        "task_id": "number",
+        "ts": "number",
+        "latency": ["number", "null"],
+        "band": "array",
+        "loss": "number"
+      }
+    },
+    "wsFrame": {
+      "keys": ["nodes", "admin"],
+      "types": {
+        "nodes": "array",
+        "admin": "boolean"
+      }
+    },
+    "themeConfig": {
+      "type": "object"
+    }
+  },
+  "invariants": {
+    "id": "integer",
+    "last_seen": "integer-seconds",
+    "last_seen_ago": "integer-seconds-or-null",
+    "expires_in": "integer-days-or-null",
+    "metrics.ts": "multiple-of-step",
+    "ping.ts": "multiple-of-step",
+    "metrics.net_rx": "bytes-per-second",
+    "metrics.net_tx": "bytes-per-second",
+    "node.total_rx": "bytes",
+    "node.total_tx": "bytes",
+    "node.month_rx": "bytes",
+    "node.month_tx": "bytes",
+    "node.day_rx": "bytes",
+    "node.day_tx": "bytes"
+  }
+}

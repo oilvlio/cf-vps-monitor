@@ -117,11 +117,17 @@ const loader = createWorkerLoader({
       pingRecordTaskIds = taskIds;
       return ({
         1: [
-          { client: 'node-1', task_id: 1, time: new Date(NOW - 60_000).toISOString(), value: 42, min_latency: 30, max_latency: 55 },
-          { client: 'node-1', task_id: 1, time: new Date(NOW - 1_800_000).toISOString(), value: -1 },
+          {
+            client: 'node-1', task_id: 1, time: new Date(NOW - 60_000).toISOString(),
+            value: 42, sample_count: 10, loss_count: 3, min_latency: 30, max_latency: 55,
+          },
+          {
+            client: 'node-1', task_id: 1, time: new Date(NOW - 1_800_000).toISOString(),
+            value: -1, sample_count: 2, loss_count: 2,
+          },
         ],
-        2: [{ client: 'node-1', task_id: 2, time: new Date(NOW - 60_000).toISOString(), value: 5 }],
-        3: [{ client: 'node-1', task_id: 3, time: new Date(NOW - 60_000).toISOString(), value: 15 }],
+        2: [{ client: 'node-1', task_id: 2, time: new Date(NOW - 60_000).toISOString(), value: 5, sample_count: 5, loss_count: 0 }],
+        3: [{ client: 'node-1', task_id: 3, time: new Date(NOW - 60_000).toISOString(), value: 15, sample_count: 1, loss_count: 0 }],
       });
     },
   },
@@ -223,8 +229,15 @@ const get = path => monitorCompatRoutes.request(path, { method: 'GET' }, env);
   assert.deepEqual(body.ping.filter(row => row.ts === body.ping.at(-1).ts).map(row => row.task_id), [3, 1]);
   const lost = body.ping.find(row => row.latency === null);
   assert.equal(lost.loss, 100);
+  // 桶内 10 个样本丢 3 个：逐桶 loss 是桶内百分比,不能丢。
+  const partialLoss = body.ping.find(row => row.task_id === 1 && row.latency === 42);
+  assert.equal(partialLoss.loss, 30);
+  // 零丢包的探测不带 loss,也不进窗口字典(主题按缺失 = 0% 读取)。
+  const clean = body.ping.find(row => row.task_id === 3);
+  assert.equal(clean.loss, undefined);
   assert.deepEqual(body.probes, { 1: '电信', 3: '联通' });
-  assert.deepEqual(body.loss, {});
+  // 窗口丢包率 = 100 × (3+2) / (10+2),不取整。
+  assert.deepEqual(body.loss, { 1: (100 * 5) / 12 });
   // 数字 id 必须被换回 UUID 再查库。
   assert.deepEqual(recordCalls, ['node-1']);
 }

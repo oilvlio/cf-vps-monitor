@@ -391,11 +391,17 @@ const pingResult = buildMonitorPingRows({
 assert.equal(pingResult.ping.length, 2);
 assert.equal(pingResult.ping[0].latency, 42);
 assert.equal(pingResult.ping[0].loss, 30, '部分丢包的桶必须带 loss');
-eq(pingResult.ping[0].band, [30, 55]);   // step>60 才有 band
+eq(pingResult.ping[0].band, [30, 55]);   // hi > lo 才有 band
 assert.equal(pingResult.ping[1].latency, null);
 assert.equal(pingResult.ping[1].loss, 100);
 assert.equal(pingResult.ping[1].band, undefined);
 eq(pingResult.loss, { 1: (100 * 5) / 12 }, '窗口丢包率按样本数加权，且不取整');
+
+// latency 向下取整到整数毫秒（monitor 的 Tally::median 是整数除法）。
+const fractionalLatency = buildMonitorPingRows({
+  4: [{ client: 'n', task_id: 4, time: '2026-01-01T00:01:00.000Z', value: 42.7, sample_count: 3, loss_count: 0 }],
+}, 60);
+assert.equal(fractionalLatency.ping[0].latency, 42);
 
 // 零丢包的桶不写 loss，也不进窗口字典；1/180 的丢包向上取整为 1，不能被截断成 0。
 const lossRounding = buildMonitorPingRows({
@@ -415,11 +421,15 @@ const clampedLoss = buildMonitorPingRows({
 assert.equal(clampedLoss.ping[0].loss, 100);
 eq(clampedLoss.loss, { 3: 100 });
 
-// step<=60 不带 band
+// band 与 step 无关：step=60 且 hi>lo 也给；桶内无波动（hi==lo / 缺 min/max）不给。
 const smallStep = buildMonitorPingRows({
-  2: [{ client: 'n', task_id: 2, time: '2026-01-01T00:01:00.000Z', value: 10, min_latency: 5, max_latency: 20 }],
+  2: [
+    { client: 'n', task_id: 2, time: '2026-01-01T00:01:00.000Z', value: 10, min_latency: 5, max_latency: 20 },
+    { client: 'n', task_id: 2, time: '2026-01-01T00:02:00.000Z', value: 10, min_latency: 10, max_latency: 10 },
+  ],
 }, 60);
-assert.equal(smallStep.ping[0].band, undefined);
+eq(smallStep.ping[0].band, [5, 20]);
+assert.equal(smallStep.ping[1].band, undefined, '零高度带不该出现');
 
 // 空输入
 eq(buildMonitorPingRows(null, 60), { ping: [], loss: {} });

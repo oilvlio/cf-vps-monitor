@@ -664,7 +664,9 @@ export type MonitorPingResult = {
  * - 窗口：`100 × Σlost / Σtotal`，不取整；只把有丢包的探测放进顶层 `loss` 字典，
  *   主题按“字典里没有 = 0%”读取。
  *
- * `latency` 是桶内中位数（分桶 RPC 的 value），与 monitor 的 `Tally::median` 一致。
+ * `latency` 是桶内中位数（分桶 RPC 的 value）向下取整到整数毫秒，与 monitor 的
+ * `Tally::median`（整数除法）一致。`band` 只在桶内真有波动（hi > lo）时给，
+ * 与 step 无关（monitor 的 close_bucket 同一规则）。
  * `total` 取 `sample_count`；原始点没有这个字段时按一个样本计。
  *
  * 注意：分桶 RPC 的 `safe_limit` 最多返回 1000 个桶。窗口/points 让桶数超过上限时，
@@ -707,16 +709,15 @@ export function buildMonitorPingRows(
         ping.push({ ts, task_id: taskId, latency: null, loss: 100 });
         continue;
       }
-      const entry: MonitorPingRow = { ts, task_id: taskId, latency: value };
+      const entry: MonitorPingRow = { ts, task_id: taskId, latency: Math.floor(value) };
       // 部分丢包的桶也要带 loss，否则主题会把整桶当成 0%。
       if (lost > 0) entry.loss = Math.ceil((100 * lost) / total);
-      if (step > 60) {
-        const min = Number(row.min_latency);
-        const max = Number(row.max_latency);
-        const lo = Number.isFinite(min) ? min : value;
-        const hi = Number.isFinite(max) ? max : value;
-        entry.band = [Math.min(lo, hi), Math.max(lo, hi)];
-      }
+      // band 只在桶内真有波动（hi > lo）时给，且不限 step（monitor 的 close_bucket）。
+      const min = Number(row.min_latency);
+      const max = Number(row.max_latency);
+      const lo = Number.isFinite(min) ? min : value;
+      const hi = Number.isFinite(max) ? max : value;
+      if (hi > lo) entry.band = [Math.floor(Math.min(lo, hi)), Math.floor(Math.max(lo, hi))];
       ping.push(entry);
     }
   }

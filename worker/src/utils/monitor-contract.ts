@@ -160,6 +160,43 @@ export function monitorDate(value: string | null | undefined): string | null {
   return new Date(parsed).toISOString().slice(0, 10);
 }
 
+/**
+ * cf-vps 的 traffic_limit_type 映射到 monitor 的 traffic_mode。monitor 只有
+ * sum / up / down / max 四种（db.rs Traffic::month_used 的 match），cf-vps 额外
+ * 的 min / unlimited / bandwidth:* 都归到 sum。
+ */
+export function monitorTrafficMode(type: string | null | undefined): string {
+  switch (type) {
+    case 'up':
+    case 'down':
+    case 'max':
+      return type;
+    default:
+      return 'sum';
+  }
+}
+
+/**
+ * monitor 的 month_used（db.rs Traffic::month_used）：按节点计费的模式从
+ * 月累计的 rx / tx 里取值——up 只算上传、down 只算下载、max 取较大一边，其余
+ * （sum）两边相加。
+ */
+export function monitorMonthUsed(
+  traffic: Pick<MonitorTraffic, 'month_rx' | 'month_tx'>,
+  mode: string,
+): number {
+  switch (mode) {
+    case 'up':
+      return traffic.month_tx;
+    case 'down':
+      return traffic.month_rx;
+    case 'max':
+      return Math.max(traffic.month_rx, traffic.month_tx);
+    default:
+      return traffic.month_rx + traffic.month_tx;
+  }
+}
+
 /** 当前计费月起始日（YYYY-MM-01，按当前 UTC 月）。 */
 export function monitorMonthStart(nowMs: number): string {
   return `${new Date(nowMs).toISOString().slice(0, 8)}01`;
@@ -329,7 +366,7 @@ export function monitorNodeStatic(
     price,
     expires_at: monitorDate(client.expired_at),
     traffic_limit: client.traffic_limit || 0,
-    traffic_mode: client.traffic_limit_type || 'sum',
+    traffic_mode: monitorTrafficMode(client.traffic_limit_type),
     traffic_reset_day: client.traffic_reset_day || 1,
     day_rx: traffic?.day_rx ?? 0,
     day_tx: traffic?.day_tx ?? 0,
@@ -509,7 +546,7 @@ export function buildMonitorNodeFromStatic(args: BuildMonitorNodeFromStaticArgs)
     month_start: monitorMonthStart(nowMs),
     month_rx: traffic.month_rx,
     month_tx: traffic.month_tx,
-    month_used: traffic.month_rx + traffic.month_tx,
+    month_used: monitorMonthUsed(traffic, node.traffic_mode),
     day_rx: traffic.day_rx || node.day_rx,
     day_tx: traffic.day_tx || node.day_tx,
     total_rx: traffic.total_rx || node.total_rx,

@@ -17,6 +17,8 @@ const {
   monitorExpiresIn,
   monitorDate,
   monitorMonthStart,
+  monitorTrafficMode,
+  monitorMonthUsed,
   monitorNumericId,
   buildMonitorMe,
   buildMonitorNode,
@@ -93,6 +95,26 @@ assert.equal(monitorExpiresIn('nope', NOW), null);
 assert.equal(monitorDate('2026-01-11T05:06:07.000Z'), '2026-01-11');
 assert.equal(monitorDate(''), null);
 assert.equal(monitorMonthStart(NOW), '2026-01-01');
+
+// --- traffic_mode 映射与 month_used 按模式取值 ---
+assert.equal(monitorTrafficMode('sum'), 'sum');
+assert.equal(monitorTrafficMode('max'), 'max');
+assert.equal(monitorTrafficMode('up'), 'up');
+assert.equal(monitorTrafficMode('down'), 'down');
+// monitor 没有的取值（min / unlimited / bandwidth:* / 空值）归到 sum。
+assert.equal(monitorTrafficMode('min'), 'sum');
+assert.equal(monitorTrafficMode('unlimited'), 'sum');
+assert.equal(monitorTrafficMode('bandwidth:100Mbps'), 'sum');
+assert.equal(monitorTrafficMode(''), 'sum');
+assert.equal(monitorTrafficMode(null), 'sum');
+
+const trafficPair = { month_rx: 9, month_tx: 5 };
+assert.equal(monitorMonthUsed(trafficPair, 'sum'), 14);
+assert.equal(monitorMonthUsed(trafficPair, 'max'), 9);
+assert.equal(monitorMonthUsed(trafficPair, 'up'), 5);
+assert.equal(monitorMonthUsed(trafficPair, 'down'), 9);
+// 未知模式按 monitor 的 match 兜底：sum。
+assert.equal(monitorMonthUsed(trafficPair, 'min'), 14);
 
 // --- /api/me 形状 ---
 const me = buildMonitorMe({ siteUrl: 'https://status.example', siteName: '我的监控', authed: false });
@@ -180,6 +202,31 @@ assert.equal(online.month_start, '2026-01-01');
 assert.equal(online.month_rx, 9 * 1024 ** 3);
 assert.equal(online.month_tx, 5 * 1024 ** 3);
 assert.equal(online.month_used, 14 * 1024 ** 3);
+// 非默认模式：month_used 按模式取值（up 只算上行；max 取较大一边）。
+const upMode = buildMonitorNode({
+  client: { ...client, traffic_limit_type: 'up' },
+  live: onlineLive,
+  online: true,
+  lastReportMs: NOW - 3000,
+  traffic: { month_rx: 9 * 1024 ** 3, month_tx: 5 * 1024 ** 3, day_rx: 100, day_tx: 50, total_rx: 1e12, total_tx: 5e11 },
+  nowMs: NOW,
+  siteUrl: 'https://status.example',
+});
+assert.equal(upMode.traffic_mode, 'up');
+assert.equal(upMode.month_used, 5 * 1024 ** 3);
+// cf-vps 独有的 min / bandwidth:* 归到 sum。
+assert.equal(
+  buildMonitorNode({
+    client: { ...client, traffic_limit_type: 'bandwidth:100Mbps' },
+    live: onlineLive,
+    online: true,
+    lastReportMs: NOW - 3000,
+    traffic: { month_rx: 9 * 1024 ** 3, month_tx: 5 * 1024 ** 3, day_rx: 100, day_tx: 50, total_rx: 1e12, total_tx: 5e11 },
+    nowMs: NOW,
+    siteUrl: 'https://status.example',
+  }).traffic_mode,
+  'sum',
+);
 assert.equal(online.last_seen, Math.floor((NOW - 3000) / 1000));
 assert.equal(online.last_seen_ago, 0);
 

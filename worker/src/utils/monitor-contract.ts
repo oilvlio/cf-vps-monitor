@@ -18,6 +18,7 @@
 
 import type { MonitorMetricsBucket, MonitorTrafficTotals, PingHistoryRecord, PingTask } from '../db/types';
 import type { PublicClient } from './public-client';
+import { trafficPeriodStart } from './traffic-samples';
 
 // 公开历史只暴露 7 天：rollup 的保留时间 record_preserve_time 默认且最大 168h
 // （见后台「保留时间」设置），再往前查只会得到空桶。monitor 的 history_days 和
@@ -197,9 +198,24 @@ export function monitorMonthUsed(
   }
 }
 
-/** 当前计费月起始日（YYYY-MM-01，按当前 UTC 月）。 */
-export function monitorMonthStart(nowMs: number): string {
-  return `${new Date(nowMs).toISOString().slice(0, 8)}01`;
+/**
+ * 当前计费周期的起始日（YYYY-MM-DD，按 UTC 日期）。
+ *
+ * monitor 的 month_start 是「month_rx/tx 所在计费周期的开始」（db.rs
+ * period_start(today, reset_day)）。cf-vps 的 month_rx/tx 来自
+ * net_total_up/down，是按 traffic_reset_day 切的计费周期合计，所以起始日也要
+ * 用同一个 reset_day 算（复用 utils/traffic-samples.ts 的 trafficPeriodStart，
+ * 其顺延规则与旧版 Agent 一致：重置日大于当月天数时落到下月 1 日）。
+ *
+ * 与 monitor 的差异：hub 用 hub 本地时区的「今天」，而 cf-vps 的月流量边界
+ * 是 Agent 本地日期、适配器这层拿不到 Agent 的 utc_offset，只能按 UTC 日期
+ * 近似（重置日不跨日界时结果一致）。
+ */
+export function monitorMonthStart(nowMs: number, resetDay?: number | null): string {
+  const dateKey = new Date(nowMs).toISOString().slice(0, 10);
+  return resetDay == null
+    ? `${dateKey.slice(0, 8)}01`
+    : trafficPeriodStart(resetDay, dateKey);
 }
 
 /**
@@ -543,7 +559,7 @@ export function buildMonitorNodeFromStatic(args: BuildMonitorNodeFromStaticArgs)
     last_seen: lastSeen,
     last_seen_ago: lastSeenAgo,
     expires_in: monitorExpiresIn(node.expires_at, nowMs),
-    month_start: monitorMonthStart(nowMs),
+    month_start: monitorMonthStart(nowMs, node.traffic_reset_day),
     month_rx: traffic.month_rx,
     month_tx: traffic.month_tx,
     month_used: monitorMonthUsed(traffic, node.traffic_mode),

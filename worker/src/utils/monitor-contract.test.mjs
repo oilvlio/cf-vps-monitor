@@ -95,6 +95,13 @@ assert.equal(monitorExpiresIn('nope', NOW), null);
 assert.equal(monitorDate('2026-01-11T05:06:07.000Z'), '2026-01-11');
 assert.equal(monitorDate(''), null);
 assert.equal(monitorMonthStart(NOW), '2026-01-01');
+// month_start 按节点的 traffic_reset_day 取当前计费周期起始日（UTC 日期）。
+assert.equal(monitorMonthStart(NOW, 1), '2026-01-01');
+// 今天（2026-01-01）早于本月重置日时，取上个周期的起始日。
+assert.equal(monitorMonthStart(NOW, 15), '2025-12-15');
+assert.equal(monitorMonthStart(NOW, 31), '2025-12-31');
+// 重置日大于当月天数时顺延到下月 1 日（与 CF 的计费周期口径一致）。
+assert.equal(monitorMonthStart(Date.parse('2026-02-10T00:00:00.000Z'), 30), '2026-01-30');
 
 // --- traffic_mode 映射与 month_used 按模式取值 ---
 assert.equal(monitorTrafficMode('sum'), 'sum');

@@ -75,8 +75,14 @@ assert.equal(monitorBillingCycle(730), 'biennial');
 assert.equal(monitorBillingCycle(1095), 'triennial');
 assert.equal(monitorBillingCycle(-1), 'once');
 assert.equal(monitorBillingCycle(0), 'monthly');
-assert.equal(monitorBillingCycle(7), 'monthly');
-assert.equal(monitorBillingCycle(1), '60m');
+// 非整月周期映射成 <n>m（Math.round(days / 30.4375)），monitor 与 LuminaPlus 都按月数解析它。
+assert.equal(monitorBillingCycle(60), '2m');
+assert.equal(monitorBillingCycle(150), '5m');
+assert.equal(monitorBillingCycle(400), '13m');
+assert.equal(monitorBillingCycle(360), 'yearly');
+// 小于一个月的周期 monitor 没有对应项，按原样透传天数（LuminaPlus 按 days 摊销）。
+assert.equal(monitorBillingCycle(7), '7');
+assert.equal(monitorBillingCycle(1), '1');
 
 // --- 到期与日期 ---
 const NOW = Date.parse('2026-01-01T00:00:00.000Z');
@@ -314,19 +320,46 @@ assert.equal(monitorNodeStatic({ ...client, region: 'Kwai Chung, HK' }, totals).
 assert.equal(monitorNodeStatic({ ...client, region: 'Singapore' }, totals).country, '');
 
 // --- ping 行 ---
+// 桶内 10 个样本丢了 3 个：latency 取中位数，loss 按 ceil(100*3/10)=30 带上；
+// 整桶丢包仍是 {latency: null, loss: 100}；窗口丢包率 = 100*5/12，不取整。
 const pingResult = buildMonitorPingRows({
   1: [
-    { client: 'node-1', task_id: 1, time: '2026-01-01T00:01:00.000Z', value: 42, min_latency: 30, max_latency: 55 },
-    { client: 'node-1', task_id: 1, time: '2026-01-01T00:02:00.000Z', value: -1 },
+    {
+      client: 'node-1', task_id: 1, time: '2026-01-01T00:01:00.000Z',
+      value: 42, sample_count: 10, loss_count: 3, min_latency: 30, max_latency: 55,
+    },
+    {
+      client: 'node-1', task_id: 1, time: '2026-01-01T01:02:00.000Z',
+      value: -1, sample_count: 2, loss_count: 2,
+    },
   ],
 }, 3600);
 assert.equal(pingResult.ping.length, 2);
 assert.equal(pingResult.ping[0].latency, 42);
+assert.equal(pingResult.ping[0].loss, 30, '部分丢包的桶必须带 loss');
 eq(pingResult.ping[0].band, [30, 55]);   // step>60 才有 band
 assert.equal(pingResult.ping[1].latency, null);
 assert.equal(pingResult.ping[1].loss, 100);
 assert.equal(pingResult.ping[1].band, undefined);
-eq(pingResult.loss, {});
+eq(pingResult.loss, { 1: (100 * 5) / 12 }, '窗口丢包率按样本数加权，且不取整');
+
+// 零丢包的桶不写 loss，也不进窗口字典；1/180 的丢包向上取整为 1，不能被截断成 0。
+const lossRounding = buildMonitorPingRows({
+  2: [
+    { client: 'n', task_id: 2, time: '2026-01-01T00:01:00.000Z', value: 20, sample_count: 180, loss_count: 1 },
+    { client: 'n', task_id: 2, time: '2026-01-01T00:02:00.000Z', value: 21, sample_count: 180, loss_count: 0 },
+  ],
+}, 60);
+assert.equal(lossRounding.ping[0].loss, 1, 'ceil 保证 1/180 不会显示成 0');
+assert.equal(lossRounding.ping[1].loss, undefined, '零丢包不应带 loss 字段');
+eq(lossRounding.loss, { 2: (100 * 1) / 360 });
+
+// loss_count 脏数据被夹在 [0, sample_count]。
+const clampedLoss = buildMonitorPingRows({
+  3: [{ client: 'n', task_id: 3, time: '2026-01-01T00:01:00.000Z', value: 9, sample_count: 4, loss_count: 99 }],
+}, 60);
+assert.equal(clampedLoss.ping[0].loss, 100);
+eq(clampedLoss.loss, { 3: 100 });
 
 // step<=60 不带 band
 const smallStep = buildMonitorPingRows({

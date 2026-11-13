@@ -28,6 +28,18 @@ export const MONITOR_POINTS_MIN = 60;
 export const MONITOR_POINTS_MAX = 1440;
 export const MONITOR_POINTS_DEFAULT = 1440;
 
+// monitor 的具名账单周期（main.rs NAMED_CYCLES）：其余长度存为 `<n>m`，上限
+// 1200 个月（MAX_CYCLE，100 年）。
+const NAMED_BILLING_CYCLES = new Map<number, string>([
+  [1, 'monthly'],
+  [3, 'quarterly'],
+  [6, 'semiannual'],
+  [12, 'yearly'],
+  [24, 'biennial'],
+  [36, 'triennial'],
+]);
+const MAX_BILLING_MONTHS = 1200;
+
 function clamp(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return min;
   return Math.min(max, Math.max(min, value));
@@ -110,25 +122,26 @@ export function monitorGridTs(timeMsOrSec: number, step: number): number {
 }
 
 /**
- * cf-vps 的 billing_cycle 是「天数」（默认 30，-1 表示一次性，见前端 billing.ts 的
- * BILLING_CYCLE_OPTIONS / formatBillingCycle）。monitor 用的是字符串枚举，
- * 取自 preview/hub.js 的 SEED：monthly / quarterly / yearly / biennial /
- * triennial / semiannual / once / 60m。
- * 没有「日/周」档，所以这两个落到 closest 的 "60m" / "monthly"。
+ * cf-vps 的 billing_cycle 是「天数」（-1 表示一次性，见前端 billing.ts 的
+ * BILLING_CYCLE_OPTIONS / formatBillingCycle）。monitor 用的是字符串枚举：
+ * 具名周期 monthly / quarterly / semiannual / yearly / biennial / triennial
+ * 对应 1/3/6/12/24/36 个月，其余长度存为 `<n>m`（1..=1200 个月，见 monitor
+ * 的 main.rs cycle_months / cycle_name）。monitor 的测试同样按月数解析
+ * `<n>m`（"60m" 即 60 个月），主题（LuminaPlus normalizeBillingCycle）也是如此。
+ *
+ * 换算：天数 ≥ 一个月时按 Math.round(days / 30.4375) 取整月数，再映射到
+ * 具名周期或 `<n>m`。小于一个月的周期 monitor 没有对应项，按原样透传天数
+ * 字符串（LuminaPlus 会按 `kind: "days"` 正确摊销）。未设置（0/空）视为月付。
  */
 export function monitorBillingCycle(days: number | null | undefined): string {
   const value = Number(days);
-  if (!Number.isFinite(value) || value === 0) return 'monthly';
   if (value === -1) return 'once';
-  if (value === 1) return '60m';
-  if (value === 7) return 'monthly';
-  if (value >= 27 && value <= 32) return 'monthly';
-  if (value >= 87 && value <= 95) return 'quarterly';
-  if (value >= 175 && value <= 185) return 'semiannual';
-  if (value >= 360 && value <= 370) return 'yearly';
-  if (value >= 720 && value <= 750) return 'biennial';
-  if (value >= 1080 && value <= 1150) return 'triennial';
-  return 'monthly';
+  if (!Number.isFinite(value) || value <= 0) return 'monthly';
+  const months = Math.round(value / 30.4375);
+  if (months < 1) return String(Number.isInteger(value) ? value : Math.round(value));
+  const named = NAMED_BILLING_CYCLES.get(months);
+  if (named) return named;
+  return `${Math.min(months, MAX_BILLING_MONTHS)}m`;
 }
 
 /** 到期剩余天数（可为负 / null）。expired_at 为空返回 null。 */
@@ -591,9 +604,19 @@ export type MonitorPingResult = {
 
 /**
  * 把分桶后的 ping 记录投影成 monitor 的 ping 行。
- * - 原始/分桶点：`latency` 为桶内代表值（现有 RPC 给的是中位数；阶段 3 再对齐口径）。
- * - 整桶丢包（value < 0）：`{latency: null, loss: 100}`。
- * - step > 60 时带上 `band: [min, max]`。
+ *
+ * 丢包口径与 monitor 的 `db.rs` 对齐：
+ * - 逐桶：`ceil(100 × lost / total)`，只在 `lost > 0` 时写 `loss`。向上取整是为了让
+ *   “没有 loss 字段”严格表示该桶零丢包：截断会把 1/180 的丢包显示成 0。
+ * - 窗口：`100 × Σlost / Σtotal`，不取整；只把有丢包的探测放进顶层 `loss` 字典，
+ *   主题按“字典里没有 = 0%”读取。
+ *
+ * `latency` 是桶内中位数（分桶 RPC 的 value），与 monitor 的 `Tally::median` 一致。
+ * `total` 取 `sample_count`；原始点没有这个字段时按一个样本计。
+ *
+ * 注意：分桶 RPC 的 `safe_limit` 最多返回 1000 个桶。窗口/points 让桶数超过上限时，
+ * 这里的窗口丢包率只覆盖返回的那部分；需要绝对精确可改用
+ * `cfm_ping_stats_for_tasks_range`，它直接对原始样本汇总整个窗口。
  */
 export function buildMonitorPingRows(
   byTask: Record<string, PingHistoryRecord[]> | null | undefined,
@@ -601,7 +624,11 @@ export function buildMonitorPingRows(
   taskOrder?: ReadonlyMap<number, number>,
 ): MonitorPingResult {
   const ping: MonitorPingRow[] = [];
-  if (!byTask) return { ping, loss: {} };
+  const loss: Record<string, number> = {};
+  if (!byTask) return { ping, loss };
+  // 每个探测在整个窗口里的丢包总数 / 样本总数。逐桶 loss 只有商，不能反推分母，
+  // 所以必须在读每一行的同一趟里累计。
+  const totals = new Map<number, { lost: number; total: number }>();
   for (const [taskIdText, rows] of Object.entries(byTask)) {
     const taskId = Number(taskIdText);
     if (!Number.isInteger(taskId)) continue;
@@ -611,11 +638,25 @@ export function buildMonitorPingRows(
       if (!Number.isFinite(timeMs)) continue;
       const ts = monitorGridTs(timeMs, step);
       const value = Number(row.value);
-      if (!Number.isFinite(value) || value < 0) {
+      const sampleCount = Number(row.sample_count);
+      const total = Number.isFinite(sampleCount) && sampleCount > 0 ? sampleCount : 1;
+      const allLost = !Number.isFinite(value) || value < 0;
+      const lossCount = Number(row.loss_count);
+      const lost = allLost
+        ? total
+        : Math.min(total, Math.max(0, Number.isFinite(lossCount) ? lossCount : 0));
+      const tally = totals.get(taskId) ?? { lost: 0, total: 0 };
+      tally.lost += lost;
+      tally.total += total;
+      totals.set(taskId, tally);
+
+      if (allLost) {
         ping.push({ ts, task_id: taskId, latency: null, loss: 100 });
         continue;
       }
       const entry: MonitorPingRow = { ts, task_id: taskId, latency: value };
+      // 部分丢包的桶也要带 loss，否则主题会把整桶当成 0%。
+      if (lost > 0) entry.loss = Math.ceil((100 * lost) / total);
       if (step > 60) {
         const min = Number(row.min_latency);
         const max = Number(row.max_latency);
@@ -632,7 +673,12 @@ export function buildMonitorPingRows(
       - (taskOrder?.get(b.task_id) ?? Number.MAX_SAFE_INTEGER);
     return orderDiff || a.task_id - b.task_id;
   });
-  return { ping, loss: {} };
+  for (const [taskId, tally] of totals) {
+    if (tally.lost > 0 && tally.total > 0) {
+      loss[String(taskId)] = (100 * tally.lost) / tally.total;
+    }
+  }
+  return { ping, loss };
 }
 
 export type MonitorProbe = { id: number; name: string };

@@ -10,6 +10,7 @@
  * 2. 单位与不变量：整数 id、ts 落在 step 网格、秒/天/字节每秒等。
  * 3. 路由级：匿名绝不能拿到 admin:true；随机 query 不能改变内容。
  * 4. WS 与 HTTP 对等：同一节点经 /nodes 路径与 DO 帧路径输出必须完全一致。
+ *    （从原始 client 行出发的两条完整派生路径，见 contract.parity.test.mjs。）
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

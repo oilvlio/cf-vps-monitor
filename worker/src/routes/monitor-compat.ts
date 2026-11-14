@@ -19,6 +19,7 @@ import { createAnonEdgeCache } from '../monitor/cache/edge-cache';
 import { TtlCache } from '../monitor/cache/ttl-cache';
 import { loadMonitorMetrics, clearMetricsMetaCache, findMonitorClient } from '../monitor/services/metrics';
 import { loadNodes, type MonitorContext } from '../monitor/services/nodes';
+import { MonitorMetricsQuota } from '../monitor/services/metrics-quota';
 import {
   loadThemeConfig,
   THEME_CONFIG_MAX_BYTES,
@@ -32,7 +33,6 @@ import { getAdminSessionToken } from '../auth/session';
 import { readJsonWithLimit } from '../utils/request-body';
 import {
   monitorHours,
-  monitorMetricsRateLimit,
   monitorNumericId,
   monitorStep,
 } from '../monitor/contract';
@@ -73,13 +73,18 @@ export function clearMonitorHistoryCache(): void {
   monitorHistoryCache.clear();
 }
 
-// 最近一次公开快照里的节点数（进程内，随 /nodes 与 metrics 的查询一起刷新）。
-// 历史限流额度按它放大：主题会按节点扇出请求，节点越多需要的额度越高。冷启动
-// 时先按 0 走下限，第一次快照返回后就会校准。
-let monitorKnownNodeCount = 0;
+// 历史限流额度按最近一次公开快照的节点数放大（见 monitorMetricsRateLimit）：
+// 主题会按节点扇出请求，节点越多需要的额度越高。冷启动时先按 0 走下限，
+// 第一次快照返回后就会校准。/nodes 与 /metrics 两条路由都会更新它。
+export const monitorMetricsQuota = new MonitorMetricsQuota();
 
-function monitorMetricsLimit(): number {
-  return monitorMetricsRateLimit(monitorKnownNodeCount);
+/** /api/nodes 请求的 origin（buildMonitorMe 的 site 字段口径；解析失败给空串）。 */
+function requestOrigin(c: MonitorContext): string {
+  try {
+    return new URL(c.req.url).origin;
+  } catch {
+    return '';
+  }
 }
 
 function jsonWithCache(c: MonitorContext, value: unknown, seconds: number): Response {
@@ -163,9 +168,15 @@ monitorCompatRoutes.get('/nodes', async (c) => {
   const rateLimitMs = performance.now() - rateLimitStarted;
 
   const database = getDatabase(c.env);
-  const loaded = await loadNodes(c, database);
-  const { admin, clients: snapshotClients, nodes } = loaded;
-  monitorKnownNodeCount = snapshotClients.length;
+  const loaded = await loadNodes({
+    database,
+    env: c.env,
+    siteUrl: requestOrigin(c),
+    snapshot: () => getPublicClientsSnapshot(c, database, false, false),
+    adminSession: () => hasAdminSession(c),
+  });
+  const { admin, nodes } = loaded;
+  monitorMetricsQuota.update(loaded.clients.length);
 
   // 分段耗时放在响应头里，线上直接对 Network 面板就能定位慢在哪一段；
   // `traffic-totals` 的 desc 还顺手标出这次是否命中 10s 缓存。
@@ -229,7 +240,7 @@ monitorCompatRoutes.get('/nodes/:id/metrics', async (c) => {
   }
 
   const startedAt = performance.now();
-  const limited = await guardMonitorMetrics(c, 'monitor-metrics', monitorMetricsLimit());
+  const limited = await guardMonitorMetrics(c, 'monitor-metrics', monitorMetricsQuota.limit());
   const rateLimitMs = performance.now() - startedAt;
   if (limited) return limited;
 
@@ -237,7 +248,7 @@ monitorCompatRoutes.get('/nodes/:id/metrics', async (c) => {
   const database = getDatabase(c.env);
   const snapshot = await getPublicClientsSnapshot(c, database, false, false);
   const snapshotMs = performance.now() - snapshotAt;
-  monitorKnownNodeCount = snapshot.clients.length;
+  monitorMetricsQuota.update(snapshot.clients.length);
   // 契约里的 id 是整数，DB 主键是 UUID：按同一套哈希映射回来，避免把哈希值当
   // UUID 查库。
   const client = findMonitorClient(snapshot.clients, id);

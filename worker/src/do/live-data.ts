@@ -30,8 +30,7 @@ import { compactLiveReport, serializedBytes } from '../utils/live-report-state';
 import { evaluateHistoryCapacity } from '../utils/history-capacity';
 import { MAX_BACKUP_BYTES } from '../utils/backup';
 import { measureRestoredClientSnapshot, restoredClientMetadata } from '../utils/restore-client-snapshot';
-import { buildMonitorNodeFromStatic, monitorNodeStatic, type MonitorNodeStatic } from '../monitor/contract';
-import { toPublicClient } from '../utils/public-client';
+import { buildMonitorNodeFromStatic, buildMonitorStaticNodesFromClients, monitorTrafficWithTotals, type MonitorNodeStatic } from '../monitor/contract';
 import { gzipSync, strToU8 } from 'fflate';
 
 // 客户端状态
@@ -804,21 +803,13 @@ export class LiveDataDO {
   /**
    * 从 admin 元数据派生 monitor 的静态投影。
    *
-   * `adminClientMetadata` 存的是完整的 `db.Client` 行（见 writeAdminClientsSnapshot），
-   * 字段足够覆盖 monitor 的静态部分；hidden 节点在这里过滤掉，保证不会随帧广播
-   * 给访客。
+   * `adminClientMetadata` 存的是清洗过的 `db.Client` 行（见 writeAdminClientsSnapshot
+   * 与 refreshMonitorData 的兜底），投影逻辑在 monitor/contract.ts 的
+   * buildMonitorStaticNodesFromClients：toPublicClient 白名单 + hidden 过滤 + 与
+   * /api/nodes 一致的排序。
    */
   private buildMonitorStaticNodes(): MonitorNodeStatic[] {
-    const nodes: MonitorNodeStatic[] = [];
-    for (const raw of this.adminClientMetadata.values()) {
-      if (!isObjectPayload(raw)) continue;
-      const client = toPublicClient(raw as unknown as Parameters<typeof toPublicClient>[0]);
-      if (!client.uuid || client.hidden) continue;
-      nodes.push(monitorNodeStatic(client, this.monitorTrafficTotals[client.uuid]));
-    }
-    // 与 /api/nodes 的排序一致：sort_order 升序，同序按名字。
-    nodes.sort((left, right) => left.sort - right.sort || left.name.localeCompare(right.name));
-    return nodes;
+    return buildMonitorStaticNodesFromClients(this.adminClientMetadata.values(), this.monitorTrafficTotals);
   }
 
   /**
@@ -835,9 +826,15 @@ export class LiveDataDO {
         const database = this.getQueryDatabase();
         if (database && this.adminClientMetadata.size === 0) {
           const clients = await db.listClients(database).catch(() => []);
+          // 兜底行也要过 sanitizeAdminClientSnapshotItem：去掉 token / token_hash、
+          // 清理内网 IP，保持「这个 map 里只有清洗过的数据」的不变量（与
+          // writeAdminClientsSnapshot 写入的行同形）。
           if (clients.length > 0) {
             this.adminClientMetadata = new Map(
-              clients.map(client => [String(client.uuid), client as unknown as JsonObject]),
+              clients
+                .map(client => this.sanitizeAdminClientSnapshotItem(client as unknown as JsonObject))
+                .filter((client): client is JsonObject => Boolean(client))
+                .map(client => [String(client.uuid), client]),
             );
           }
         }
@@ -965,6 +962,15 @@ export class LiveDataDO {
         live,
         online,
         lastReportMs: retained?.lastReportTime ?? 0,
+        // day_*/total_* 用静态投影里的 monitorTrafficTotals（与 /api/nodes 的
+        // monitorTrafficWithTotals 同源），month_* 从实时条目取：否则 metrics
+        // 里的 total_* 会掉成 0，和 /api/nodes 派生路径漂移。
+        traffic: monitorTrafficWithTotals(live, {
+          day_rx: node.day_rx,
+          day_tx: node.day_tx,
+          total_rx: node.total_rx,
+          total_tx: node.total_tx,
+        }),
         nowMs,
       });
     });

@@ -17,7 +17,7 @@
  */
 
 import type { MonitorMetricsBucket, MonitorTrafficTotals, PingHistoryRecord, PingTask } from '../db/types';
-import type { PublicClient } from '../utils/public-client';
+import { toPublicClient, type PublicClient } from '../utils/public-client';
 import { trafficPeriodStart } from '../utils/traffic-samples';
 
 // 公开历史只暴露 7 天：rollup 的保留时间 record_preserve_time 默认且最大 168h
@@ -597,6 +597,31 @@ export function buildMonitorNode(args: BuildMonitorNodeArgs): MonitorNode {
     traffic: args.traffic,
     nowMs: args.nowMs,
   });
+}
+
+/**
+ * DO 的 monitor 静态投影：admin 元数据（完整 db.Client 行）→ 公开节点 → 静态节点。
+ *
+ * 这是 Worker 侧 `getPublicClientsSnapshot`（toPublicClient 白名单 → buildMonitorNode）
+ * 的对等路径：admin 行在这里同样先过 toPublicClient（去掉 token / token_hash，把
+ * has_ipv4 收敛成布尔位），hidden 节点直接过滤，保证不随帧广播给访客。
+ * 两条路径的对等性由 contract.parity.test.mjs 盯着：同一行原始数据走两边，输出
+ * 的 node JSON 必须完全一致。
+ */
+export function buildMonitorStaticNodesFromClients(
+  rawClients: Iterable<unknown>,
+  totals?: Record<string, Pick<MonitorTraffic, 'day_rx' | 'day_tx' | 'total_rx' | 'total_tx'>> | null,
+): MonitorNodeStatic[] {
+  const nodes: MonitorNodeStatic[] = [];
+  for (const raw of rawClients) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const client = toPublicClient(raw as Parameters<typeof toPublicClient>[0]);
+    if (!client.uuid || client.hidden) continue;
+    nodes.push(monitorNodeStatic(client, totals?.[client.uuid]));
+  }
+  // 与 /api/nodes 的排序一致：sort_order 升序，同序按名字。
+  nodes.sort((left, right) => left.sort - right.sort || left.name.localeCompare(right.name));
+  return nodes;
 }
 
 export type MonitorMetricsRow = {

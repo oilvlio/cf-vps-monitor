@@ -28,3 +28,8 @@ hub-golden.json 为 monitor 主题契约的形状黄金样本（键集合 + 类�
    本机时先用方式 1。
 
 更新后必须同时更新本文件的 pin 与 hub-golden.json 的 contractVersion。
+
+定时比对：`.github/workflows/monitor-golden.yml` 每周（及手动触发）从
+workflow_dispatch 输入或仓库变量 `MONITOR_HUB_URL` 指向的 hub 录制一次形状，
+与仓库里的 golden 做 git diff；形状漂移会让该 job 红灯。未配置 hub 地址时
+job 跳过并留 notice，不算失败。

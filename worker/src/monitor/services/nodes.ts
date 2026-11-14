@@ -1,6 +1,9 @@
 /**
  * /api/nodes 的数据装配：公开节点快照 + LIVE_DATA 实时条目 + 累计流量，
  * 产出 monitor 契约的 node 列表。路由只负责限流、缓存与响应头。
+ *
+ * 依赖全部注入（不接收 Hono Context，也不反向 import routes/public）：
+ * 快照与会话校验由调用方（monitor-compat）接好线，单测可直接给假实现。
  */
 import type { Context } from 'hono';
 import type { Bindings, Variables } from '../../index';
@@ -15,7 +18,6 @@ import {
   monitorTrafficWithTotals,
   type MonitorNode,
 } from '../contract';
-import { getPublicClientsSnapshot, hasAdminSession } from '../../routes/public';
 import { recordOrNull } from './json';
 
 export type MonitorContext = Context<{ Bindings: Bindings; Variables: Variables }>;
@@ -28,9 +30,12 @@ export async function timed<T>(work: () => Promise<T>): Promise<Timed<T>> {
   return { ms: performance.now() - startedAt, value };
 }
 
-async function readLive(c: MonitorContext): Promise<LiveSnapshot> {
+/** loadNodes 需要的 Worker 绑定：只有 LIVE_DATA。 */
+export type LoadNodesEnv = { LIVE_DATA: Bindings['LIVE_DATA'] };
+
+async function readLive(env: LoadNodesEnv): Promise<LiveSnapshot> {
   try {
-    const response = await liveDataStub(c.env.LIVE_DATA)
+    const response = await liveDataStub(env.LIVE_DATA)
       .fetch(new Request('https://do/live', { method: 'GET' }));
     return await readLiveSnapshot(response) ?? { online: [], count: 0 };
   } catch {
@@ -52,14 +57,6 @@ function numberFrom(source: Record<string, unknown> | null, key: string): number
   return 0;
 }
 
-function siteUrl(c: MonitorContext): string {
-  try {
-    return new URL(c.req.url).origin;
-  } catch {
-    return '';
-  }
-}
-
 export type LoadNodesResult = {
   admin: boolean;
   clients: readonly PublicClient[];
@@ -69,14 +66,27 @@ export type LoadNodesResult = {
   timings: { snapshot: number; live: number; admin: number; totals: number };
 };
 
-export async function loadNodes(
-  c: MonitorContext,
-  database: db.QueryDatabase,
-): Promise<LoadNodesResult> {
+/**
+ * loadNodes 的依赖。snapshot / adminSession 在 routes/monitor-compat 里接到
+ * getPublicClientsSnapshot 与 hasAdminSession；单测注入假实现即可，无需伪造
+ * Hono Context。
+ */
+export type LoadNodesDeps = {
+  database: db.QueryDatabase;
+  env: LoadNodesEnv;
+  /** /api/nodes 请求的 origin（hub 契约里 me.site 的口径）。 */
+  siteUrl: string;
+  /** 公开节点快照（带 overlay 与可见性处理）。 */
+  snapshot: () => Promise<{ clients: readonly PublicClient[] }>;
+  /** 当前请求是否管理员会话。 */
+  adminSession: () => Promise<boolean>;
+};
+
+export async function loadNodes(deps: LoadNodesDeps): Promise<LoadNodesResult> {
   const [snapshotResult, liveResult, adminResult] = await Promise.all([
-    timed(() => getPublicClientsSnapshot(c, database, false, false)),
-    timed(() => readLive(c)),
-    timed(() => hasAdminSession(c)),
+    timed(() => deps.snapshot()),
+    timed(() => readLive(deps.env)),
+    timed(() => deps.adminSession()),
   ]);
   const snapshot = snapshotResult.value;
   const live = liveResult.value;
@@ -87,12 +97,12 @@ export async function loadNodes(
   // day_* / total_* 一次批量取；失败时退回 0，而不是让整个节点列表报错。
   const totalsLookup: db.TrafficTotalsLookup = {};
   const totalsResult = await timed(() => db.getTrafficTotals(
-    database,
+    deps.database,
     snapshot.clients.map(client => client.uuid),
     totalsLookup,
   ).catch(() => ({} as Record<string, MonitorTrafficTotals>)));
   const totals = totalsResult.value;
-  const origin = siteUrl(c);
+  const origin = deps.siteUrl;
   const nodes = [...snapshot.clients]
     .sort((left, right) => {
       const orderDiff = (left.sort_order || 0) - (right.sort_order || 0);

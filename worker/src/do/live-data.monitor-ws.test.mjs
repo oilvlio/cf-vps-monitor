@@ -236,6 +236,28 @@ test('admin 快照缺失时回退数据库 listClients 派生投影', async () =
   assert.deepEqual(frame.nodes.map(node => node.id), [f.monitorNumericId('node-1'), f.monitorNumericId('node-2')]);
 });
 
+test('兜底 listClients 的行也要过 sanitize：元数据 map 里只有清洗过的数据', async () => {
+  // admin 快照缺失时 refreshMonitorData 直接从数据库拉原始行；这些行必须与
+  // writeAdminClientsSnapshot 写入的行同形（去 token / token_hash、内网 IP 清零）。
+  // fixture 的 listClients 参数约定是「原始行数组」。
+  const f = fixture({
+    listClients: [
+      { ...CLIENTS[0], token: 'fallback-token', token_hash: 'sha256:fallback', ipv4: '10.0.0.7' },
+      { uuid: '   ', name: 'no-uuid', hidden: false },
+    ],
+  });
+  await ready(f.object);
+
+  const metadata = [...f.object.adminClientMetadata.values()];
+  assert.equal(metadata.length, 1, '无 uuid 的行不能进元数据 map');
+  const serialized = JSON.stringify(metadata);
+  assert.ok(!serialized.includes('fallback-token'), 'token 必须被去掉');
+  assert.ok(!serialized.includes('sha256:fallback'), 'token_hash 必须被去掉');
+  assert.ok(!serialized.includes('10.0.0.7'), '内网 IP 必须被清理');
+  assert.equal(metadata[0].uuid, 'node-1');
+  assert.equal(metadata[0].has_ipv4, false, '内网 IP 清零后 has_ipv4 必须是 false');
+});
+
 test('admin 是每连接属性，不随共享投影广播', async () => {
   const f = fixture({ storageEntries: [['admin-clients:snapshot', ADMIN_SNAPSHOT]] });
   await ready(f.object);

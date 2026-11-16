@@ -10,14 +10,22 @@ import {
 } from '@dnd-kit/core';
 import {
   SortableContext,
-  rectSortingStrategy,
+  verticalListSortingStrategy,
   sortableKeyboardCoordinates,
   useSortable,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import {
-  Flex, Card, Text, Badge, Box, Button, TextField,
-  Dialog, Switch, IconButton, Separator, TextArea, SegmentedControl, Checkbox, Tooltip, Select
+  Badge as SaBadge,
+  Button as SaButton,
+  Card as SaCard,
+  Checkbox as SaCheckbox,
+  ConfirmDialog,
+  Segmented,
+} from '../../components/ui/minimal';
+import {
+  Flex, Text, Box, Button, TextField,
+  Dialog, Switch, Separator, TextArea, SegmentedControl, Select
 } from '@radix-ui/themes';
 import {
   Plus, Pencil, Trash2, Copy, Search,
@@ -172,28 +180,18 @@ async function copyToClipboard(text: string, message = '已复制到剪贴板') 
 function CopyableIp({ value, muted }: { value: string; muted?: boolean }) {
   const family = value.includes(':') ? 'v6' : 'v4';
   return (
-    <Flex align="center" gap="1" className={`admin-ip-line admin-ip-${family}`}>
-      <Text
-        size="1"
-        color={muted ? 'gray' : undefined}
-        title={value}
-        className="admin-ip-value"
-        style={{ fontFamily: 'monospace' }}
+    <span className={`admin-ip-line admin-ip-${family}${muted ? ' is-muted' : ''}`}>
+      <span title={value} className="admin-ip-value">{value}</span>
+      <button
+        type="button"
+        aria-label="复制 IP"
+        title="复制 IP"
+        className="admin-ip-copy"
+        onClick={() => copyToClipboard(value, 'IP 已复制')}
       >
-        {value}
-      </Text>
-      <Tooltip content="复制 IP">
-        <IconButton
-          aria-label="复制 IP"
-          className="admin-ip-copy"
-          size="1"
-          variant="ghost"
-          onClick={() => copyToClipboard(value, 'IP 已复制')}
-        >
-          <Copy size={12} />
-        </IconButton>
-      </Tooltip>
-    </Flex>
+        <Copy size={12} />
+      </button>
+    </span>
   );
 }
 
@@ -209,18 +207,15 @@ function RowActionButton({
   children: React.ReactNode;
 }) {
   return (
-    <Tooltip content={label}>
-      <IconButton
-        aria-label={label}
-        className={`admin-row-action${color === 'red' ? ' admin-row-action-danger' : ''}`}
-        size="2"
-        variant="soft"
-        color={color}
-        onClick={onClick}
-      >
-        {children}
-      </IconButton>
-    </Tooltip>
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      className={`admin-icon-button admin-row-action${color === 'red' ? ' admin-row-action-danger' : ''}`}
+      onClick={onClick}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -268,7 +263,7 @@ function formatDetailTime(value?: string | null) {
   return value ? new Date(value).toLocaleString('zh-CN') : '-';
 }
 
-function SortableNodeCard({ node, selected, onSelect, liveData, onDetail, onEdit, onDelete, onCmd, onRotateToken, dragDisabled }: SortableRowProps) {
+function SortableNodeRow({ node, selected, onSelect, liveData, onDetail, onEdit, onDelete, onCmd, onRotateToken, dragDisabled }: SortableRowProps) {
   const isOnline = liveData.online.includes(node.uuid);
   const agentVersion = normalizeAgentVersion(node.version) || '-';
   const systemVersion = formatSystemVersion(node);
@@ -288,94 +283,79 @@ function SortableNodeCard({ node, selected, onSelect, liveData, onDetail, onEdit
     disabled: dragDisabled,
   });
 
-  const cardStyle = {
-    opacity: isDragging ? 0.72 : isOnline ? 1 : 0.55,
+  const rowStyle = {
     transform: CSS.Transform.toString(transform),
     transition,
     position: 'relative',
     zIndex: isDragging ? 2 : 0,
   } as React.CSSProperties;
 
-  return (
-    <div ref={setNodeRef} className={`admin-node-card-shell${isDragging ? ' is-dragging' : ''}`} style={cardStyle}>
-      <Card className={`admin-node-card${selected ? ' is-selected' : ''}${isOnline ? ' is-online' : ' is-offline'}`}>
-        <div className="admin-node-card-header">
-          <div className="admin-node-card-controls">
-            <Tooltip content={dragDisabled ? '切到手动排序后可拖拽' : '拖拽排序'}>
-              <button
-                type="button"
-                className="admin-row-drag-handle"
-                aria-label={`拖拽排序 ${node.name || node.uuid}`}
-                disabled={dragDisabled}
-                {...attributes}
-                {...listeners}
-              >
-                <Grip size={15} />
-              </button>
-            </Tooltip>
-            <Checkbox className="admin-node-checkbox" checked={selected} onCheckedChange={() => onSelect(node.uuid)} />
-          </div>
+  const className = [
+    'sa-tr',
+    'admin-node-card',
+    selected ? 'is-selected' : '',
+    isOnline ? 'is-online' : 'is-offline',
+    isDragging ? 'is-dragging' : '',
+  ].filter(Boolean).join(' ');
 
-          <button
-            type="button"
-            className="admin-node-card-title"
-            onClick={() => onDetail(node)}
-            title={node.name || '查看详情'}
-          >
+  return (
+    <tr ref={setNodeRef} className={className} style={rowStyle}>
+      <td className="sa-td-narrow">
+        <button
+          type="button"
+          className="admin-row-drag-handle"
+          aria-label={`拖拽排序 ${node.name || node.uuid}`}
+          title={dragDisabled ? '切到手动排序后可拖拽' : '拖拽排序'}
+          disabled={dragDisabled}
+          {...attributes}
+          {...listeners}
+        >
+          <Grip size={15} />
+        </button>
+      </td>
+      <td className="sa-td-narrow">
+        <SaCheckbox checked={selected} onCheckedChange={() => onSelect(node.uuid)} aria-label={`选择 ${node.name || node.uuid}`} />
+      </td>
+      <td className="sa-td-name">
+        <div className="sa-name-cell">
+          <button type="button" className="admin-node-card-title" onClick={() => onDetail(node)} title={node.name || '查看详情'}>
             <span className="admin-node-card-name-row">
-              <span className="admin-node-card-flag">
-                <Flag region={node.region} size={20} />
-              </span>
-              <Text className="admin-node-name-text" size="2" weight="bold">{node.name || '未命名'}</Text>
+              <span className="admin-node-card-flag"><Flag region={node.region} size={18} /></span>
+              <span className="admin-node-name-text">{node.name || '未命名'}</span>
             </span>
           </button>
-
-          <Flex className="admin-row-actions">
-            <RowActionButton label="编辑" onClick={() => onEdit(node)}><Pencil size={13} /></RowActionButton>
-            <RowActionButton label="安装命令" onClick={() => onCmd(node)}><Download size={13} /></RowActionButton>
-            <RowActionButton label="重置 Token" onClick={() => onRotateToken(node)}><KeyRound size={13} /></RowActionButton>
-            <RowActionButton label="删除" color="red" onClick={() => onDelete(node)}><Trash2 size={13} /></RowActionButton>
-          </Flex>
-
-          {/* 徽章行独占第二行并跨到操作按钮列下方，让长地名能用满整卡宽度 */}
-          <span className="admin-node-card-badges">
-            <span className={`admin-node-status-text${isOnline ? ' is-online' : ' is-offline'}`}>{isOnline ? '在线' : '离线'}</span>
-            <Badge className="admin-node-region-badge" size="1" variant="soft" color="gray" title={node.region || '未知'}>{node.region || '未知'}</Badge>
-            {Boolean(node.hidden) && <Badge size="1" variant="soft" color="orange">完全隐藏</Badge>}
-          </span>
+          <SaBadge variant="outline" title={node.region || '未知'}>{node.region || '未知'}</SaBadge>
+          {Boolean(node.hidden) && <SaBadge variant="warning">完全隐藏</SaBadge>}
         </div>
-
-        <div className="admin-node-card-body">
-          <div className="admin-node-card-ip-panel">
-            <Text className="admin-node-card-section-label" size="1" weight="bold">IP 地址</Text>
-            <div className="admin-node-ip-stack">
-              {node.ipv4 && <CopyableIp value={node.ipv4} />}
-              {node.ipv6 && <CopyableIp value={node.ipv6} muted />}
-              {!node.ipv4 && !node.ipv6 && <Text size="1" color="gray">-</Text>}
-            </div>
-          </div>
-
-          <div className="admin-node-card-meta-grid">
-            <div className="admin-node-card-meta">
-              <Text className="admin-node-card-section-label" size="1" weight="bold">Agent</Text>
-              <Text className="admin-node-version-text" size="1" title={fullVersionTitle}>{agentVersion}</Text>
-            </div>
-            <div className="admin-node-card-meta">
-              <Text className="admin-node-card-section-label" size="1" weight="bold">系统</Text>
-              <Text className="admin-node-version-os" size="1" color="gray" title={fullVersionTitle}>{systemVersion}</Text>
-            </div>
-            <div className="admin-node-card-meta">
-              <Text className="admin-node-card-section-label" size="1" weight="bold">分组</Text>
-              <Text className="admin-node-group-text" size="1" title={node.group}>{node.group || '-'}</Text>
-            </div>
-            <div className="admin-node-card-meta admin-node-card-billing">
-              <Text className="admin-node-card-section-label" size="1" weight="bold">账单</Text>
-              <PriceTags price={node.price} billing_cycle={node.billing_cycle} expired_at={node.expired_at} currency={node.currency} showTags={false} />
-            </div>
-          </div>
+      </td>
+      <td>
+        <span className={`admin-node-status-text${isOnline ? ' is-online' : ' is-offline'}`} title={isOnline ? '在线' : '离线'}>
+          <span className="sa-status-dot" aria-hidden="true" />
+          <span className="sa-status-label">{isOnline ? '在线' : '离线'}</span>
+        </span>
+      </td>
+      <td className="sa-col-md">
+        <div className="admin-node-ip-stack">
+          {node.ipv4 && <CopyableIp value={node.ipv4} />}
+          {node.ipv6 && <CopyableIp value={node.ipv6} muted />}
+          {!node.ipv4 && !node.ipv6 && <span className="sa-muted">-</span>}
         </div>
-      </Card>
-    </div>
+      </td>
+      <td className="sa-col-md"><span className="admin-node-group-text" title={node.group}>{node.group || '-'}</span></td>
+      <td className="sa-col-lg"><span className="admin-node-version-text" title={fullVersionTitle}>{agentVersion}</span></td>
+      <td className="sa-col-xl"><span className="admin-node-version-os" title={fullVersionTitle}>{systemVersion}</span></td>
+      <td className="sa-col-lg">
+        <PriceTags price={node.price} billing_cycle={node.billing_cycle} expired_at={node.expired_at} currency={node.currency} showTags={false} />
+      </td>
+      <td className="sa-td-actions">
+        <span className="admin-row-actions">
+          <RowActionButton label="编辑" onClick={() => onEdit(node)}><Pencil size={14} /></RowActionButton>
+          <RowActionButton label="安装命令" onClick={() => onCmd(node)}><Download size={14} /></RowActionButton>
+          <RowActionButton label="重置 Token" onClick={() => onRotateToken(node)}><KeyRound size={14} /></RowActionButton>
+          <RowActionButton label="删除" color="red" onClick={() => onDelete(node)}><Trash2 size={14} /></RowActionButton>
+        </span>
+      </td>
+    </tr>
   );
 }
 
@@ -1150,129 +1130,141 @@ export default function AdminDashboard() {
   if (loading) return <Loading />;
 
   return (
-    <Flex className="admin-dashboard-page" direction="column" gap="3">
-      <Flex className="admin-parent-title-row admin-server-title-row" justify="between" align="center" mb="3">
-        <Flex align="center" gap="2">
+    <div className="sa-scope admin-dashboard-page">
+      <div className="admin-parent-title-row admin-server-title-row">
+        <div className="sa-page-title">
           <Server size={20} />
-          <Text size="5" weight="bold">服务器</Text>
-        </Flex>
-        <section className="admin-page-hero admin-server-overview-hero">
-          <div className="admin-overview-strip">
-            {overviewCards.map((card) => (
-              <div className="admin-overview-item" key={card.label} title={clientsReady ? card.detail : '尚未读取到服务器列表'}>
-                <Flex align="center" gap="2" className="admin-overview-line">
-                  <span className="admin-overview-icon" aria-hidden="true">{card.icon}</span>
-                  <Text className="admin-overview-label" size="2">{card.label}</Text>
-                  <Text className="admin-overview-value" size="4" weight="bold">{clientsReady ? card.value : '—'}</Text>
-                </Flex>
-              </div>
-            ))}
+          <span>服务器</span>
+        </div>
+      </div>
+
+      <section className="sa-stats" aria-label="服务器概览">
+        {overviewCards.map((card) => (
+          <div className="sa-stat admin-overview-item" key={card.label} title={clientsReady ? card.detail : '尚未读取到服务器列表'}>
+            <div className="sa-stat-head">
+              <span className="sa-stat-label admin-overview-label">{card.label}</span>
+              <span className="sa-stat-icon" aria-hidden="true">{card.icon}</span>
+            </div>
+            <div className="sa-stat-value admin-overview-value">{clientsReady ? card.value : '—'}</div>
+            <div className="sa-stat-detail">{clientsReady ? card.detail : '尚未读取到服务器列表'}</div>
           </div>
-        </section>
-      </Flex>
+        ))}
+      </section>
 
       {clientsError && (
-        <Flex role="alert" align="center" justify="between" gap="3" wrap="wrap">
-          <Text color="red" size="2">
-            {clientsReady ? '刷新服务器列表失败，当前保留上次读取的数据。' : '读取服务器列表失败，尚无法确认服务器数量。'}
-          </Text>
-          <Button variant="soft" size="1" onClick={() => void loadClients(true)}>重试读取</Button>
-        </Flex>
+        <div className="sa-alert" role="alert">
+          <span>{clientsReady ? '刷新服务器列表失败，当前保留上次读取的数据。' : '读取服务器列表失败，尚无法确认服务器数量。'}</span>
+          <SaButton variant="outline" size="sm" onClick={() => void loadClients(true)}>重试读取</SaButton>
+        </div>
       )}
 
-      <Card className="admin-filter-card">
-        <Flex className="admin-filter-toolbar" direction="column" gap="2">
-          <Flex className="admin-filter-primary-row" gap="2" align="center">
-            <Box className="admin-status-filter">
-              <SegmentedControl.Root value={statusFilter} onValueChange={(value) => setStatusFilter(value as NodeStatusFilter)} size="1">
-                <SegmentedControl.Item value="all">全部</SegmentedControl.Item>
-                <SegmentedControl.Item value="online">在线</SegmentedControl.Item>
-                <SegmentedControl.Item value="offline">离线</SegmentedControl.Item>
-              </SegmentedControl.Root>
-            </Box>
+      <SaCard className="admin-node-card-panel">
+        <div className="sa-toolbar admin-filter-toolbar">
+          <div className="sa-toolbar-group">
+            <div className="sa-search">
+              <Search size={14} aria-hidden="true" />
+              <input
+                className="sa-input admin-server-search"
+                placeholder="查找服务器"
+                aria-label="查找服务器"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+              />
+            </div>
+            <Segmented
+              label="状态筛选"
+              value={statusFilter}
+              onChange={(value) => setStatusFilter(value as NodeStatusFilter)}
+              options={[{ value: 'all', label: '全部' }, { value: 'online', label: '在线' }, { value: 'offline', label: '离线' }]}
+            />
+            <select className="sa-input sa-select admin-filter-group-select" aria-label="分组筛选" value={selectedGroup} onChange={(event) => setSelectedGroup(event.target.value)}>
+              <option value="all">全部分组</option>
+              {groups.map((group) => <option key={group} value={group}>{group}</option>)}
+            </select>
+          </div>
+          <div className="sa-toolbar-group">
+            <Segmented
+              label="排序方式"
+              value={sortKey}
+              onChange={(value) => setSortKey(value as AdminSortKey)}
+              options={[{ value: 'manual', label: '手动' }, { value: 'name', label: '名称' }, { value: 'status', label: '状态' }]}
+            />
+            <SaButton className="admin-sort-dir-button" variant="outline" size="sm" disabled={sortKey === 'manual'} onClick={() => setSortDir((value) => value === 'asc' ? 'desc' : 'asc')}>
+              {sortDir === 'asc' ? '升序' : '降序'}
+            </SaButton>
+            <button type="button" className="admin-icon-button admin-refresh-button" onClick={() => { loadClients(true); refreshLive(); }} title="刷新" aria-label="刷新">
+              <RefreshCw size={14} />
+            </button>
+            <SaButton className="admin-add-server-button" size="sm" onClick={() => setAddOpen(true)}><Plus size={16} /> 添加服务器</SaButton>
+          </div>
+        </div>
 
-            <Flex className="admin-search-cluster" gap="2" align="center">
-              <TextField.Root className="admin-server-search" size="1" placeholder="查找服务器" value={search} onChange={e => setSearch(e.target.value)}>
-                <TextField.Slot><Search size={14} /></TextField.Slot>
-              </TextField.Root>
-              <IconButton className="admin-refresh-button" variant="soft" size="1" onClick={() => { loadClients(true); refreshLive(); }} title="刷新"><RefreshCw size={14} /></IconButton>
-            </Flex>
-
-            {selectedNodes.length > 0 && (
-              <Flex className="admin-selection-inline" gap="2" align="center">
-                <Badge variant="soft" color="blue">已选 {selectedNodes.length}</Badge>
-                {selectedVisibleCount !== selectedNodes.length && (
-                  <Text size="1" color="gray">当前结果 {selectedVisibleCount}</Text>
-                )}
-                <Button variant="soft" size="1" color="red" onClick={() => setBatchDeleteOpen(true)}>
-                  <Trash2 size={14} /> 删除
-                </Button>
-                <Button variant="soft" size="1" onClick={batchHideNodes}>
-                  <EyeOff size={14} /> 完全隐藏
-                </Button>
-                <Button variant="ghost" size="1" onClick={() => setSelectedNodes([])}>清除</Button>
-              </Flex>
+        {selectedNodes.length > 0 && (
+          <div className="sa-selection admin-selection-inline">
+            <span className="sa-selection-count">已选 {selectedNodes.length}</span>
+            {selectedVisibleCount !== selectedNodes.length && (
+              <span className="sa-muted">当前结果 {selectedVisibleCount}</span>
             )}
+            <span className="sa-selection-actions">
+              <SaButton variant="outline" size="sm" onClick={batchHideNodes}><EyeOff size={14} /> 完全隐藏</SaButton>
+              <SaButton variant="destructive" size="sm" onClick={() => setBatchDeleteOpen(true)}><Trash2 size={14} /> 删除</SaButton>
+              <SaButton variant="outline" size="sm" onClick={() => setSelectedNodes([])}>清除</SaButton>
+            </span>
+          </div>
+        )}
 
-            <Select.Root value={selectedGroup} onValueChange={setSelectedGroup}>
-              <Select.Trigger className="admin-filter-group-select" aria-label="分组筛选" />
-              <Select.Content>
-                <Select.Item value="all">全部分组</Select.Item>
-                {groups.map((group) => (
-                  <Select.Item key={group} value={group}>{group}</Select.Item>
-                ))}
-              </Select.Content>
-            </Select.Root>
-
-            <Flex className="admin-sort-controls" gap="2" align="center">
-              <SegmentedControl.Root value={sortKey} onValueChange={(value) => setSortKey(value as AdminSortKey)} size="1">
-                <SegmentedControl.Item value="manual">手动</SegmentedControl.Item>
-                <SegmentedControl.Item value="name">名称</SegmentedControl.Item>
-                <SegmentedControl.Item value="status">状态</SegmentedControl.Item>
-              </SegmentedControl.Root>
-              <Button className="admin-sort-dir-button" variant="soft" size="1" disabled={sortKey === 'manual'} onClick={() => setSortDir((value) => value === 'asc' ? 'desc' : 'asc')}>
-                {sortDir === 'asc' ? '升序' : '降序'}
-              </Button>
-            </Flex>
-            <Button className="admin-add-server-button" size="1" onClick={() => setAddOpen(true)}><Plus size={16} /> 添加服务器</Button>
-          </Flex>
-        </Flex>
-      </Card>
-
-      <Card className="admin-node-card-panel">
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-          <SortableContext items={filteredUuids} strategy={rectSortingStrategy}>
-            <Flex className="admin-node-card-panel-header" justify="between" align="center" gap="2">
-              <Text size="2" weight="bold">服务器节点</Text>
-              <Flex align="center" gap="2">
-                <Text size="1" color="gray">{clientsReady ? `当前 ${filtered.length} 个` : '数量未知'}</Text>
-                <Checkbox checked={allFilteredSelected} onCheckedChange={toggleSelectAll} />
-              </Flex>
-            </Flex>
-            {filtered.length === 0 ? (
-              <Text align="center" color="gray" style={{ display: 'block', padding: 24 }}>{!clientsReady ? '请重试读取服务器列表' : search ? '未找到匹配的服务器' : '暂无服务器'}</Text>
-            ) : (
-              <div className="admin-node-card-grid">
-                {filtered.map((client) => (
-                  <SortableNodeCard
-                    key={client.uuid}
-                    node={client}
-                    selected={selectedNodes.includes(client.uuid)}
-                    onSelect={toggleSelect}
-                    liveData={liveData}
-                    dragDisabled={dragDisabled}
-                    onDetail={(c) => { setDetailClient(c); setDetailOpen(true); }}
-                    onEdit={(c) => { setEditClient(c); setEditOpen(true); }}
-                    onDelete={(c) => { setDeleteClient(c); setDeleteOpen(true); }}
-                    onCmd={(c) => { setCmdClient(c); setCmdOpen(true); }}
-                    onRotateToken={(c) => { setRotateTokenClient(c); setRotateTokenOpen(true); }}
-                  />
-                ))}
-              </div>
-            )}
+          <SortableContext items={filteredUuids} strategy={verticalListSortingStrategy}>
+            <div className="sa-table-scroll">
+              <table className="sa-table">
+                <thead>
+                  <tr>
+                    <th className="sa-td-narrow" aria-label="排序" />
+                    <th className="sa-td-narrow">
+                      <SaCheckbox
+                        checked={allFilteredSelected}
+                        indeterminate={selectedVisibleCount > 0 && !allFilteredSelected}
+                        onCheckedChange={toggleSelectAll}
+                        aria-label="选择当前全部服务器"
+                      />
+                    </th>
+                    <th>服务器</th>
+                    <th>状态</th>
+                    <th className="sa-col-md">IP 地址</th>
+                    <th className="sa-col-md">分组</th>
+                    <th className="sa-col-lg">Agent</th>
+                    <th className="sa-col-xl">系统</th>
+                    <th className="sa-col-lg">账单</th>
+                    <th className="sa-td-actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.length === 0 ? (
+                    <tr>
+                      <td colSpan={10} className="sa-empty">{!clientsReady ? '请重试读取服务器列表' : search ? '未找到匹配的服务器' : '暂无服务器'}</td>
+                    </tr>
+                  ) : filtered.map((client) => (
+                    <SortableNodeRow
+                      key={client.uuid}
+                      node={client}
+                      selected={selectedNodes.includes(client.uuid)}
+                      onSelect={toggleSelect}
+                      liveData={liveData}
+                      dragDisabled={dragDisabled}
+                      onDetail={(c) => { setDetailClient(c); setDetailOpen(true); }}
+                      onEdit={(c) => { setEditClient(c); setEditOpen(true); }}
+                      onDelete={(c) => { setDeleteClient(c); setDeleteOpen(true); }}
+                      onCmd={(c) => { setCmdClient(c); setCmdOpen(true); }}
+                      onRotateToken={(c) => { setRotateTokenClient(c); setRotateTokenOpen(true); }}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </SortableContext>
         </DndContext>
-      </Card>
+        <div className="sa-table-footer">{clientsReady ? `当前 ${filtered.length} 个，共 ${clients.length} 个` : '数量未知'}</div>
+      </SaCard>
       <BatchDeleteDialog
         count={selectedNodes.length}
         open={batchDeleteOpen}
@@ -1326,21 +1318,20 @@ export default function AdminDashboard() {
       }} />
       {detailClient && <DetailDialog client={detailClient} open={detailOpen} onOpenChange={setDetailOpen} />}
       {cmdClient && <GenerateCommandDialog client={cmdClient} open={cmdOpen} onOpenChange={setCmdOpen} />}
-    </Flex>
+    </div>
   );
 }
 
 function BatchDeleteDialog({ count, open, onOpenChange, onConfirm }: { count: number; open: boolean; onOpenChange: (v: boolean) => void; onConfirm: () => void }) {
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 400 }}>
-        <Dialog.Title>批量删除确认</Dialog.Title>
-        <Text size="2">确定要删除选中的 {count} 个节点吗？此操作不可撤销。</Text>
-        <Flex gap="3" justify="end" mt="4">
-          <Button variant="soft" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button color="red" onClick={onConfirm}>确认删除 {count} 个节点</Button>
-        </Flex>
-      </Dialog.Content>
-    </Dialog.Root>
+    <ConfirmDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="批量删除确认"
+      description={`确定要删除选中的 ${count} 个节点吗？此操作不可撤销。`}
+      confirmLabel={`确认删除 ${count} 个节点`}
+      destructive
+      onConfirm={onConfirm}
+    />
   );
 }

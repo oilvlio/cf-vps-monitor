@@ -133,13 +133,6 @@ export const SETTING_SCHEMA = {
     min: 16777216,
     max: 549755813888,
   },
-  capacity_daily_view_minutes: {
-    type: 'integer',
-    defaultValue: '60',
-    public: false,
-    min: 0,
-    max: 1440,
-  },
   audit_log_preserve_time: {
     type: 'integer',
     defaultValue: '2160',

@@ -4,6 +4,7 @@ import { BrowserRouter } from 'react-router-dom';
 import { Theme } from '@radix-ui/themes';
 import '@radix-ui/themes/styles.css';
 import './index.css';
+import './styles/minimal-admin.css';
 import App from './App';
 import MfaStepUpDialog from './components/MfaStepUpDialog';
 import { getLocalStorageItem } from './utils/browserStorage';

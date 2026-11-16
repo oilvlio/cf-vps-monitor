@@ -34,7 +34,7 @@ const opsFeatures = [
   '后台一键安装命令生成',
   '站点 Logo 上传与主题配置',
   '加密备份与恢复',
-  '审计日志、容量估算、健康检查',
+  '审计日志、健康检查',
 ];
 
 function FeatureList({ items }: { items: string[] }) {

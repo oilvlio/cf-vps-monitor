@@ -110,8 +110,7 @@ const VIEWER_MAX_SESSIONS_PER_IP = 8;
 const PING_RESULT_STORAGE_PREFIX = 'ping-result:';
 // Ping 快照不做「值没变就不落库」的压缩：24h 内按落库间隔全量保存，
 // 详情页 12h 内直接画原始点、更长的窗口按 6/14 分钟分桶（见 routes/public.ts historyBucketSec），
-// 首页探测点的最新 24 格（utils/home-ping.ts）按落库间隔读取，
-// 容量估算（utils/capacity-estimate.ts）也是按「每个到期间隔写一行」算的。
+// 首页探测点的最新 24 格（utils/home-ping.ts）按落库间隔读取。
 const GPU_SNAPSHOT_META_PREFIX = 'gpu-snapshot-meta:';
 const GPU_SNAPSHOT_UNCHANGED_HEARTBEAT_MS = 30 * 60_000;
 const GPU_UTILIZATION_BUCKET_PERCENT = 5;

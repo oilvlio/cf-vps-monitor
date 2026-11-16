@@ -124,7 +124,7 @@ try {
           if (mutation === 'hidden') {
             if (domain === 'clients') {
               await page.locator('.admin-node-card').first().getByRole('checkbox').check();
-              await page.locator('.admin-selection-inline').getByRole('button', { name: '隐藏', exact: true }).click();
+              await page.locator('.admin-selection-inline').getByRole('button', { name: '完全隐藏', exact: true }).click();
             }
             await settleCall(page, await waitForCall(data, call => call.path.endsWith('/batch-hide')));
           } else if (mutation === 'order') {
@@ -132,7 +132,7 @@ try {
             await drag.focus();
             await page.keyboard.press('Space');
             await settleRender(page);
-            await page.keyboard.press(domain === 'clients' ? 'ArrowRight' : 'ArrowDown');
+            await page.keyboard.press('ArrowDown');
             await settleRender(page);
             await page.keyboard.press('Space');
             await settleCall(page, await waitForCall(data, call => call.path === `/api/admin/${domain}/reorder`));
@@ -162,7 +162,7 @@ try {
           data.observed = { names: await names().allTextContents(), persisted: data[domain].map(item => ({ name: item.name, hidden: item.hidden })) };
           if (mutation === 'hidden') {
             const row = page.locator('.admin-node-card').filter({ hasText: firstName });
-            assert.equal(await row.getByText(domain === 'clients' ? '隐藏' : '对游客隐藏', { exact: true }).count(), 1, 'R-F04: confirmed visibility survives an older GET');
+            assert.equal(await row.getByText(domain === 'clients' ? '完全隐藏' : '对游客隐藏', { exact: true }).count(), 1, 'R-F04: confirmed visibility survives an older GET');
           } else if (mutation === 'order') assert.equal(data.observed.names[0], 'Beta Server', 'R-F04: confirmed order survives an older GET');
           else assert.equal(data.observed.names[0], mutation === 'remount' ? 'After remount' : mutation === 'rapid-refresh' ? 'Latest refresh' : firstName);
         } finally { release.resolve(); }

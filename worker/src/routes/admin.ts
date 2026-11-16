@@ -74,21 +74,11 @@ import {
   type HealthEvent,
 } from '../utils/observability';
 import { readScheduledDatabaseStartupHealth } from '../utils/scheduled-observability';
-import {
-  ESTIMATED_GPU_SNAPSHOT_BYTES,
-  ESTIMATED_MONITOR_RECORD_BYTES,
-  ESTIMATED_PING_SNAPSHOT_BYTES,
-  buildQuotaReference,
-} from '../utils/quota';
-import { buildResourceEstimates } from '../utils/capacity-estimate';
 
 const adminRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 type AdminContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 const MAX_ADMIN_USERNAME_BYTES = 64;
 const MIN_JWT_SECRET_BYTES = 32;
-const CAPACITY_ESTIMATE_CACHE_MS = 30_000;
-const CAPACITY_ROW_COUNT_CACHE_MS = 60_000;
-const CAPACITY_ROW_COUNT_LIMIT = 100_000;
 const ADMIN_CLIENTS_CACHE_MS = 5_000;
 const ADMIN_PING_TASKS_CACHE_MS = 5_000;
 const ADMIN_PING_TASKS_EDGE_CACHE_SECONDS = 15;
@@ -107,20 +97,6 @@ const RECORD_PERSISTENCE_SETTING_KEYS = new Set([
   'record_high_watermark_rows',
   'record_high_watermark_bytes',
 ]);
-const CAPACITY_ESTIMATE_SETTING_KEYS = [
-  'record_enabled',
-  'record_preserve_time',
-  'ping_record_preserve_time',
-  'live_poll_active_interval_sec',
-  'live_poll_idle_interval_sec',
-  'record_persist_interval_sec',
-  'ping_record_persist_interval_sec',
-  'record_high_watermark_rows',
-  'record_high_watermark_bytes',
-  'audit_log_preserve_time',
-  'capacity_daily_view_minutes',
-];
-const CAPACITY_ESTIMATE_SETTING_KEY_SET = new Set(CAPACITY_ESTIMATE_SETTING_KEYS);
 const SETTINGS_SCOPE_KEYS = {
   site: [
     'site_title',
@@ -141,7 +117,6 @@ const SETTINGS_SCOPE_KEYS = {
     'ping_record_persist_interval_sec',
     'record_high_watermark_rows',
     'record_high_watermark_bytes',
-    'capacity_daily_view_minutes',
     'offline_confirm_rounds',
   ],
   notification: [
@@ -177,20 +152,6 @@ const MAINTENANCE_CLEANUP_SETTING_KEYS = [
   'ping_record_preserve_time',
   'audit_log_preserve_time',
 ];
-const EMPTY_AGENT_PING_TASK_POLL_SEC = 600;
-const DEFAULT_UNIFIED_PING_INTERVAL_SEC = 120;
-const MIN_UNIFIED_PING_INTERVAL_SEC = 60;
-const MAX_UNIFIED_PING_INTERVAL_SEC = 3600;
-const AGENT_BASIC_INFO_REPORTS_PER_DAY = 48;
-// 与 wrangler.toml 的 crons 配置保持一致（每 2 分钟一次）。
-const WORKER_CRON_INTERVAL_SEC = 120;
-// Cloudflare 对入站 WebSocket 消息按 20:1 折算计费（出站消息与协议 ping 免费）。
-const WEBSOCKET_MESSAGE_BILLING_RATIO = 20;
-// 实测：走遍所有后台页面一轮的 Worker 请求数。
-const ADMIN_TOUR_WORKER_REQUESTS = 23;
-const CAPACITY_COUNT_FAR_CHECK_SEC = 6 * 60 * 60;
-const CAPACITY_COUNT_NEAR_CHECK_SEC = 10 * 60;
-const CAPACITY_COUNT_CRITICAL_CHECK_SEC = 60;
 const AGENT_TOKEN_ROTATION_WARNING_MS = 180 * 24 * 60 * 60 * 1000;
 const AGENT_TOKEN_UNUSED_WARNING_MS = 7 * 24 * 60 * 60 * 1000;
 const AGENT_TOKEN_STALE_USE_WARNING_MS = 30 * 24 * 60 * 60 * 1000;
@@ -921,29 +882,6 @@ async function buildHealthCheck(c: AdminContext, deep: boolean, cacheState: Heal
   };
 }
 
-function parsePositiveNumber(value: unknown, fallback: number): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function parseBoundedNumber(value: unknown, fallback: number, min: number, max: number): number {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(Math.max(parsed, min), max);
-}
-
-function parseJsonArray(value: unknown): unknown[] {
-  if (Array.isArray(value)) return value;
-  if (typeof value !== 'string') return [];
-  if (!value) return [];
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
 function parseUniqueStringList(value: unknown, maxItems = 100): { ok: true; values: string[] } | { ok: false; error: string } {
   if (!Array.isArray(value)) {
     return { ok: false, error: '客户端列表不能为空' };
@@ -960,314 +898,6 @@ function parseUniqueStringList(value: unknown, maxItems = 100): { ok: true; valu
     return { ok: false, error: `一次最多处理 ${maxItems} 个客户端` };
   }
   return { ok: true, values };
-}
-
-function estimatePingSnapshotRowsPerDay(
-  clientCount: number,
-  pingTasks: db.PingTaskEstimateRow[],
-  pingIntervalSec: number = DEFAULT_UNIFIED_PING_INTERVAL_SEC,
-): number {
-  let hasAllClientTask = false;
-  const targetedClients = new Set<string>();
-  const boundedPingIntervalSec = Math.max(1, Math.floor(pingIntervalSec));
-
-  for (const task of pingTasks) {
-    if (task.all_clients) {
-      hasAllClientTask = true;
-      continue;
-    }
-    for (const uuid of parseJsonArray(task.clients).filter((item): item is string => typeof item === 'string')) {
-      targetedClients.add(uuid);
-    }
-  }
-
-  const coveredClientCount = hasAllClientTask ? clientCount : targetedClients.size;
-  const rowsPerClient = pingTasks.length > 0 ? Math.ceil(86400 / boundedPingIntervalSec) : 0;
-  const rowsPerDay = coveredClientCount * rowsPerClient;
-
-  return rowsPerDay;
-}
-
-function estimateRollupRowsPerClient(retentionHours: number, rawSamplesPerDay: number): number {
-  const hours = Math.max(0, Math.min(retentionHours, 168));
-  return Math.ceil(Math.min(hours, 24) * rawSamplesPerDay / 24)
-    + Math.ceil(Math.max(0, hours - 24));
-}
-
-function estimateAgentPingTaskPullsPerDay(
-  clientCount: number,
-  pingTasks: db.PingTaskEstimateRow[],
-  pingIntervalSec: number,
-): number {
-  // 未分配任何服务器的任务不会下发给 Agent，不应抬高拉取频率。
-  const hasRunnableTask = pingTasks.some(task => task.all_clients || parseJsonArray(task.clients).length > 0);
-  if (!hasRunnableTask) {
-    return Math.ceil(clientCount * 86400 / EMPTY_AGENT_PING_TASK_POLL_SEC);
-  }
-
-  const pollIntervalSec = Math.max(1, Math.floor(pingIntervalSec));
-  return Math.ceil(clientCount * 86400 / pollIntervalSec);
-}
-
-function estimateCapacityCountCheckIntervalSec(estimatedRows: number, highWatermarkRows: number): number {
-  if (highWatermarkRows <= 0) return CAPACITY_COUNT_NEAR_CHECK_SEC;
-  const ratio = estimatedRows / highWatermarkRows;
-  if (ratio >= 0.95) return CAPACITY_COUNT_CRITICAL_CHECK_SEC;
-  if (ratio >= 0.8) return CAPACITY_COUNT_NEAR_CHECK_SEC;
-  return CAPACITY_COUNT_FAR_CHECK_SEC;
-}
-
-type CapacityRowCountSnapshot = {
-  bounded_row_counts: Awaited<ReturnType<typeof db.getBoundedStorageRowCounts>> | null;
-  expired_row_counts: Awaited<ReturnType<typeof db.getExpiredRowCounts>> | null;
-  checked_at: string;
-  cache_key: string;
-};
-
-let capacityRowCountCache: { value: CapacityRowCountSnapshot; expiresAt: number } | null = null;
-let capacityEstimateCache: { value: Record<string, unknown>; expiresAt: number } | null = null;
-
-function invalidateCapacityEstimateCache(): void {
-  capacityRowCountCache = null;
-  capacityEstimateCache = null;
-}
-
-async function getCapacityRowCounts(
-  database: db.QueryDatabase,
-  settings: Record<string, string>,
-  forceRefresh = false,
-): Promise<CapacityRowCountSnapshot> {
-  const recordHours = Math.min(168, parsePositiveNumber(settings.record_preserve_time, 168));
-  const pingHours = Math.min(168, parsePositiveNumber(settings.ping_record_preserve_time, recordHours));
-  const auditHours = Math.max(24, parsePositiveNumber(settings.audit_log_preserve_time, 2160));
-  const cacheKey = `${recordHours}:${pingHours}:${auditHours}`;
-  const nowMs = Date.now();
-  if (
-    !forceRefresh &&
-    capacityRowCountCache &&
-    capacityRowCountCache.expiresAt > nowMs &&
-    capacityRowCountCache.value.cache_key === cacheKey
-  ) {
-    return capacityRowCountCache.value;
-  }
-
-  let boundedRowCounts: Awaited<ReturnType<typeof db.getBoundedStorageRowCounts>> | null = null;
-  let expiredRowCounts: Awaited<ReturnType<typeof db.getExpiredRowCounts>> | null = null;
-  try {
-    boundedRowCounts = await db.getBoundedStorageRowCounts(database, CAPACITY_ROW_COUNT_LIMIT);
-  } catch {
-    boundedRowCounts = null;
-  }
-  try {
-    expiredRowCounts = await db.getExpiredRowCounts(database, {
-      records: new Date(nowMs - recordHours * 60 * 60 * 1000).toISOString(),
-      ping_records: new Date(nowMs - pingHours * 60 * 60 * 1000).toISOString(),
-      audit_logs: new Date(nowMs - auditHours * 60 * 60 * 1000).toISOString(),
-    });
-  } catch {
-    expiredRowCounts = null;
-  }
-
-  const value = {
-    bounded_row_counts: boundedRowCounts,
-    expired_row_counts: expiredRowCounts,
-    checked_at: new Date(nowMs).toISOString(),
-    cache_key: cacheKey,
-  };
-  capacityRowCountCache = {
-    value,
-    expiresAt: nowMs + CAPACITY_ROW_COUNT_CACHE_MS,
-  };
-  return value;
-}
-
-export async function buildCapacityEstimate(database: db.QueryDatabase, options: { forceCounts?: boolean } = {}) {
-  const nowMs = Date.now();
-  if (!options.forceCounts && capacityEstimateCache && capacityEstimateCache.expiresAt > nowMs) {
-    return {
-      ...capacityEstimateCache.value,
-      capacity_estimate_cache: 'hit',
-      capacity_estimate_cache_seconds: CAPACITY_ESTIMATE_CACHE_MS / 1000,
-    };
-  }
-
-  const [clientCapacityCounts, rawSettings, pingTasks, historyByteSizes, historyStorageUsage] = await Promise.all([
-    db.countClientCapacityTargets(database),
-    db.getSettingsByKeys(database, CAPACITY_ESTIMATE_SETTING_KEYS),
-    db.listPingTaskEstimateRows(database),
-    // Physical allocation is a diagnostic; live usage is the recoverable budget.
-    // The latter scans visible tuples, so the complete response is cached for 30s.
-    db.getHistoryStorageBytes(database).catch(() => null),
-    db.getHistoryStorageUsage(database).catch(() => null),
-  ]);
-  const clientCount = clientCapacityCounts.clients;
-  const gpuClientCount = clientCapacityCounts.gpu_clients;
-  const settings = buildAdminSettings(rawSettings);
-  const recordEnabled = settings.record_enabled !== 'false';
-  const recordPreserveHours = Math.min(168, parsePositiveNumber(settings.record_preserve_time, 168));
-  const pingPreserveHours = Math.min(168, parsePositiveNumber(settings.ping_record_preserve_time, recordPreserveHours));
-  const sampleIntervalSec = Math.max(3, parsePositiveNumber(settings.live_poll_active_interval_sec, 3));
-  const idleIntervalSec = Math.max(60, parsePositiveNumber(settings.live_poll_idle_interval_sec, 120));
-  const persistIntervalSec = Math.max(3, parsePositiveNumber(settings.record_persist_interval_sec, 120));
-  const unifiedPingIntervalSec = Math.min(
-    MAX_UNIFIED_PING_INTERVAL_SEC,
-    Math.max(MIN_UNIFIED_PING_INTERVAL_SEC, parsePositiveNumber(settings.ping_record_persist_interval_sec, DEFAULT_UNIFIED_PING_INTERVAL_SEC)),
-  );
-  const highWatermarkRows = Math.min(10_000_000, Math.max(1_000, parsePositiveNumber(settings.record_high_watermark_rows, 700_000)));
-  // 字节熔断线：与 DO 侧 RECORD_HIGH_WATERMARK_{MIN,MAX}_BYTES 用同一组边界，
-  // 面板显示的阈值必须等于真正生效的那个值，否则用户照着面板调也调不到点上。
-  const highWatermarkBytes = Math.min(549_755_813_888, Math.max(16_777_216, parsePositiveNumber(settings.record_high_watermark_bytes, 419_430_400)));
-  const auditPreserveHours = Math.max(24, parsePositiveNumber(settings.audit_log_preserve_time, 2160));
-  const effectiveActiveIntervalSec = Math.max(sampleIntervalSec, persistIntervalSec);
-  const effectiveIdleIntervalSec = Math.max(idleIntervalSec, persistIntervalSec);
-  const dailyViewMinutes = parseBoundedNumber(settings.capacity_daily_view_minutes, 60, 0, 1440);
-  const activeSecondsPerDay = Math.floor(dailyViewMinutes * 60);
-  const idleSecondsPerDay = Math.max(0, 86400 - activeSecondsPerDay);
-  const activeMonitorRecordsPerDay = recordEnabled && activeSecondsPerDay > 0
-    ? Math.ceil(clientCount * activeSecondsPerDay / effectiveActiveIntervalSec)
-    : 0;
-  const idleMonitorRecordsPerDay = recordEnabled && idleSecondsPerDay > 0
-    ? Math.ceil(clientCount * idleSecondsPerDay / effectiveIdleIntervalSec)
-    : 0;
-  const monitorRecordsPerDay = activeMonitorRecordsPerDay + idleMonitorRecordsPerDay;
-  const activeGpuSnapshotsPerDay = recordEnabled && activeSecondsPerDay > 0
-    ? Math.ceil(gpuClientCount * activeSecondsPerDay / effectiveActiveIntervalSec)
-    : 0;
-  const idleGpuSnapshotsPerDay = recordEnabled && idleSecondsPerDay > 0
-    ? Math.ceil(gpuClientCount * idleSecondsPerDay / effectiveIdleIntervalSec)
-    : 0;
-  const gpuSnapshotsPerDay = activeGpuSnapshotsPerDay + idleGpuSnapshotsPerDay;
-  let legacyPingRecordsPerDay = 0;
-  let pingTaskStateWritesPerDay = 0;
-
-  const pingTasksWithEstimates = pingTasks.map((task) => {
-    const targetClientCount = task.all_clients
-      ? clientCount
-      : parseJsonArray(task.clients).filter((uuid): uuid is string => typeof uuid === 'string').length;
-    const writesPerDay = recordEnabled ? Math.ceil(targetClientCount * 86400 / unifiedPingIntervalSec) : 0;
-    legacyPingRecordsPerDay += writesPerDay;
-    pingTaskStateWritesPerDay += writesPerDay;
-    return {
-      id: task.id,
-      name: task.name,
-      interval_sec: unifiedPingIntervalSec,
-      history_interval_sec: unifiedPingIntervalSec,
-      target_client_count: targetClientCount,
-    };
-  });
-  const pingRecordsPerDay = recordEnabled
-    ? estimatePingSnapshotRowsPerDay(clientCount, pingTasks, unifiedPingIntervalSec)
-    : 0;
-  const pingResultReportsPerDay = estimatePingSnapshotRowsPerDay(clientCount, pingTasks, unifiedPingIntervalSec);
-  const agentPingTaskPullsPerDay = estimateAgentPingTaskPullsPerDay(clientCount, pingTasks, unifiedPingIntervalSec);
-  const agentBasicInfoReportsPerDay = clientCount * AGENT_BASIC_INFO_REPORTS_PER_DAY;
-  const agentWebsocketConnectsPerDay = clientCount;
-  const cronInvocationsPerDay = Math.floor(86400 / WORKER_CRON_INTERVAL_SEC);
-  const pingRecordsSavedPerDay = Math.max(0, legacyPingRecordsPerDay - pingRecordsPerDay);
-  const totalEstimatedBusinessRowsPerDay = monitorRecordsPerDay + gpuSnapshotsPerDay + pingRecordsPerDay;
-  const monitorRollupRows = estimateRollupRowsPerClient(recordPreserveHours, monitorRecordsPerDay / Math.max(1, clientCount));
-  const pingRollupRows = estimateRollupRowsPerClient(pingPreserveHours, pingRecordsPerDay / Math.max(1, clientCount));
-  const estimatedMonitorRecordsRetained = recordEnabled
-    ? Math.min(Math.ceil(monitorRecordsPerDay * recordPreserveHours / 24), clientCount * monitorRollupRows)
-    : 0;
-  const estimatedGpuSnapshotsRetained = recordEnabled
-    ? Math.min(Math.ceil(gpuSnapshotsPerDay * recordPreserveHours / 24), gpuClientCount * monitorRollupRows)
-    : 0;
-  const estimatedPingRecordsRetained = recordEnabled
-    ? Math.min(Math.ceil(pingRecordsPerDay * pingPreserveHours / 24),
-      (pingRecordsPerDay > 0 ? Math.ceil(pingRecordsPerDay / Math.max(1, Math.ceil(86400 / unifiedPingIntervalSec))) : 0) * pingRollupRows)
-    : 0;
-  const estimatedLegacyPingRecordsRetained = Math.ceil(legacyPingRecordsPerDay * pingPreserveHours / 24);
-  const estimatedRowsRetained = estimatedMonitorRecordsRetained + estimatedGpuSnapshotsRetained + estimatedPingRecordsRetained;
-  const estimatedStorageBytes = estimatedMonitorRecordsRetained * ESTIMATED_MONITOR_RECORD_BYTES
-    + estimatedGpuSnapshotsRetained * ESTIMATED_GPU_SNAPSHOT_BYTES
-    + estimatedPingRecordsRetained * ESTIMATED_PING_SNAPSHOT_BYTES;
-  const resourceModel = buildResourceEstimates({
-    clientCount, activeSecondsPerDay, sampleIntervalSec, idleIntervalSec, monitorRecordsPerDay,
-    pingTaskStateWritesPerDay, pingTaskPullsPerDay: agentPingTaskPullsPerDay,
-    pingResultReportsPerDay, basicInfoReportsPerDay: agentBasicInfoReportsPerDay,
-    connectionsPerDay: agentWebsocketConnectsPerDay, cronInvocationsPerDay,
-    estimatedSupabaseStorageBytes: estimatedStorageBytes,
-  });
-  const capacityCountCheckIntervalSec = recordEnabled
-    ? estimateCapacityCountCheckIntervalSec(estimatedRowsRetained, highWatermarkRows)
-    : 0;
-  const capacityCountChecksPerDay = recordEnabled && capacityCountCheckIntervalSec > 0
-    ? Math.ceil(86400 / capacityCountCheckIntervalSec)
-    : 0;
-  const quotaReference = buildQuotaReference();
-  const rowCounts = options.forceCounts
-    ? await getCapacityRowCounts(database, settings, true)
-    : null;
-
-  const estimate = {
-    clients: clientCount,
-    gpu_clients: gpuClientCount,
-    record_enabled: recordEnabled,
-    record_preserve_hours: recordPreserveHours,
-    ping_record_preserve_hours: pingPreserveHours,
-    audit_log_preserve_hours: auditPreserveHours,
-    record_persist_interval_sec: persistIntervalSec,
-    ping_record_persist_interval_sec: unifiedPingIntervalSec,
-    record_high_watermark_rows: highWatermarkRows,
-    record_high_watermark_bytes: highWatermarkBytes,
-    capacity_daily_view_minutes: dailyViewMinutes,
-    active_seconds_per_day: activeSecondsPerDay,
-    idle_seconds_per_day: idleSecondsPerDay,
-    active_monitor_records_per_day: activeMonitorRecordsPerDay,
-    idle_monitor_records_per_day: idleMonitorRecordsPerDay,
-    monitor_records_per_day: monitorRecordsPerDay,
-    gpu_storage_mode: 'snapshots',
-    active_gpu_snapshots_per_day: activeGpuSnapshotsPerDay,
-    idle_gpu_snapshots_per_day: idleGpuSnapshotsPerDay,
-    gpu_snapshots_per_day: gpuSnapshotsPerDay,
-    ping_storage_mode: 'snapshots',
-    ping_records_per_day: pingRecordsPerDay,
-    legacy_ping_records_per_day: legacyPingRecordsPerDay,
-    ping_records_saved_per_day: pingRecordsSavedPerDay,
-    total_estimated_business_rows_per_day: totalEstimatedBusinessRowsPerDay,
-    capacity_count_checks_per_day: capacityCountChecksPerDay,
-    capacity_count_check_interval_sec: capacityCountCheckIntervalSec,
-    ping_result_reports_per_day: pingResultReportsPerDay,
-    agent_ping_task_pulls_per_day: agentPingTaskPullsPerDay,
-    agent_basic_info_reports_per_day: agentBasicInfoReportsPerDay,
-    agent_websocket_connects_per_day: agentWebsocketConnectsPerDay,
-    ...resourceModel,
-    websocket_message_billing_ratio: WEBSOCKET_MESSAGE_BILLING_RATIO,
-    cron_invocations_per_day: cronInvocationsPerDay,
-    admin_tour_worker_requests: ADMIN_TOUR_WORKER_REQUESTS,
-    estimated_monitor_records_retained: estimatedMonitorRecordsRetained,
-    estimated_gpu_snapshots_retained: estimatedGpuSnapshotsRetained,
-    estimated_ping_records_retained: estimatedPingRecordsRetained,
-    estimated_legacy_ping_records_retained: estimatedLegacyPingRecordsRetained,
-    estimated_ping_records_saved_retained: Math.max(0, estimatedLegacyPingRecordsRetained - estimatedPingRecordsRetained),
-    estimated_rows_retained: estimatedRowsRetained,
-    estimated_storage_bytes: estimatedStorageBytes,
-    actual_row_counts: rowCounts?.bounded_row_counts?.counts ?? null,
-    row_counts_capped: rowCounts?.bounded_row_counts?.capped ?? null,
-    row_counts_limit: rowCounts?.bounded_row_counts?.limit ?? null,
-    expired_row_counts: rowCounts?.expired_row_counts ?? null,
-    // Physical diagnostics stay separate from the live data budget below.
-    history_byte_sizes: historyByteSizes ?? null,
-    history_total_bytes: historyByteSizes?.total ?? null,
-    // Allocated files can remain large after DELETE. The live estimate is the
-    // recoverable history budget; physical allocation remains a diagnostic.
-    history_storage_usage: historyStorageUsage ?? null,
-    row_counts_checked_at: rowCounts?.checked_at ?? null,
-    row_counts_cache_seconds: rowCounts ? CAPACITY_ROW_COUNT_CACHE_MS / 1000 : 0,
-    row_counts_cache_key: rowCounts?.cache_key ?? null,
-    capacity_estimate_cache: options.forceCounts ? 'refresh' : 'miss',
-    capacity_estimate_cache_seconds: CAPACITY_ESTIMATE_CACHE_MS / 1000,
-    quota_reference: quotaReference,
-    ping_tasks: pingTasksWithEstimates,
-  };
-  if (!options.forceCounts) {
-    capacityEstimateCache = {
-      value: estimate,
-      expiresAt: Date.now() + CAPACITY_ESTIMATE_CACHE_MS,
-    };
-  }
-  return estimate;
 }
 
 async function runMaintenanceCleanup(database: db.QueryDatabase, username: string, now = new Date()) {
@@ -1298,7 +928,6 @@ async function runMaintenanceCleanup(database: db.QueryDatabase, username: strin
   const deleted = { ...recordDeleted, ...pingDeleted, ...auditDeleted };
   const orphanCleanup = await db.cleanupOrphanClientData(database);
   const expiredBacklogAfter = await db.getExpiredRowCounts(database, before);
-  invalidateCapacityEstimateCache();
   const result = {
     success: true,
     has_more: hasMore,
@@ -1394,7 +1023,6 @@ adminRoutes.post('/clients/add', async (c) => {
     const publicMetadataPurge = invalidateAdminPublicMetadata(c);
     invalidateAgentClientAuthCache({ uuid, token });
     invalidateAllowedClientIdsCache();
-    invalidateCapacityEstimateCache();
     await timed(metrics, 'post_write_cache', async () => {
       await Promise.all([
         syncLiveClientMeta(c, safeClient).catch(() => undefined),
@@ -1437,7 +1065,6 @@ adminRoutes.post('/clients/:uuid/edit', async (c) => {
     invalidateAdminClientsCache();
     const publicMetadataPurge = invalidateAdminPublicMetadata(c);
     invalidateAgentClientAuthCache({ uuid });
-    invalidateCapacityEstimateCache();
     await timed(metrics, 'post_write_cache', async () => {
       await Promise.all([
         syncLiveClientMeta(c, safeClient).catch(() => undefined),
@@ -1540,7 +1167,6 @@ adminRoutes.post('/clients/:uuid/remove', async (c) => {
   invalidateAgentClientAuthCache({ uuid });
   invalidateAgentPingTaskCache();
   invalidateAllowedClientIdsCache();
-  invalidateCapacityEstimateCache();
   await timed(metrics, 'post_write_cache', async () => {
     await Promise.all([
       removeLiveClient(c, uuid).catch(() => undefined),
@@ -1651,7 +1277,6 @@ adminRoutes.post('/clients/reorder', async (c) => {
       ]);
     }
     invalidateAdminPublicMetadata(c);
-    invalidateCapacityEstimateCache();
     await db.insertAuditLog(database, c.get('username')!, 'client_reorder', `调整客户端排序: ${existingUuids.join(',')}; missing=${missing.join(',')}`);
     return c.json({ success: true, updated, missing });
   } catch (error) {
@@ -1685,7 +1310,6 @@ adminRoutes.post('/clients/batch-hide', async (c) => {
       invalidateAdminClientsCache();
       await purgeAdminClientsEdgeCache(c);
       invalidateAdminPublicMetadata(c);
-      invalidateCapacityEstimateCache();
     }
     await db.insertAuditLog(database, c.get('username')!, 'client_batch_hide', `批量隐藏客户端: ${uuids.join(',')}; updated=${updated}; missing=${missing.join(',')}`);
     return c.json({ success: true, updated, changed, missing });
@@ -1723,7 +1347,6 @@ adminRoutes.post('/clients/batch-remove', async (c) => {
       invalidateAgentClientAuthCache();
       invalidateAgentPingTaskCache();
       invalidateAllowedClientIdsCache();
-      invalidateCapacityEstimateCache();
       await refreshLivePingTasks(c);
     }
     await db.insertAuditLog(database, c.get('username')!, 'client_batch_remove', `批量删除客户端: ${uuids.join(',')}; removed=${removed}; missing=${missing.join(',')}; 清理引用: ${JSON.stringify(cleanup)}`);
@@ -1745,7 +1368,6 @@ adminRoutes.post('/record/clear', async (c) => {
     const database = getDatabase(c.env);
     if (uuid) {
       await db.clearClientRecords(database, uuid);
-      invalidateCapacityEstimateCache();
     }
     await db.insertAuditLog(database, c.get('username')!, 'record_clear', `清除记录: ${uuid}`);
     return c.json({ success: true });
@@ -1760,7 +1382,6 @@ adminRoutes.post('/record/clear/all', async (c) => {
   if (!parsed.ok) return parsed.response;
   const database = getDatabase(c.env);
   const result = await db.clearAllRecords(database);
-  invalidateCapacityEstimateCache();
   await db.insertAuditLog(
     database,
     c.get('username')!,
@@ -1823,7 +1444,6 @@ adminRoutes.post('/ping/add', async (c) => {
     purgeAdminPingTasksEdgeCache(c);
     invalidateAdminPublicMetadata(c);
     invalidateAgentPingTaskCache();
-    invalidateCapacityEstimateCache();
     runAdminBackground(c, refreshLivePingTasks(c));
     runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'ping_add', pingTaskAuditDetail('添加 Ping 任务', task)));
     setServerTiming(c, metrics);
@@ -1863,7 +1483,6 @@ adminRoutes.post('/ping/edit', async (c) => {
     purgeAdminPingTasksEdgeCache(c);
     invalidateAdminPublicMetadata(c);
     invalidateAgentPingTaskCache();
-    invalidateCapacityEstimateCache();
     runAdminBackground(c, refreshLivePingTasks(c));
     runAdminBackground(c, db.insertAuditLog(
       database,
@@ -1922,7 +1541,6 @@ adminRoutes.post('/ping/assign', async (c) => {
       purgeAdminPingTasksEdgeCache(c);
       invalidateAdminPublicMetadata(c);
       invalidateAgentPingTaskCache();
-      invalidateCapacityEstimateCache();
       runAdminBackground(c, refreshLivePingTasks(c));
       runAdminBackground(c, db.insertAuditLog(
         database,
@@ -1962,7 +1580,6 @@ adminRoutes.post('/ping/reorder', async (c) => {
     purgeAdminPingTasksEdgeCache(c);
     invalidateAdminPublicMetadata(c);
     invalidateAgentPingTaskCache();
-    invalidateCapacityEstimateCache();
     runAdminBackground(c, refreshLivePingTasks(c));
     runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'ping_reorder', `调整 Ping 任务排序: ${ids.join(',')}`));
     setServerTiming(c, metrics);
@@ -1990,7 +1607,6 @@ adminRoutes.post('/ping/delete', async (c) => {
     purgeAdminPingTasksEdgeCache(c);
     invalidateAdminPublicMetadata(c);
     invalidateAgentPingTaskCache();
-    invalidateCapacityEstimateCache();
     runAdminBackground(c, refreshLivePingTasks(c));
     runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'ping_delete', pingTaskAuditDetail(`删除 Ping 任务 ${id}`, deleted)));
     setServerTiming(c, metrics);
@@ -2179,9 +1795,6 @@ adminRoutes.post('/settings', async (c) => {
     await db.setSettings(database, changedSettings);
     invalidateAdminSettingsCache();
     const background: Promise<unknown>[] = [];
-    if (changedKeys.some((key) => CAPACITY_ESTIMATE_SETTING_KEY_SET.has(key))) {
-      invalidateCapacityEstimateCache();
-    }
     if (changedKeys.some((key) => SETTING_SCHEMA[key as keyof typeof SETTING_SCHEMA]?.public)) {
       invalidateAdminPublicMetadata(c);
     }
@@ -2835,19 +2448,12 @@ adminRoutes.get('/do-retire-legacy', async (c) => {
   }
 });
 
-adminRoutes.get('/capacity', async (c) => {
-  const forceCounts = c.req.query('refresh_counts') === 'true' || c.req.query('refresh_counts') === '1';
-  const database = getDatabase(c.env);
-  return c.json(await buildCapacityEstimate(database, { forceCounts }));
-});
-
 adminRoutes.post('/maintenance/cleanup', async (c) => {
   try {
     const database = getDatabase(c.env);
     const parsed = await readAdminJsonObject(c);
     if (!parsed.ok) return parsed.response;
     const result = await runMaintenanceCleanup(database, c.get('username')!);
-    invalidateCapacityEstimateCache();
     return c.json(result);
   } catch (error) {
     const database = getDatabase(c.env);
@@ -2987,7 +2593,6 @@ adminRoutes.post('/upload/backup', async (c) => {
     invalidateAgentClientAuthCache();
     invalidateAgentPingTaskCache();
     invalidateAllowedClientIdsCache();
-    invalidateCapacityEstimateCache();
     runAdminBackground(c, refreshLiveAgentPolicy(c));
     if (validated.backup.clients !== undefined) {
       const authoritativeClients = await db.listClients(database, true);

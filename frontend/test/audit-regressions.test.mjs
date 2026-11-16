@@ -18,20 +18,12 @@ const { TextField, Text } = require('@radix-ui/themes');
 
 const notifications = 'src/pages/admin/Notifications.tsx';
 
-const capacitySettings = { record_enabled: 'true', record_preserve_time: '72', ping_record_preserve_time: '72', live_poll_active_interval_sec: '3', live_poll_idle_interval_sec: '120', record_persist_interval_sec: '120', ping_record_persist_interval_sec: '120', record_high_watermark_bytes: '419430400', record_high_watermark_rows: '700000', capacity_daily_view_minutes: '0' };
-function capacityInput(overrides = {}) {
-  return { clients: 50, gpu_clients: 0, ping_records_per_day: 36000, ping_tasks: [{ id: 1, target_client_count: 50 }, { id: 2, target_client_count: 50 }], history_total_bytes: 900 * 1024 ** 2, history_storage_usage: { live_rows: 100, live_row_bytes: 100 * 1024 ** 2, estimated_live_storage_bytes: 100 * 1024 ** 2, allocated_bytes: 900 * 1024 ** 2, reusable_bytes: null, measurement: 'live-row-bytes-plus-index-estimate' }, ...overrides };
-}
-function derivedCapacity(capacity, settings = capacitySettings) {
-  return productionSelected('src/pages/admin/SettingsGeneral.tsx', 'derived', { capacity, settings, originalSettings: capacitySettings })();
-}
-
 test('AUD-07 partial maintenance reports remaining work and counts ping records', async () => {
   for (const hasMore of [true, false]) {
     let requests = 0;
     const messages = [];
     const cleanup = productionDeclaration('src/pages/admin/SettingsGeneral.tsx', 'handleMaintenanceCleanup', {
-      setCleaning() {}, refreshCapacity: async () => true,
+      setCleaning() {},
       apiFetch: async () => { requests += 1; if (requests > 1) throw new Error('Unexpected client cleanup loop'); return { success: true, has_more: hasMore, deleted: { records: 1, ping_records: 2 } }; },
       formatInteger: productionDeclaration('src/pages/admin/SettingsGeneral.tsx', 'formatInteger'),
       toast: { info: message => messages.push(['info', message]), success: message => messages.push(['success', message]), error: message => messages.push(['error', message]) },
@@ -42,41 +34,6 @@ test('AUD-07 partial maintenance reports remaining work and counts ping records'
     if (hasMore) assert.match(messages[0][1], /仍有|继续清理/);
     assert.equal(requests, 1);
   }
-});
-
-test('AUD-13 frontend history budget uses live data estimate instead of allocated file size', () => {
-  const derived = derivedCapacity(capacityInput());
-  assert.equal(derived.highWatermarkBytesPercent, 25, '100 MiB live data / 400 MiB budget must be 25%, despite 900 MiB allocated');
-  const empty = derivedCapacity(capacityInput({ history_storage_usage: { estimated_live_storage_bytes: 0, allocated_bytes: 900 * 1024 ** 2 } }));
-  assert.equal(empty.hasHistoryBytes, true, 'a measured empty table is a known zero');
-  assert.equal(empty.highWatermarkBytesPercent, 0);
-});
-
-test('AUD-15 frontend estimates include separate DO writes and unknown resource dimensions', () => {
-  const derived = derivedCapacity(capacityInput());
-  const writes = derived.resourceEstimates?.find(row => row.key === 'durable_object_rows_written');
-  // 36000 final snapshots + 36000 history markers + 72000 Ping task states.
-  assert.equal(writes?.websocket, 144000, '50 nodes and two 120-second Ping tasks exceed the 100000 daily DO write allowance');
-  assert.equal(writes.within_free_websocket, false);
-  for (const key of ['durable_object_rows_read', 'durable_object_duration_gb_seconds', 'supabase_egress_bytes']) {
-    assert.equal(derived.resourceEstimates.find(row => row.key === key).websocket, null, key + ' cannot be silently treated as zero');
-  }
-});
-
-test('AUD-15 disabling history in the local preview retains final snapshot writes in both transports', () => {
-  const derived = derivedCapacity(capacityInput(), { ...capacitySettings, record_enabled: 'false' });
-  const writes = derived.resourceEstimates.find(row => row.key === 'durable_object_rows_written');
-  assert.equal(writes.websocket, 36000, 'WebSocket final snapshots persist each monitor report even without Ping history');
-  assert.equal(writes.http, 36000, 'HTTP live state still persists each monitor report without history');
-  assert.equal(writes.within_free_websocket, true);
-  assert.equal(writes.within_free_http, true);
-});
-
-test('AUD-16 frontend Paid comparison uses monthly demand and monthly included quota', () => {
-  const derived = derivedCapacity(capacityInput());
-  assert.equal(derived.mixedWorkerRequestsPerMonth, 23100, '770 estimated daily Worker requests must become 23100 for a 30-day comparison');
-  assert.equal(derived.workerPaidMonthlyRequests, 10000000);
-  assert.ok(Math.abs(derived.mixedPaidWorkerPercent - 0.231) < 1e-10);
 });
 
 function adminActionRunner(errors = []) {

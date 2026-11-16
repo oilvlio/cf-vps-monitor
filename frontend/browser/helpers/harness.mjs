@@ -57,7 +57,7 @@ export function fixture() {
   return {
     authenticated: true, calls: [], callListeners: new Set(), handlers: [], failures: {}, errors: [], observed: {},
     settings: { site_title: 'Synthetic Monitor', site_subtitle: 'Synthetic subtitle', site_logo_url: '', active_theme: 'monitor', script_domain: '', theme_settings: {} },
-    general: { record_enabled: 'true', record_preserve_time: '48', ping_record_preserve_time: '48', live_poll_active_interval_sec: '3', live_poll_idle_interval_sec: '600', record_persist_interval_sec: '60', ping_record_persist_interval_sec: '300', live_poll_active_max_duration_sec: '600', record_high_watermark_rows: '700000', record_high_watermark_bytes: '419430400', capacity_daily_view_minutes: '0' },
+    general: { record_enabled: 'true', record_preserve_time: '48', ping_record_preserve_time: '48', live_poll_active_interval_sec: '3', live_poll_idle_interval_sec: '600', record_persist_interval_sec: '60', ping_record_persist_interval_sec: '300', live_poll_active_max_duration_sec: '600', record_high_watermark_rows: '700000', record_high_watermark_bytes: '419430400' },
     clients: [{ uuid: 'node-a', name: 'Alpha Server', cpu_name: 'Synthetic CPU', cpu_cores: 2, os: 'Debian', arch: 'amd64', region: 'CN', mem_total: 2147483648, disk_total: 10737418240, swap_total: 0, group: '', tags: '', hidden: false, price: 0, billing_cycle: 30, currency: '$', expired_at: '', traffic_limit: 0, traffic_reset_day: 1, traffic_limit_type: 'sum', sort_order: 0, gpu_name: '', public_remark: '', remark: '', version: 'v1.0.0', token_last_used_at: null, token_last_used_ip: '', token_rotated_at: null, created_at: now, updated_at: now, auto_renewal: false }],
     mfa: { enabled: false, enabled_at: null, recovery_codes_remaining: 0 },
   };
@@ -175,7 +175,6 @@ export async function createHarness({ selection = 'ALL', playwrightModule } = {}
         data.settings.site_logo_url = path.endsWith('/reset') ? '' : '/fixture-logo.png';
         return json({ success: true, site_logo_url: data.settings.site_logo_url });
       }
-      if (path === '/api/admin/capacity') return json({ clients: data.clients.length, gpu_clients: 0, ping_records_per_day: 0, ping_tasks: [], history_storage_usage: { estimated_live_storage_bytes: 1024, allocated_bytes: 2048 }, history_total_bytes: 2048 });
       if (path === '/api/records/load' || path === '/api/records/gpu' || path === '/api/records/ping') return json({ data: [], has_more: false });
       if (path === '/api/ping' || path === '/api/ping/tasks') return json([]);
       if (path === '/api/admin/account/mfa') return json(data.mfa);

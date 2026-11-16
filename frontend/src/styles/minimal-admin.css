@@ -1451,3 +1451,70 @@
     padding-right: 12px;
   }
 }
+
+/* ---------- 延迟监测页 ---------- */
+.sa-ellipsis {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sa-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+}
+
+.admin-ping-task-name {
+  font-weight: 600;
+}
+
+.admin-ping-target {
+  max-width: 340px;
+}
+
+.sa-table td.sa-col-md {
+  white-space: nowrap;
+}
+
+.sa-scope-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 320px;
+}
+
+.sa-scope-cell .sa-badge {
+  flex-shrink: 0;
+}
+
+.sa-td-server {
+  width: 1%;
+  min-width: 200px;
+  white-space: nowrap;
+}
+
+.admin-ping-server-name {
+  max-width: 220px;
+  font-weight: 600;
+}
+
+.sa-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.sa-chip-count {
+  margin-right: 4px;
+  font-size: 12px;
+  color: var(--sa-muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-ping-search {
+  width: 220px;
+}

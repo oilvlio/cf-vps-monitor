@@ -22,6 +22,7 @@ import {
   Checkbox as SaCheckbox,
   ConfirmDialog,
   Segmented,
+  StatGrid,
 } from '../../components/ui/minimal';
 import {
   Flex, Text, Box, Button, TextField,
@@ -1138,18 +1139,16 @@ export default function AdminDashboard() {
         </div>
       </div>
 
-      <section className="sa-stats" aria-label="服务器概览">
-        {overviewCards.map((card) => (
-          <div className="sa-stat admin-overview-item" key={card.label} title={clientsReady ? card.detail : '尚未读取到服务器列表'}>
-            <div className="sa-stat-head">
-              <span className="sa-stat-label admin-overview-label">{card.label}</span>
-              <span className="sa-stat-icon" aria-hidden="true">{card.icon}</span>
-            </div>
-            <div className="sa-stat-value admin-overview-value">{clientsReady ? card.value : '—'}</div>
-            <div className="sa-stat-detail">{clientsReady ? card.detail : '尚未读取到服务器列表'}</div>
-          </div>
-        ))}
-      </section>
+      <StatGrid
+        label="服务器概览"
+        items={overviewCards.map((card) => ({
+          label: card.label,
+          value: clientsReady ? card.value : '—',
+          detail: clientsReady ? card.detail : '尚未读取到服务器列表',
+          icon: card.icon,
+          title: clientsReady ? card.detail : '尚未读取到服务器列表',
+        }))}
+      />
 
       {clientsError && (
         <div className="sa-alert" role="alert">

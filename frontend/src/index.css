@@ -2244,101 +2244,6 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   min-width: 0;
 }
 
-.admin-ping-task-scope {
-  display: block;
-  max-width: min(48vw, 460px);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.admin-ping-filter-toolbar {
-  width: 100%;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  overflow: hidden;
-}
-
-.admin-ping-filter-top-row {
-  width: 100%;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 8px;
-  flex-wrap: nowrap;
-}
-
-.admin-ping-filter-stats {
-  min-width: 0;
-  flex: 1 1 auto;
-}
-
-.admin-ping-search {
-  width: 210px;
-  flex: 0 0 210px;
-  min-width: 0;
-}
-
-.admin-ping-scope-select {
-  width: 136px;
-  min-width: 136px;
-  flex: 0 0 136px;
-}
-
-.admin-ping-filter-stats {
-  justify-content: flex-start;
-  overflow: hidden;
-}
-
-.admin-ping-filter-stats .rt-Badge {
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-
-.admin-ping-server-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: 10px;
-}
-
-.admin-ping-server-card,
-.admin-ping-server-empty {
-  min-width: 0;
-  padding: 12px;
-  border: 1px solid var(--monitor-border);
-  border-radius: 8px;
-  background: var(--monitor-panel);
-  box-shadow: var(--monitor-shadow);
-}
-
-.admin-ping-server-empty {
-  grid-column: 1 / -1;
-  text-align: center;
-}
-
-.admin-ping-server-card {
-  display: grid;
-  gap: 10px;
-}
-
-.admin-ping-server-card-head {
-  min-width: 0;
-}
-
-/* 名称区占满剩余宽度并允许收缩，操作区不换行；放不下时整体换到下一行，避免按钮溢出卡片 */
-.admin-ping-server-main {
-  min-width: 0;
-  flex: 1 1 120px;
-}
-
-.admin-ping-server-actions {
-  flex: 0 0 auto;
-  margin-left: auto;
-  white-space: nowrap;
-}
-
 .admin-ping-home-toggle {
   display: inline-flex;
   align-items: center;
@@ -2346,39 +2251,6 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   flex: 0 0 auto;
   padding: 2px 4px;
   cursor: pointer;
-  white-space: nowrap;
-}
-
-.admin-ping-server-name {
-  display: block;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.admin-ping-server-meta {
-  margin-top: 5px;
-  min-width: 0;
-}
-
-.admin-ping-server-count {
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-
-.admin-ping-server-task-list {
-  min-height: 26px;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: 6px;
-}
-
-.admin-ping-server-task-chip {
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -3744,51 +3616,6 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
     margin-left: auto;
   }
 
-  .admin-ping-filter-toolbar {
-    gap: 6px;
-  }
-
-  .admin-ping-filter-top-row {
-    gap: 6px;
-    flex-wrap: wrap;
-  }
-
-  .admin-ping-search {
-    width: 156px;
-    flex-basis: 156px;
-  }
-
-  .admin-ping-scope-select {
-    width: 112px;
-    min-width: 112px;
-    height: 28px;
-    min-height: 28px;
-    font-size: 12px;
-  }
-
-  .admin-ping-filter-stats {
-    flex-basis: 100%;
-    flex-wrap: nowrap !important;
-    overflow-x: auto;
-    padding-bottom: 1px;
-  }
-
-  .admin-ping-filter-stats .rt-Badge {
-    min-height: 21px;
-    padding-inline: 5px;
-    font-size: 11px;
-  }
-
-  .admin-ping-server-grid {
-    grid-template-columns: 1fr;
-    gap: 8px;
-  }
-
-  .admin-ping-server-card,
-  .admin-ping-server-empty {
-    padding: 10px;
-  }
-
   .notification-client-toolbar {
     max-width: 100%;
     flex-wrap: nowrap !important;
@@ -4219,33 +4046,6 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   .expiry-long-term-button {
     padding-inline: 5px !important;
     font-size: 11px !important;
-  }
-
-  .admin-ping-filter-toolbar {
-    gap: 5px;
-  }
-
-  .admin-ping-filter-top-row {
-    gap: 5px;
-  }
-
-  .admin-ping-search {
-    width: 126px;
-    flex-basis: 126px;
-  }
-
-  .admin-ping-search .rt-TextFieldInput {
-    font-size: 11.5px;
-  }
-
-  .admin-ping-scope-select {
-    width: 98px;
-    min-width: 98px;
-    font-size: 11.5px;
-  }
-
-  .admin-ping-filter-stats {
-    gap: 4px !important;
   }
 
   .notification-inline-search {

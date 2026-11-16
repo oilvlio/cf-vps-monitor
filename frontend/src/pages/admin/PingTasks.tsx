@@ -20,26 +20,30 @@ import {
   Badge,
   Box,
   Button,
-  Card,
   Checkbox,
   Dialog,
   Flex,
   Grid,
-  Heading,
   Select,
   Switch,
-  Table,
-  Tabs,
   Text,
   TextField,
 } from '@radix-ui/themes';
-import { Activity, Grip, ListChecks, Pencil, Plus, Search, Trash2 } from 'lucide-react';
+import { Activity, Globe, Grip, ListChecks, Pencil, Plus, Search, Server, Trash2, Unlink } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
 import { useApi } from '../../contexts/AuthContext';
 import { useAdminAction } from '../../hooks/useAdminAction';
 import { sortClientsByAdminOrder } from '../../utils/adminNodeOrder';
 import { lockXClampYToBounds, type DragBounds } from '../../utils/dragModifiers';
+import {
+  Badge as SaBadge,
+  Button as SaButton,
+  Card as SaCard,
+  ConfirmDialog,
+  Segmented,
+  StatGrid,
+} from '../../components/ui/minimal';
 
 interface PingTask {
   id: number;
@@ -558,14 +562,13 @@ function TaskRow({
     transition,
     position: 'relative',
     zIndex: isDragging ? 2 : undefined,
-    background: isDragging ? 'var(--color-panel-solid)' : undefined,
-    boxShadow: isDragging ? '0 6px 18px rgba(0, 0, 0, 0.22)' : undefined,
-    opacity: isDragging ? 0.92 : undefined,
   } as CSSProperties;
 
+  const scopeTitle = task.all_clients ? '默认应用到全部服务器' : (boundNames || '未分配服务器，暂不运行');
+
   return (
-    <Table.Row ref={setNodeRef} style={rowStyle} className={isDragging ? 'admin-ping-task-row is-dragging' : 'admin-ping-task-row'}>
-      <Table.Cell style={{ width: 44, paddingRight: 0 }}>
+    <tr ref={setNodeRef} style={rowStyle} className={`sa-tr admin-ping-task-row${isDragging ? ' is-dragging' : ''}`}>
+      <td className="sa-td-narrow">
         <button
           type="button"
           className="admin-row-drag-handle"
@@ -577,42 +580,38 @@ function TaskRow({
         >
           <Grip size={15} />
         </button>
-      </Table.Cell>
-      <Table.Cell>
-        <Flex direction="column" gap="1">
-          <Text size="2" weight="bold">{task.name}</Text>
-          <Text
-            className="admin-ping-task-scope"
-            size="1"
-            color="gray"
-            title={task.all_clients ? '默认应用到全部服务器' : (boundNames || '未分配服务器，暂不运行')}
-          >
-            {task.all_clients ? '默认应用到全部服务器' : (boundNames || '未分配服务器，暂不运行')}
-          </Text>
-        </Flex>
-      </Table.Cell>
-      <Table.Cell><Badge variant="soft">{task.type.toUpperCase()}</Badge></Table.Cell>
-      <Table.Cell><Text size="1" style={{ fontFamily: 'monospace' }}>{task.target}</Text></Table.Cell>
-      <Table.Cell>
-        {task.all_clients ? (
-          <Badge color="green">所有服务器</Badge>
-        ) : isUnboundTask(task) ? (
-          <Badge color="amber" variant="soft">未分配</Badge>
-        ) : (
-          <Badge color="blue" variant="soft">{task.clients?.length || 0} 台服务器</Badge>
-        )}
-      </Table.Cell>
-      <Table.Cell>
-        <Flex gap="1" wrap="nowrap" style={{ whiteSpace: 'nowrap' }}>
-          <Button size="1" variant="soft" onClick={() => onEdit(task)}>
-            <Pencil size={13} /> 编辑
-          </Button>
-          <Button size="1" variant="soft" color="red" onClick={() => onDelete(task)}>
-            <Trash2 size={13} /> 删除
-          </Button>
-        </Flex>
-      </Table.Cell>
-    </Table.Row>
+      </td>
+      <td className="sa-td-name">
+        <span className="sa-ellipsis admin-ping-task-name" title={task.name}>{task.name}</span>
+      </td>
+      <td><SaBadge variant="secondary">{task.type.toUpperCase()}</SaBadge></td>
+      <td><span className="sa-mono sa-ellipsis admin-ping-target" title={task.target}>{task.target}</span></td>
+      <td className="sa-col-md"><span className="sa-muted">{task.interval_sec ? `${task.interval_sec} 秒` : '-'}</span></td>
+      <td>
+        <span className="sa-scope-cell" title={scopeTitle}>
+          {task.all_clients ? (
+            <SaBadge variant="secondary">所有服务器</SaBadge>
+          ) : isUnboundTask(task) ? (
+            <SaBadge variant="warning">未分配</SaBadge>
+          ) : (
+            <>
+              <SaBadge variant="outline">{task.clients?.length || 0} 台</SaBadge>
+              <span className="sa-ellipsis sa-muted admin-ping-task-scope">{boundNames}</span>
+            </>
+          )}
+        </span>
+      </td>
+      <td className="sa-td-actions">
+        <span className="admin-row-actions">
+          <button type="button" className="admin-icon-button admin-row-action" aria-label={`编辑 ${task.name}`} title="编辑" onClick={() => onEdit(task)}>
+            <Pencil size={14} />
+          </button>
+          <button type="button" className="admin-icon-button admin-row-action admin-row-action-danger" aria-label={`删除 ${task.name}`} title="删除" onClick={() => onDelete(task)}>
+            <Trash2 size={14} />
+          </button>
+        </span>
+      </td>
+    </tr>
   );
 }
 
@@ -826,66 +825,74 @@ export default function AdminPingTasks() {
   if (loading) return <Loading />;
 
   return (
-    <Flex className="admin-ping-page" direction="column" gap="2">
-      {loadError && <Flex align="center" gap="2"><Text color="red" role="alert">{loadError}</Text><Button size="1" variant="soft" onClick={() => void loadData()}>重试</Button></Flex>}
-      <Flex className="admin-parent-title-row" justify="between" align="center" mb="3">
-        <Flex align="center" gap="2">
+    <div className="sa-scope admin-ping-page admin-dashboard-page">
+      <div className="admin-parent-title-row">
+        <div className="sa-page-title">
           <Activity size={20} />
-          <Heading size="5">延迟监测</Heading>
-          <Badge size="1" variant="soft" color="gray">{tasks.length} 个任务</Badge>
-        </Flex>
-      </Flex>
+          <span>延迟监测</span>
+        </div>
+      </div>
 
-      <Flex className="admin-subnav-action-row" justify="between" align="center" wrap="wrap" gap="3">
-        <Tabs.Root value={viewMode} onValueChange={(value) => setViewMode(value as TaskViewMode)}>
-          <Tabs.List className="admin-subnav-row">
-            <Tabs.Trigger value="task">任务视图</Tabs.Trigger>
-            <Tabs.Trigger value="server">服务器视图</Tabs.Trigger>
-          </Tabs.List>
-        </Tabs.Root>
-        <Button onClick={openAdd}><Plus size={16} /> 添加任务</Button>
-      </Flex>
+      {loadError && (
+        <div className="sa-alert" role="alert">
+          <span>{loadError}</span>
+          <SaButton variant="outline" size="sm" onClick={() => void loadData()}>重试</SaButton>
+        </div>
+      )}
 
-      <Card>
-        <div className="admin-ping-filter-toolbar">
-          <div className="admin-ping-filter-top-row">
-            <TextField.Root
-              className="admin-ping-search"
-              placeholder={viewMode === 'task' ? '搜索任务' : '搜索服务器'}
-              value={activeSearch}
-              onChange={(event) => {
-                if (viewMode === 'task') {
-                  setTaskSearch(event.target.value);
-                } else {
-                  setServerSearch(event.target.value);
-                }
-              }}
+      <StatGrid
+        label="延迟监测概览"
+        items={[
+          { label: '任务总数', value: String(tasks.length), detail: `当前结果 ${currentResultCount}`, icon: <Activity /> },
+          { label: '全局任务', value: String(globalTaskCount), detail: '默认应用到全部服务器', icon: <Globe /> },
+          { label: '定向任务', value: String(selectedTaskCount), detail: '只在指定服务器运行', icon: <Server /> },
+          { label: '未分配', value: String(unboundTaskCount), detail: unboundTaskCount > 0 ? '尚未绑定服务器，暂不运行' : '没有闲置任务', icon: <Unlink /> },
+        ]}
+      />
+
+      <SaCard className="admin-ping-panel">
+        <div className="sa-toolbar admin-ping-filter-toolbar">
+          <div className="sa-toolbar-group">
+            <Segmented
+              label="视图"
+              value={viewMode}
+              onChange={(value) => setViewMode(value as TaskViewMode)}
+              options={[{ value: 'task', label: '任务视图' }, { value: 'server', label: '服务器视图' }]}
+            />
+            <div className="sa-search">
+              <Search size={14} aria-hidden="true" />
+              <input
+                className="sa-input admin-ping-search"
+                placeholder={viewMode === 'task' ? '搜索任务' : '搜索服务器'}
+                aria-label={viewMode === 'task' ? '搜索任务' : '搜索服务器'}
+                value={activeSearch}
+                onChange={(event) => {
+                  if (viewMode === 'task') {
+                    setTaskSearch(event.target.value);
+                  } else {
+                    setServerSearch(event.target.value);
+                  }
+                }}
+              />
+            </div>
+            <select
+              className="sa-input sa-select admin-ping-scope-select"
+              aria-label="范围筛选"
+              value={scopeFilter}
+              onChange={(event) => setScopeFilter(event.target.value as TaskScopeFilter)}
             >
-              <TextField.Slot><Search size={14} /></TextField.Slot>
-            </TextField.Root>
-
-            <Select.Root value={scopeFilter} onValueChange={(value) => setScopeFilter(value as TaskScopeFilter)}>
-              <Select.Trigger className="admin-ping-scope-select" />
-              <Select.Content>
-                <Select.Item value="all">全部范围</Select.Item>
-                <Select.Item value="global">全局任务</Select.Item>
-                <Select.Item value="selected">定向任务</Select.Item>
-                <Select.Item value="unbound">未分配</Select.Item>
-              </Select.Content>
-            </Select.Root>
-
-            <Flex className="admin-ping-filter-stats" gap="2" wrap="wrap" align="center">
-              <Badge variant="soft" color="blue">当前结果 {currentResultCount}</Badge>
-              <Badge variant="soft" color="green">全局 {globalTaskCount}</Badge>
-              <Badge variant="soft" color="amber">定向 {selectedTaskCount}</Badge>
-              {unboundTaskCount > 0 && <Badge variant="soft" color="gray">未分配 {unboundTaskCount}</Badge>}
-            </Flex>
+              <option value="all">全部范围</option>
+              <option value="global">全局任务</option>
+              <option value="selected">定向任务</option>
+              <option value="unbound">未分配</option>
+            </select>
+          </div>
+          <div className="sa-toolbar-group">
+            <SaButton size="sm" onClick={openAdd}><Plus size={16} /> 添加任务</SaButton>
           </div>
         </div>
-      </Card>
 
-      {viewMode === 'task' ? (
-        <Card style={{ overflowX: 'auto' }}>
+        {viewMode === 'task' ? (
           <DndContext
             sensors={sensors}
             collisionDetection={closestCenter}
@@ -894,100 +901,107 @@ export default function AdminPingTasks() {
             onDragCancel={() => { taskDragBoundsRef.current = null; }}
             onDragEnd={handleTaskDragEnd}
           >
-          <Table.Root>
-            <Table.Header>
-              <Table.Row>
-                <Table.ColumnHeaderCell width="44px" aria-label="排序" />
-                <Table.ColumnHeaderCell>名称</Table.ColumnHeaderCell>
-                <Table.ColumnHeaderCell>类型</Table.ColumnHeaderCell>
-                <Table.ColumnHeaderCell>目标</Table.ColumnHeaderCell>
-                <Table.ColumnHeaderCell>应用范围</Table.ColumnHeaderCell>
-                <Table.ColumnHeaderCell width="180px">操作</Table.ColumnHeaderCell>
-              </Table.Row>
-            </Table.Header>
-            <Table.Body ref={taskBodyRef}>
-              <SortableContext items={filteredTasks.map((task) => task.id)} strategy={verticalListSortingStrategy}>
-              {filteredTasks.length === 0 ? (
-                <Table.Row>
-                  <Table.Cell colSpan={6}>
-                    <Text color="gray" align="center" style={{ display: 'block', padding: 24 }}>
-                      {taskSearch || scopeFilter !== 'all' ? '没有匹配的 Ping 任务' : '暂无 Ping 任务'}
-                    </Text>
-                  </Table.Cell>
-                </Table.Row>
-              ) : (
-                filteredTasks.map((task) => (
-                  <TaskRow
-                    key={task.id}
-                    task={task}
-                    boundNames={getTaskScopeLabel(task, clients)}
-                    onEdit={openEdit}
-                    onDelete={setDeleteTask}
-                    dragDisabled={taskDragDisabled}
-                  />
-                ))
-              )}
-              </SortableContext>
-            </Table.Body>
-          </Table.Root>
-          </DndContext>
-        </Card>
-      ) : (
-        <div className="admin-ping-server-grid">
-          {filteredServerRows.length === 0 ? (
-            <div className="admin-ping-server-empty">
-              <Text color="gray">
-                {serverSearch || scopeFilter !== 'all' ? '没有匹配的服务器' : '暂无服务器'}
-              </Text>
+            <div className="sa-table-scroll">
+              <table className="sa-table">
+                <thead>
+                  <tr>
+                    <th className="sa-td-narrow" aria-label="排序" />
+                    <th>名称</th>
+                    <th>类型</th>
+                    <th>目标</th>
+                    <th className="sa-col-md">间隔</th>
+                    <th>应用范围</th>
+                    <th className="sa-td-actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody ref={taskBodyRef}>
+                  <SortableContext items={filteredTasks.map((task) => task.id)} strategy={verticalListSortingStrategy}>
+                    {filteredTasks.length === 0 ? (
+                      <tr>
+                        <td colSpan={7} className="sa-empty">
+                          {taskSearch || scopeFilter !== 'all' ? '没有匹配的 Ping 任务' : '暂无 Ping 任务'}
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredTasks.map((task) => (
+                        <TaskRow
+                          key={task.id}
+                          task={task}
+                          boundNames={getTaskScopeLabel(task, clients)}
+                          onEdit={openEdit}
+                          onDelete={setDeleteTask}
+                          dragDisabled={taskDragDisabled}
+                        />
+                      ))
+                    )}
+                  </SortableContext>
+                </tbody>
+              </table>
             </div>
-          ) : (
-            filteredServerRows.map(({ client, boundTasks }) => (
-              <div className="admin-ping-server-card" key={client.uuid}>
-                <Flex className="admin-ping-server-card-head" justify="between" align="start" gap="2" wrap="wrap">
-                  <Box className="admin-ping-server-main">
-                    <Text className="admin-ping-server-name" size="2" weight="bold" title={client.name}>
-                      {client.name}
-                    </Text>
-                    <Flex className="admin-ping-server-meta" gap="1" wrap="wrap" align="center">
-                      <Badge size="1" variant="soft" color="gray">{client.group || '未分组'}</Badge>
-                      {client.region ? (
-                        <Badge size="1" variant="soft">{client.region}</Badge>
-                      ) : (
-                        <Text size="1" color="gray">无区域</Text>
-                      )}
-                    </Flex>
-                  </Box>
-                  <Flex className="admin-ping-server-actions" align="center" gap="2">
-                    <Badge className="admin-ping-server-count" size="1" variant="soft" color={boundTasks.length > 0 ? 'blue' : 'gray'}>
-                      {boundTasks.length} 项
-                    </Badge>
-                    <Button size="1" variant="soft" onClick={() => openAssign(client)} aria-label={`分配 ${client.name} 的监控任务`}>
-                      <ListChecks size={13} /> 分配任务
-                    </Button>
-                  </Flex>
-                </Flex>
+          </DndContext>
+        ) : (
+          <div className="sa-table-scroll">
+            <table className="sa-table">
+              <thead>
+                <tr>
+                  <th>服务器</th>
+                  <th className="sa-col-md">分组</th>
+                  <th>任务</th>
+                  <th className="sa-td-actions">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredServerRows.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="sa-empty">
+                      {serverSearch || scopeFilter !== 'all' ? '没有匹配的服务器' : '暂无服务器'}
+                    </td>
+                  </tr>
+                ) : (
+                  filteredServerRows.map(({ client, boundTasks }) => (
+                    <tr className="sa-tr admin-ping-server-row" key={client.uuid}>
+                      <td className="sa-td-server">
+                        <div className="sa-name-cell">
+                          <span className="sa-ellipsis admin-ping-server-name" title={client.name}>{client.name}</span>
+                          {client.region && <SaBadge variant="outline">{client.region}</SaBadge>}
+                        </div>
+                      </td>
+                      <td className="sa-col-md"><span className="sa-muted">{client.group || '未分组'}</span></td>
+                      <td>
+                        <div className="sa-chips">
+                          {boundTasks.length > 0 ? (
+                            <>
+                              <span className="sa-chip-count">{boundTasks.length} 项</span>
+                              {boundTasks.map((task) => (
+                                <SaBadge
+                                  key={task.id}
+                                  variant={task.all_clients ? 'secondary' : 'outline'}
+                                  title={`${task.name} / ${task.type.toUpperCase()} / ${task.target}`}
+                                >
+                                  {task.name}
+                                </SaBadge>
+                              ))}
+                            </>
+                          ) : (
+                            <span className="sa-muted">暂无匹配任务</span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="sa-td-actions">
+                        <SaButton variant="outline" size="sm" onClick={() => openAssign(client)} aria-label={`分配 ${client.name} 的监控任务`}>
+                          <ListChecks size={14} /> 分配任务
+                        </SaButton>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <div className="sa-table-footer">当前 {currentResultCount} 项</div>
+      </SaCard>
 
-                <div className="admin-ping-server-task-list">
-                  {boundTasks.length > 0 ? boundTasks.map((task) => (
-                    <Badge
-                      className="admin-ping-server-task-chip"
-                      key={task.id}
-                      size="1"
-                      variant="soft"
-                      color={task.all_clients ? 'green' : 'blue'}
-                      title={`${task.name} / ${task.type.toUpperCase()} / ${task.target}`}
-                    >
-                      {task.name}
-                    </Badge>
-                  )) : (
-                    <Text size="1" color="gray">暂无匹配任务</Text>
-                  )}
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-      )}
       <TaskDialog
         open={dialogOpen}
         onOpenChange={setDialogOpen}
@@ -1014,18 +1028,17 @@ export default function AdminPingTasks() {
         onSaved={mergeUpdatedTasks}
       />
 
-      <Dialog.Root open={Boolean(deleteTask)} onOpenChange={(open) => !open && setDeleteTask(null)}>
-        <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 420 }}>
-          <Dialog.Title>删除 Ping 任务</Dialog.Title>
-          <Text size="2">
-            确定删除 <strong>{deleteTask?.name}</strong> 吗？相关 Ping 记录也会被清理。
-          </Text>
-          <Flex gap="3" justify="end" mt="4">
-            <Button variant="soft" onClick={() => setDeleteTask(null)}>取消</Button>
-            <Button color="red" onClick={handleDelete} disabled={pendingActions.has('ping:delete')}>确认删除</Button>
-          </Flex>
-        </Dialog.Content>
-      </Dialog.Root>
-    </Flex>
+      <ConfirmDialog
+        open={Boolean(deleteTask)}
+        onOpenChange={(open) => { if (!open) setDeleteTask(null); }}
+        title="删除 Ping 任务"
+        description={<>确定删除 <strong>{deleteTask?.name}</strong> 吗？相关 Ping 记录也会被清理。</>}
+        confirmLabel="确认删除"
+        destructive
+        keepOpenOnConfirm
+        confirmDisabled={pendingActions.has('ping:delete')}
+        onConfirm={() => { void handleDelete(); }}
+      />
+    </div>
   );
 }

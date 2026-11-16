@@ -777,6 +777,43 @@ try {
     assert.ok(await card.locator('.recharts-line-curve').count() > 0);
   });
   }
+  await check('R-F14-ping-page', 'ping task table reorders by keyboard, pauses drag while filtering and deletes through the confirm dialog', async (page, data) => {
+    const task = (id, name) => ({ id, name, type: 'icmp', target: `192.0.2.${id}`, interval_sec: 60, all_clients: true, clients: [], sort_order: id });
+    data.pingTasks = [task(1, 'Cloudflare DNS'), task(2, 'Google HTTPS'), task(3, 'Gateway TCP')];
+    await page.goto(origin + '/admin/ping');
+    await page.getByText('Cloudflare DNS', { exact: true }).waitFor();
+    const names = () => page.locator('.admin-ping-task-name');
+    assert.deepEqual(await names().allTextContents(), ['Cloudflare DNS', 'Google HTTPS', 'Gateway TCP']);
+
+    const drag = page.getByRole('button', { name: '拖拽排序 Cloudflare DNS', exact: true });
+    await drag.focus();
+    await page.keyboard.press('Space');
+    await settleRender(page);
+    await page.keyboard.press('ArrowDown');
+    await settleRender(page);
+    await page.keyboard.press('Space');
+    const reorder = await waitForCall(data, call => call.path === '/api/admin/ping/reorder');
+    await settleCall(page, reorder);
+    const ids = (typeof reorder.body === 'string' ? JSON.parse(reorder.body) : reorder.body).ids;
+    assert.deepEqual(ids, [2, 1, 3], 'R-F14: keyboard drag posts the new full task order');
+    assert.deepEqual(await names().allTextContents(), ['Google HTTPS', 'Cloudflare DNS', 'Gateway TCP']);
+
+    const search = page.getByRole('textbox', { name: '搜索任务' });
+    await search.fill('gateway');
+    assert.equal(await names().count(), 1);
+    assert.equal(await page.getByRole('button', { name: '拖拽排序 Gateway TCP', exact: true }).isDisabled(), true, 'R-F14: drag is paused while the list is filtered');
+    await search.fill('');
+
+    await page.getByRole('button', { name: '删除 Gateway TCP' }).click();
+    const dialog = page.getByRole('alertdialog');
+    await dialog.getByText('Gateway TCP', { exact: true }).waitFor();
+    await dialog.getByRole('button', { name: '确认删除' }).click();
+    await settleCall(page, await waitForCall(data, call => call.path === '/api/admin/ping/delete'));
+    await dialog.waitFor({ state: 'detached' });
+    assert.deepEqual(await names().allTextContents(), ['Google HTTPS', 'Cloudflare DNS']);
+    data.observed = { pageErrors: [...data.errors] };
+    assert.deepEqual(data.errors, []);
+  });
 } finally {
   await finish();
 }

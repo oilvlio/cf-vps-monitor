@@ -179,6 +179,15 @@ export async function createHarness({ selection = 'ALL', playwrightModule } = {}
       if (path === '/api/ping' || path === '/api/ping/tasks') return json([]);
       if (path === '/api/admin/account/mfa') return json(data.mfa);
       if (path === '/api/admin/account/mfa/step-up') return json({ success: true });
+      if (path === '/api/admin/ping') return json(data.pingTasks || []);
+      if (path === '/api/admin/ping/reorder') {
+        data.pingTasks = body.ids.map((id, index) => ({ ...data.pingTasks.find(task => task.id === id), sort_order: index }));
+        return json({ success: true });
+      }
+      if (path === '/api/admin/ping/delete') {
+        data.pingTasks = data.pingTasks.filter(task => task.id !== body.id);
+        return json({ success: true });
+      }
       return json({ error: `Unmapped synthetic API: ${request.method()} ${path}` }, 501);
     });
     return context;

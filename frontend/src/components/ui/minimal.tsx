@@ -220,13 +220,26 @@ interface ConfirmDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   title: string;
-  description: string;
+  description: React.ReactNode;
   confirmLabel: string;
   destructive?: boolean;
+  /** 异步确认时置为 true：点确认后弹窗保持打开，由调用方在成功后自行关闭，失败时仍可重试。 */
+  keepOpenOnConfirm?: boolean;
+  confirmDisabled?: boolean;
   onConfirm: () => void;
 }
 
-export function ConfirmDialog({ open, onOpenChange, title, description, confirmLabel, destructive, onConfirm }: ConfirmDialogProps) {
+export function ConfirmDialog({
+  open,
+  onOpenChange,
+  title,
+  description,
+  confirmLabel,
+  destructive,
+  keepOpenOnConfirm,
+  confirmDisabled,
+  onConfirm,
+}: ConfirmDialogProps) {
   return (
     <AlertDialog.Root open={open} onOpenChange={onOpenChange}>
       <AlertDialog.Portal>
@@ -239,11 +252,46 @@ export function ConfirmDialog({ open, onOpenChange, title, description, confirmL
               <Button variant="outline">取消</Button>
             </AlertDialog.Cancel>
             <AlertDialog.Action asChild>
-              <Button variant={destructive ? 'destructive' : 'default'} onClick={onConfirm}>{confirmLabel}</Button>
+              <Button
+                variant={destructive ? 'destructive' : 'default'}
+                disabled={confirmDisabled}
+                onClick={(event) => {
+                  if (keepOpenOnConfirm) event.preventDefault();
+                  onConfirm();
+                }}
+              >
+                {confirmLabel}
+              </Button>
             </AlertDialog.Action>
           </div>
         </AlertDialog.Content>
       </AlertDialog.Portal>
     </AlertDialog.Root>
+  );
+}
+
+/* ========== StatGrid（页面顶部统计卡） ========== */
+export interface StatItem {
+  label: string;
+  value: string;
+  detail?: string;
+  icon?: React.ReactNode;
+  title?: string;
+}
+
+export function StatGrid({ items, label }: { items: StatItem[]; label: string }) {
+  return (
+    <section className="sa-scope sa-stats" aria-label={label}>
+      {items.map((item) => (
+        <div className="sa-stat admin-overview-item" key={item.label} title={item.title}>
+          <div className="sa-stat-head">
+            <span className="sa-stat-label admin-overview-label">{item.label}</span>
+            {item.icon && <span className="sa-stat-icon" aria-hidden="true">{item.icon}</span>}
+          </div>
+          <div className="sa-stat-value admin-overview-value">{item.value}</div>
+          {item.detail && <div className="sa-stat-detail">{item.detail}</div>}
+        </div>
+      ))}
+    </section>
   );
 }

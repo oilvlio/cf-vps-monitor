@@ -123,11 +123,9 @@ interface SettingInputProps {
 
 export function SettingInput({ label, description, value, onChange, type, placeholder, width }: SettingInputProps) {
   const id = useId();
-  const inputWidth = width || (type === 'number' ? 200 : 340);
-
   return (
     <SettingRow label={label} description={description} controlId={id}>
-      <div className="sa-input-wrap" style={{ width: inputWidth }}>
+      <div className="sa-input-wrap" style={width ? { width } : undefined}>
         <input
           id={id}
           className="sa-input"

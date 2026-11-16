@@ -82,6 +82,7 @@ export default function SettingsLayout() {
         </Flex>
       </Flex>
 
+      <div className="admin-settings-body">
       <Flex className="admin-subnav-action-row" justify="between" align="center" wrap="wrap" gap="3" mb="3">
         <Flex className="admin-subnav-row" gap="1">
           {settingsTabs.map(tab => {
@@ -102,6 +103,7 @@ export default function SettingsLayout() {
       </Flex>
 
       <Outlet context={{ setAction, settingsCache, loadSettingsScope, setSettingsScope, invalidateSettingsScopes }} />
+      </div>
     </div>
   );
 }

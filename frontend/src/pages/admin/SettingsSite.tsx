@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
-import { Box, Button, Flex, Text } from '@radix-ui/themes';
 import { Download, RotateCcw, Save, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
 import { useApi, useApiResponse } from '../../contexts/AuthContext';
-import { SettingCard, SettingInput } from '../../components/admin/SettingCard';
+import { SettingInput, SettingRow } from '../../components/admin/SettingCard';
+import { Button, Card, CardHeader, Rows } from '../../components/ui/minimal';
 import { getChangedSettings, type SettingsMap } from '../../utils/settingsDiff';
 import { requestPassword } from '../../utils/reauth';
 import { notifyPublicDataUpdated } from '../../utils/publicDataEvents';
@@ -235,109 +235,109 @@ export default function SettingsSite() {
 
   if (loading) return <Loading />;
 
-  const loadFailure = loadError && <Flex align="center" gap="2">
-    <Text color="red" role="alert">读取设置失败：{loadError}</Text>
-    <Button variant="soft" onClick={() => setReloadKey(value => value + 1)}>重试</Button>
-  </Flex>;
-  if (!settingsReady) return loadFailure;
+  const loadFailure = loadError && (
+    <div className="sa-scope sa-alert" role="alert">
+      <span>读取设置失败：{loadError}</span>
+      <Button variant="outline" size="sm" onClick={() => setReloadKey(value => value + 1)}>重试</Button>
+    </div>
+  );
+  if (!settingsReady) return <div className="sa-scope sa-page">{loadFailure}</div>;
 
   return (
-    <Flex direction="column" gap="4">
+    <div className="sa-scope sa-page">
       {loadFailure}
-      <SettingCard title="基本信息" description="站点名称、描述、语言与安装脚本域名" defaultOpen>
-        <Box style={{ marginBottom: 16 }}>
-          <Text size="2" weight="medium" style={{ display: 'block', marginBottom: 4 }}>站点 Logo</Text>
-          <Text size="1" color="gray" style={{ display: 'block', marginBottom: 8 }}>
-            显示在前台导航栏和后台登录页，支持 PNG、JPG、WebP，最大 1MB。
-          </Text>
-          <Flex align="center" gap="3" wrap="wrap">
-            <Box className="site-logo-preview">
-              <img src={settings.site_logo_url || '/app-icon.png'} alt="" />
-            </Box>
-            <Flex gap="2" wrap="wrap">
-              <input
-                ref={logoInputRef}
-                type="file"
-                accept="image/png,image/jpeg,image/webp"
-                style={{ display: 'none' }}
-                onChange={handleUploadLogo}
-              />
-              <Button variant="soft" disabled={logoSaving} onClick={() => logoInputRef.current?.click()}>
-                <Upload size={16} /> {logoSaving ? '处理中...' : '上传 Logo'}
-              </Button>
-              <Button variant="soft" color="gray" disabled={logoSaving || !settings.site_logo_url} onClick={handleResetLogo}>
-                <RotateCcw size={16} /> 恢复默认
-              </Button>
-            </Flex>
-          </Flex>
-        </Box>
-        <SettingInput
-          label="站点标题"
-          description="显示在导航栏和浏览器标签页"
-          value={settings.site_title || ''}
-          onChange={(value) => updateSetting('site_title', value)}
-          placeholder="CF VPS Monitor"
-        />
-        <SettingInput
-          label="站点副标题"
-          description="显示在首页标题区"
-          value={settings.site_subtitle || ''}
-          onChange={(value) => updateSetting('site_subtitle', value)}
-          placeholder="Cloudflare server monitor"
-        />
-        <SettingInput
-          label="站点描述"
-          description="用于页脚与元信息"
-          value={settings.site_description || ''}
-          onChange={(value) => updateSetting('site_description', value)}
-          placeholder="服务器监控探针"
-        />
-        <SettingInput
-          label="语言"
-          description="界面语言设置"
-          value={settings.language || 'zh-CN'}
-          onChange={(value) => updateSetting('language', value)}
-          placeholder="zh-CN"
-        />
-        <SettingInput
-          label="脚本域名"
-          description="生成安装命令时使用的站点地址；留空则使用当前域名"
-          value={settings.script_domain || ''}
-          onChange={(value) => updateSetting('script_domain', value)}
-          placeholder={window.location.origin}
-        />
-      </SettingCard>
 
-      <SettingCard title="备份与恢复" description="导出或导入系统配置" defaultOpen>
-        <Flex direction="column" gap="3">
-          <Box style={{ border: '1px solid var(--amber-6)', background: 'var(--amber-2)', borderRadius: 8, padding: 12 }}>
-            <Text size="2" weight="bold" color="amber">备份包含完整敏感配置，但文件会加密</Text>
-            <Text size="1" color="gray" style={{ display: 'block', marginTop: 4 }}>
-              备份会包含节点 token、AutoDiscovery Key、Telegram 凭据和通知配置，但导出的 JSON 只保存 AES-GCM 密文。恢复时必须输入导出时设置的备份密码。
-            </Text>
-          </Box>
-          <Text size="1" color="gray">
-            导出内容包含服务器列表、系统设置、Ping 任务、离线通知和负载通知；不包含管理员账户、审计日志和历史监控数据。恢复会覆盖对应配置，并清理不存在服务器的历史记录。
-          </Text>
-          <Flex gap="3" wrap="wrap" mt="2">
-            <Button variant="soft" onClick={handleDownloadBackup}>
-              <Download size={16} /> 导出加密完整备份
+      <Card>
+        <CardHeader title="基本信息" description="站点名称、描述、语言与安装脚本域名" />
+        <Rows>
+          <SettingRow label="站点 Logo" description="显示在前台导航栏和后台登录页，支持 PNG、JPG、WebP，最大 1MB。">
+            <span className="site-logo-preview sa-logo-preview">
+              <img src={settings.site_logo_url || '/app-icon.png'} alt="" />
+            </span>
+            <input
+              ref={logoInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              style={{ display: 'none' }}
+              onChange={handleUploadLogo}
+            />
+            <Button variant="outline" size="sm" disabled={logoSaving} onClick={() => logoInputRef.current?.click()}>
+              <Upload size={14} /> {logoSaving ? '处理中...' : '上传 Logo'}
             </Button>
-            <div>
-              <input
-                type="file"
-                id="backup-upload-site"
-                accept=".json"
-                style={{ display: 'none' }}
-                onChange={handleUploadBackup}
-              />
-              <Button variant="soft" onClick={() => document.getElementById('backup-upload-site')?.click()}>
-                <Upload size={16} /> 导入备份
-              </Button>
-            </div>
-          </Flex>
-        </Flex>
-      </SettingCard>
-    </Flex>
+            <Button variant="outline" size="sm" disabled={logoSaving || !settings.site_logo_url} onClick={handleResetLogo}>
+              <RotateCcw size={14} /> 恢复默认
+            </Button>
+          </SettingRow>
+          <SettingInput
+            label="站点标题"
+            description="显示在导航栏和浏览器标签页"
+            value={settings.site_title || ''}
+            onChange={(value) => updateSetting('site_title', value)}
+            placeholder="CF VPS Monitor"
+          />
+          <SettingInput
+            label="站点副标题"
+            description="显示在首页标题区"
+            value={settings.site_subtitle || ''}
+            onChange={(value) => updateSetting('site_subtitle', value)}
+            placeholder="Cloudflare server monitor"
+          />
+          <SettingInput
+            label="站点描述"
+            description="用于页脚与元信息"
+            value={settings.site_description || ''}
+            onChange={(value) => updateSetting('site_description', value)}
+            placeholder="服务器监控探针"
+          />
+          <SettingInput
+            label="语言"
+            description="界面语言设置"
+            value={settings.language || 'zh-CN'}
+            onChange={(value) => updateSetting('language', value)}
+            placeholder="zh-CN"
+          />
+          <SettingInput
+            label="脚本域名"
+            description="生成安装命令时使用的站点地址；留空则使用当前域名"
+            value={settings.script_domain || ''}
+            onChange={(value) => updateSetting('script_domain', value)}
+            placeholder={window.location.origin}
+          />
+        </Rows>
+      </Card>
+
+      <Card>
+        <CardHeader title="备份与恢复" description="导出或导入系统配置" />
+        <div className="sa-notice sa-notice-warning">
+          <strong>备份包含完整敏感配置，但文件会加密</strong>
+          <span>包含节点 token、AutoDiscovery Key、Telegram 凭据和通知配置；导出的 JSON 只保存 AES-GCM 密文，恢复时必须输入导出时设置的备份密码。</span>
+        </div>
+        <Rows>
+          <SettingRow
+            label="导出备份"
+            description="导出内容包含服务器列表、系统设置、Ping 任务、离线通知和负载通知；不包含管理员账户、审计日志和历史监控数据。"
+          >
+            <Button variant="outline" size="sm" onClick={handleDownloadBackup}>
+              <Download size={14} /> 导出加密完整备份
+            </Button>
+          </SettingRow>
+          <SettingRow
+            label="恢复备份"
+            description="恢复会覆盖对应配置，并清理不存在服务器的历史记录。"
+          >
+            <input
+              type="file"
+              id="backup-upload-site"
+              accept=".json"
+              style={{ display: 'none' }}
+              onChange={handleUploadBackup}
+            />
+            <Button variant="outline" size="sm" onClick={() => document.getElementById('backup-upload-site')?.click()}>
+              <Upload size={14} /> 导入备份
+            </Button>
+          </SettingRow>
+        </Rows>
+      </Card>
+    </div>
   );
 }

@@ -1,5 +1,5 @@
 import type { AuditLogsPage, BoundedTableRowCounts, ClearAllRecordsResult, Client, ClientCapacityCounts, ClientIdentity, ClientReferenceCleanupResult, ClientTokenMeta, DeleteClientsResult, DeleteOldRowsOptions, ExpiryNotification, ExpiryNotificationUpdate, GPUHistoryRecord, GPUInfo, 
-  HistoryTableByteSizes, LoadMetricWindowStats, LoadNotification, LoadNotificationInput, LoadNotificationMetric, LoginRateLimit, MonitorMetricsBucket, MonitorRecord, MonitorTrafficTotals, OfflineNotification, OfflineNotificationUpdate, OrphanClientDataCleanupResult, PingHistoryRecord, PingSnapshotInput, PingTask, PingTaskEstimateRow, PingTaskHistoryRequest, PingTaskStats, PublicClientRow, ScheduledClientRow, TableRowCounts, Theme, ThemeAsset, ThemeAssetUpsertInput, ThemeUpsertInput, User } from '../types.ts';
+  HistoryTableByteSizes, IpChangeNotification, LoadMetricWindowStats, LoadNotification, LoadNotificationInput, LoadNotificationMetric, LoginRateLimit, MonitorMetricsBucket, MonitorRecord, MonitorTrafficTotals, OfflineNotification, OfflineNotificationUpdate, OrphanClientDataCleanupResult, PingHistoryRecord, PingSnapshotInput, PingTask, PingTaskEstimateRow, PingTaskHistoryRequest, PingTaskStats, PublicClientRow, ScheduledClientRow, TableRowCounts, Theme, ThemeAsset, ThemeAssetUpsertInput, ThemeUpsertInput, User } from '../types.ts';
 import type { BackupData } from '../../utils/backup.ts';
 import type { BackupConfigurationSnapshot, HistoryStorageUsage, NotificationDeliveryClaim, NotificationDeliveryCleanupOptions, NotificationDeliveryCleanupResult } from '../types.ts';
 import { redactDatabaseSecrets } from '../../utils/setup-diagnostics.ts';
@@ -381,6 +381,18 @@ export function listSupabaseOfflineNotifications(env: SupabaseApiEnv): Promise<O
 
 export function setSupabaseOfflineNotifications(env: SupabaseApiEnv, items: OfflineNotificationUpdate[]): Promise<number> {
   return callSupabaseRpc<number>(env, 'cfm_set_offline_notifications', { input_items: items });
+}
+
+export function listSupabaseIpChangeNotifications(env: SupabaseApiEnv): Promise<IpChangeNotification[]> {
+  return callSupabaseRpc<IpChangeNotification[]>(env, 'cfm_ip_change_notifications');
+}
+
+export function ipChangeNotificationEnabled(env: SupabaseApiEnv, uuid: string): Promise<boolean> {
+  return callSupabaseRpc<boolean>(env, 'cfm_ip_change_notification_enabled', { input_uuid: uuid });
+}
+
+export function setSupabaseIpChangeNotifications(env: SupabaseApiEnv, items: IpChangeNotification[]): Promise<number> {
+  return callSupabaseRpc<number>(env, 'cfm_set_ip_change_notifications', { input_items: items });
 }
 
 export function markSupabaseOfflineNotificationSent(env: SupabaseApiEnv, client: string, time: string | null, token: string): Promise<boolean> {

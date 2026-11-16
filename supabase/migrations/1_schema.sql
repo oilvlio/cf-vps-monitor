@@ -592,6 +592,25 @@ grant select, insert, update, delete on table public.client_home_ping to cf_moni
 
 grant select, insert, update, delete on table public.gpu_rollup to cf_monitor_app, service_role;
 
+-- 公网 IP 变更通知的服务器层级开关。全局开关是 settings.enable_ip_change_notification
+-- （总闸），这里按节点选择要监控的服务器；两处都开启才会发送，缺一不可。
+-- 触发依据是 Agent 上报的公网出口 IP（clients.ipv4 / ipv6，即节点页面显示的值，
+-- 由 Agent 通过 api.ipify.org 等公网探测接口获得），不是连接 Worker 的源 IP。
+-- 建表位置在角色创建之后（与 client_home_ping / gpu_rollup 同一批补丁式写法），
+-- 权限模型同上：force RLS + 统一 policy，Worker 经 RPC 读写。
+create table if not exists public.ip_change_notifications (
+  client text primary key references public.clients(uuid) on delete cascade,
+  enable smallint not null default 0
+);
+
+alter table public.ip_change_notifications enable row level security;
+
+alter table public.ip_change_notifications force row level security;
+
+revoke all on public.ip_change_notifications from public, anon, authenticated;
+
+grant select, insert, update, delete on table public.ip_change_notifications to cf_monitor_app, service_role;
+
 -- CPU 负载三元组：records.load（Load1）之外新增 load5/load15。
 --
 -- 背景：探针原来只报 Load1（agent main.go 经 loadAverageReportable() 可信度门控，
@@ -671,7 +690,8 @@ begin
     'login_rate_limits', 'settings', 'themes', 'theme_assets', 'ping_tasks',
     'ping_records', 'ping_snapshots',
     'offline_notifications', 'expiry_notifications', 'load_notifications', 'audit_logs',
-    'client_home_ping', 'gpu_rollup', 'traffic_daily', 'traffic_counter_state'
+    'client_home_ping', 'gpu_rollup', 'traffic_daily', 'traffic_counter_state',
+    'ip_change_notifications'
   ] loop
     if not exists (
       select 1 from pg_policies

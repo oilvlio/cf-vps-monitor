@@ -2384,8 +2384,17 @@ begin
     where nullif(value->>'client', '') is not null;
   end if;
 
-  if input_backup ? 'load_notifications' and jsonb_typeof(input_backup->'load_notifications') = 'array' then
-    lock table load_notifications in share row exclusive mode;
+  if input_backup ? 'ip_change_notifications' and jsonb_typeof(input_backup->'ip_change_notifications') = 'array' then
+    delete from ip_change_notifications where true;
+    insert into ip_change_notifications (client, enable)
+    select
+      value->>'client',
+      case when coalesce((value->>'enable')::boolean, false) then 1 else 0 end
+    from jsonb_array_elements(input_backup->'ip_change_notifications')
+    where nullif(value->>'client', '') is not null;
+  end if;
+
+  if input_backup ? 'load_notifications' and jsonb_typeof(input_backup->'load_notifications') = 'array' then    lock table load_notifications in share row exclusive mode;
     perform setval(pg_get_serial_sequence('load_notifications', 'id'),
       greatest(
         coalesce((select max(id) from load_notifications), 0) + 1,
@@ -2787,6 +2796,59 @@ begin
 end;
 $$;
 
+create or replace function public.cfm_ip_change_notifications()
+returns jsonb
+language sql
+stable
+set search_path = public
+as $$
+  select coalesce(jsonb_agg(to_jsonb(row_data) order by client), '[]'::jsonb)
+  from (
+    select client, enable <> 0 as enable
+    from ip_change_notifications
+  ) row_data;
+$$;
+
+create or replace function public.cfm_ip_change_notification_enabled(input_uuid text)
+returns boolean
+language sql
+stable
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from ip_change_notifications
+    where client = input_uuid and enable <> 0
+  );
+$$;
+
+create or replace function public.cfm_set_ip_change_notifications(input_items jsonb)
+returns integer
+language sql
+set search_path = public
+as $$
+  with parsed as (
+    select distinct on (client)
+      client,
+      case when lower(coalesce(item->>'enable', 'false')) in ('true', '1') then 1 else 0 end as enable,
+      ord
+    from jsonb_array_elements(coalesce(input_items, '[]'::jsonb)) with ordinality as value(item, ord)
+    cross join lateral (select trim(item->>'client') as client) normalized
+    where client <> ''
+    order by client, ord desc
+  ),
+  upserted as (
+    insert into ip_change_notifications (client, enable)
+    select client, enable
+    from parsed
+    on conflict (client) do update set
+      enable = excluded.enable
+    where ip_change_notifications.enable is distinct from excluded.enable
+    returning client
+  )
+  select count(*)::integer from upserted;
+$$;
+
 -- Unknown key formats have no inferred owner. Known formats retain the complete
 -- client ID after their structural prefix, including any additional colons.
 create or replace function cfm_internal.notification_delivery_entity_exists(input_key text, input_lock boolean default false)
@@ -2977,7 +3039,8 @@ as $$
     'ping_tasks', public.cfm_public_ping_tasks(),
     'offline_notifications', public.cfm_offline_notifications(),
     'expiry_notifications', public.cfm_expiry_notifications(),
-    'load_notifications', public.cfm_load_notifications()
+    'load_notifications', public.cfm_load_notifications(),
+    'ip_change_notifications', public.cfm_ip_change_notifications()
   );
 $$;
 
@@ -4001,6 +4064,10 @@ revoke all on function public.cfm_delete_old_audit_logs(text, integer) from publ
 grant execute on function public.cfm_delete_old_audit_logs(text, integer) to service_role;
 revoke all on function public.cfm_offline_notifications() from public, anon, authenticated;
 grant execute on function public.cfm_offline_notifications() to service_role;
+revoke all on function public.cfm_ip_change_notifications() from public, anon, authenticated;
+grant execute on function public.cfm_ip_change_notifications() to service_role;
+revoke all on function public.cfm_ip_change_notification_enabled(text) from public, anon, authenticated;
+grant execute on function public.cfm_ip_change_notification_enabled(text) to service_role;
 revoke all on function public.cfm_expiry_notifications() from public, anon, authenticated;
 grant execute on function public.cfm_expiry_notifications() to service_role;
 revoke all on function public.cfm_set_expiry_notifications(jsonb) from public, anon, authenticated;
@@ -4117,6 +4184,8 @@ revoke all on function public.cfm_recover_single_admin(text, text, text) from pu
 grant execute on function public.cfm_recover_single_admin(text, text, text) to service_role;
 revoke all on function public.cfm_set_offline_notifications(jsonb) from public, anon, authenticated;
 grant execute on function public.cfm_set_offline_notifications(jsonb) to service_role;
+revoke all on function public.cfm_set_ip_change_notifications(jsonb) from public, anon, authenticated;
+grant execute on function public.cfm_set_ip_change_notifications(jsonb) to service_role;
 revoke all on function public.cfm_mark_offline_notification_sent(text, text, text) from public, anon, authenticated;
 grant execute on function public.cfm_mark_offline_notification_sent(text, text, text) to service_role;
 revoke all on function cfm_internal.notification_delivery_entity_exists(text, boolean) from public, anon, authenticated;

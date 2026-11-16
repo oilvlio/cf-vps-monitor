@@ -84,6 +84,34 @@ export function validateExpiryNotificationInput(
   };
 }
 
+export function validateIpChangeNotificationInput(
+  input: unknown,
+  allowedClientIds: Set<string>,
+): { ok: true; item: { client: string; enable: boolean } } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  if (!isPlainObject(input)) {
+    return { ok: false, errors: ['IP 变更通知必须是对象'] };
+  }
+
+  const client = stringField(input.client);
+  if (!client || !allowedClientIds.has(client)) {
+    errors.push('客户端不存在或不可用');
+  }
+
+  if (typeof input.enable !== 'boolean') {
+    errors.push('enable 必须是布尔值');
+  }
+
+  if (errors.length > 0) return { ok: false, errors };
+  return {
+    ok: true,
+    item: {
+      client,
+      enable: Boolean(input.enable),
+    },
+  };
+}
+
 export function validateLoadNotificationInput(
   input: unknown,
   allowedClientIds: Set<string>,

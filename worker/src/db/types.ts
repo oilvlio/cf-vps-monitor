@@ -298,6 +298,7 @@ export interface BackupConfigurationSnapshot {
   offline_notifications: OfflineNotification[];
   expiry_notifications: ExpiryNotification[];
   load_notifications: LoadNotification[];
+  ip_change_notifications: IpChangeNotification[];
 }
 
 export interface NotificationDeliveryClaim {
@@ -324,6 +325,11 @@ export interface OfflineNotificationUpdate {
 
 export interface OfflineNotification extends OfflineNotificationUpdate {
   last_notified: string | null;
+}
+
+export interface IpChangeNotification {
+  client: string;
+  enable: boolean;
 }
 
 export interface ExpiryNotificationUpdate {

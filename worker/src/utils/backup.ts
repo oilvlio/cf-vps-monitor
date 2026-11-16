@@ -1,6 +1,7 @@
 import type {
   Client,
   ExpiryNotification,
+  IpChangeNotification,
   LoadNotification,
   LoadNotificationMetric,
   OfflineNotification,
@@ -45,7 +46,8 @@ type BackupModuleKey =
   | 'ping_tasks'
   | 'offline_notifications'
   | 'expiry_notifications'
-  | 'load_notifications';
+  | 'load_notifications'
+  | 'ip_change_notifications';
 
 export interface BackupData {
   schema?: string;
@@ -61,6 +63,7 @@ export interface BackupData {
   offline_notifications?: OfflineNotification[];
   expiry_notifications?: ExpiryNotification[];
   load_notifications?: LoadNotification[];
+  ip_change_notifications?: IpChangeNotification[];
 }
 
 export interface EncryptedBackupData {
@@ -88,6 +91,7 @@ export interface BackupSummary {
   offline_notifications: number;
   expiry_notifications: number;
   load_notifications: number;
+  ip_change_notifications: number;
 }
 
 export type BackupValidationResult =
@@ -420,6 +424,20 @@ function validateOfflineNotifications(items: unknown[], errors: string[]): Offli
   });
 }
 
+function validateIpChangeNotifications(items: unknown[], errors: string[]): IpChangeNotification[] {
+  return items.flatMap((item, index) => {
+    if (!isPlainObject(item)) {
+      errors.push(`ip_change_notifications[${index}] 必须是对象`);
+      return [];
+    }
+
+    return [{
+      client: textField(item.client, `ip_change_notifications[${index}].client`, errors, { required: true, maxLength: 128 }) || '',
+      enable: booleanField(item.enable),
+    }];
+  });
+}
+
 function validateExpiryNotifications(items: unknown[], errors: string[]): ExpiryNotification[] {
   return items.flatMap((item, index) => {
     if (!isPlainObject(item)) {
@@ -546,6 +564,12 @@ export function validateBackup(input: unknown): BackupValidationResult {
     hasModule = true;
   }
 
+  const ipChangeNotifications = requireArray(input, 'ip_change_notifications', MAX_NOTIFICATIONS, errors);
+  if (ipChangeNotifications) {
+    backup.ip_change_notifications = validateIpChangeNotifications(ipChangeNotifications, errors);
+    hasModule = true;
+  }
+
   if (!hasModule) {
     errors.push('备份至少需要包含一个可恢复模块');
   }
@@ -665,5 +689,6 @@ export function summarizeBackup(backup: Pick<BackupData, BackupModuleKey>): Back
     offline_notifications: backup.offline_notifications?.length || 0,
     expiry_notifications: backup.expiry_notifications?.length || 0,
     load_notifications: backup.load_notifications?.length || 0,
+    ip_change_notifications: backup.ip_change_notifications?.length || 0,
   };
 }

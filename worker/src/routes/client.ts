@@ -11,7 +11,7 @@ import { getDatabase } from '../db/provider';
 import { buildAdminSettings } from '../settings/schema';
 import { normalizeMonitorReport, type MonitorReportPayload } from '../utils/monitor-report';
 import { validatePingResults } from '../utils/ping-result';
-import { buildIpChangeNotification, buildTokenSourceIpChangeNotification } from '../utils/notification-templates';
+import { buildIpChangeNotification } from '../utils/notification-templates';
 import { bestEffortRecordHealthEvent, errorDetail } from '../utils/observability';
 import { NOTIFICATION_DISPATCH_SETTING_KEYS, dispatchNotification } from '../utils/notification-dispatch';
 import { getCloudflareClientIp, isPublicIpAddress } from '../utils/request-ip';
@@ -52,10 +52,6 @@ const AGENT_REPORT_RATE_LIMIT_MAX = 120;
 const AGENT_PING_RESULT_RATE_LIMIT_MAX = 180;
 const IP_CHANGE_NOTIFICATION_SETTING_KEYS = [
   'enable_ip_change_notification',
-  ...NOTIFICATION_DISPATCH_SETTING_KEYS,
-];
-const TOKEN_SOURCE_IP_NOTIFICATION_SETTING_KEYS = [
-  'enable_token_source_ip_notification',
   ...NOTIFICATION_DISPATCH_SETTING_KEYS,
 ];
 const AGENT_POLICY_SETTING_KEYS = [
@@ -126,10 +122,8 @@ async function markAgentTokenUsedIfDue(
     ip: normalizedIp,
     expiresAt: now + AGENT_TOKEN_USAGE_CACHE_MS,
   });
-  const tokenUsage = await db.markClientTokenUsed(database, client.uuid, normalizedIp).catch(() => null);
-  if (tokenUsage?.updated) {
-    await recordAgentTokenSourceIpChange(database, client, tokenUsage.previous_ip ?? null, normalizedIp).catch(() => undefined);
-  }
+  // 仅记录 Token 最近使用信息（后台展示用）；不会触发通知。
+  await db.markClientTokenUsed(database, client.uuid, normalizedIp).catch(() => null);
 }
 
 export function invalidateAgentPingTaskCache(): void {
@@ -263,32 +257,6 @@ async function upsertLiveAgentAuthClient(env: Bindings, client: db.Client): Prom
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ client: { ...safeClient, token: '' } }),
   }));
-}
-
-async function recordAgentTokenSourceIpChange(
-  database: db.QueryDatabase,
-  client: Pick<db.Client, 'uuid' | 'name'>,
-  previousIp: string | null,
-  ip: string,
-): Promise<void> {
-  const previous = (previousIp || '').trim();
-  const nextIp = ip.trim();
-  if (!previous || !nextIp || previous === nextIp) return;
-
-  // 可选功能：默认关闭，在「通知管理 → 来源 IP 通知」中开启。
-  // 通过全局通知渠道发送明文 IP，不再写入审计日志。
-  const settings = await db.getSettingsByKeys(database, TOKEN_SOURCE_IP_NOTIFICATION_SETTING_KEYS);
-  if (settings['enable_token_source_ip_notification'] !== 'true') return;
-
-  const notification = buildTokenSourceIpChangeNotification({
-    nodeName: client.name || '-',
-    uuid: client.uuid,
-    previousIp: previous,
-    newIp: nextIp,
-  });
-  await dispatchNotification(database, buildAdminSettings(settings), notification, {
-    deps: { recordHealth: bestEffortRecordHealthEvent },
-  });
 }
 
 export async function getAgentClientByToken(
@@ -554,8 +522,42 @@ function ipChangeParts(oldIpv4: string, oldIpv6: string, newIpv4: string, newIpv
   return parts;
 }
 
-async function recordIpChangeIfEnabled(database: db.QueryDatabase, clientName: string, parts: string[]): Promise<void> {
+/**
+ * 「公网 IP 变更」的判定只认 Agent 自己上报的公网出口 IP（clients.ipv4 / ipv6，
+ * 与节点页面展示的值同源：Agent 经 api.ipify.org 等公网接口探测）。
+ *
+ * 注意不要用连接 Worker 的源 IP 作为触发依据：双栈机器的出站连接会在 v4/v6
+ * 之间来回切换，源 IP 会反复变化；而公网出口 IP 每个地址族是稳定的，只有真的
+ * 换了出口才变。上报里缺失/非公网（探测失败回落到内网地址）时不产生变更。
+ */
+function reportedPublicIpChangeParts(
+  oldIpv4: string,
+  oldIpv6: string,
+  reportedIpv4: string,
+  reportedIpv6: string,
+): string[] {
+  const nextIpv4 = isPublicIpAddress(reportedIpv4) ? reportedIpv4.trim() : '';
+  const nextIpv6 = isPublicIpAddress(reportedIpv6) ? reportedIpv6.trim() : '';
+  return ipChangeParts(
+    isPublicIpAddress(oldIpv4) ? oldIpv4.trim() : '',
+    isPublicIpAddress(oldIpv6) ? oldIpv6.trim() : '',
+    nextIpv4,
+    nextIpv6,
+  );
+}
+
+async function recordIpChangeIfEnabled(
+  database: db.QueryDatabase,
+  uuid: string,
+  clientName: string,
+  parts: string[],
+): Promise<void> {
   if (parts.length === 0) return;
+
+  // 服务器层级开关：通知管理 → IP 变更通知 → 按节点开关。
+  // 未开启的节点直接跳过，连全局设置都不必读。
+  const perServerEnabled = await db.isIpChangeNotificationEnabled(database, uuid).catch(() => false);
+  if (!perServerEnabled) return;
 
   const settings = await db.getSettingsByKeys(database, IP_CHANGE_NOTIFICATION_SETTING_KEYS);
   if (settings['enable_ip_change_notification'] !== 'true') return;
@@ -602,13 +604,13 @@ async function syncClientIpsFromReport(
   await db.updateClient(database, uuid, updates);
   invalidatePublicMetadataCache();
   invalidateAgentClientAuthCache({ uuid, token: oldClient.token });
-  const parts = ipChangeParts(
+  const parts = reportedPublicIpChangeParts(
     oldClient.ipv4 || '',
     oldClient.ipv6 || '',
-    nextIpv4 !== undefined ? nextIpv4 : oldClient.ipv4 || '',
-    nextIpv6 !== undefined ? nextIpv6 : oldClient.ipv6 || '',
+    reportedIpv4,
+    reportedIpv6,
   );
-  await recordIpChangeIfEnabled(database, clientName, parts);
+  await recordIpChangeIfEnabled(database, uuid, clientName, parts);
 }
 
 async function updateLiveReport(
@@ -755,20 +757,14 @@ async function syncBasicInfoFromReportBatch(
     disk_total: diskTotalFromReport(basicInfoPayload.disk_total, oldClient?.disk_total || 0),
     version: nonEmptyString(basicInfoPayload.version, oldClient?.version || ''),
   });
-  const ipChange = ipChangeParts(
-    oldIpv4,
-    oldIpv6,
-    inferredIpv4 !== undefined ? inferredIpv4 : oldIpv4,
-    inferredIpv6 !== undefined ? inferredIpv6 : oldIpv6,
-  );
+  // basic_info 与顶层 report.ipv4/ipv6 同源（都来自 Agent 的公网探测），
+  // 「/report」请求里已由 syncClientIpsFromReport 统一判定并只通知一次，
+  // 这里不再重复发送，避免同一次 IP 变化收到两条通知。
   if (Object.keys(patch).length > 0) {
     await db.updateClient(database, uuid, patch);
     await syncLiveBasicInfoMetadata(c, buildSafeLiveBasicInfoClient(uuid, displayName, hidden, oldClient, patch)).catch(() => undefined);
     invalidatePublicMetadataCache();
     invalidateAgentClientAuthCache({ uuid, token: oldClient?.token });
-    runClientBackground(c, recordIpChangeIfEnabled(database, displayName, ipChange));
-  } else {
-    runClientBackground(c, recordIpChangeIfEnabled(database, displayName, ipChange));
   }
 }
 
@@ -1126,20 +1122,15 @@ clientRoutes.post('/uploadBasicInfo', clientAuth, async (c) => {
       disk_total: diskTotalFromReport(body.disk_total, oldClient?.disk_total || 0),
       version: nonEmptyString(body.version, oldClient?.version || ''),
     });
-    const ipChange = ipChangeParts(
-      oldIpv4,
-      oldIpv6,
-      inferredIpv4 !== undefined ? inferredIpv4 : oldIpv4,
-      inferredIpv6 !== undefined ? inferredIpv6 : oldIpv6,
-    );
+    const ipChange = reportedPublicIpChangeParts(oldIpv4, oldIpv6, nonEmptyString(body.ipv4, ''), nonEmptyString(body.ipv6, ''));
     if (Object.keys(patch).length > 0) {
       await db.updateClient(database, uuid, patch);
       await syncLiveBasicInfoMetadata(c, buildSafeLiveBasicInfoClient(uuid, displayName, Boolean(c.get('clientHidden')), oldClient, patch)).catch(() => undefined);
       invalidatePublicMetadataCache();
       invalidateAgentClientAuthCache({ uuid, token: oldClient?.token });
-      runClientBackground(c, recordIpChangeIfEnabled(database, displayName, ipChange));
+      runClientBackground(c, recordIpChangeIfEnabled(database, uuid, displayName, ipChange));
     } else {
-      runClientBackground(c, recordIpChangeIfEnabled(database, displayName, ipChange));
+      runClientBackground(c, recordIpChangeIfEnabled(database, uuid, displayName, ipChange));
     }
 
     return c.json({ success: true });

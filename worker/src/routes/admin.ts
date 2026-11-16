@@ -29,7 +29,7 @@ import { measureRestoredClientSnapshot } from '../utils/restore-client-snapshot'
 import { getCloudflareClientIp } from '../utils/request-ip';
 import { planClientPingAssignment, validatePingTaskInput } from '../utils/ping-task';
 import { generateAgentToken, validateClientCreateInput, validateClientUpdateInput } from '../utils/client';
-import { validateExpiryNotificationInput, validateLoadNotificationInput, validateOfflineNotificationInput } from '../utils/notification';
+import { validateExpiryNotificationInput, validateIpChangeNotificationInput, validateLoadNotificationInput, validateOfflineNotificationInput } from '../utils/notification';
 import { NOTIFICATION_DISPATCH_SETTING_KEYS, dispatchNotification, pickNotificationSettingOverrides } from '../utils/notification-dispatch';
 import { maskSecretPreview, isMaskedSecretPreview } from '../utils/secret-preview';
 import { TELEGRAM_MESSAGE_MAX_CHARS } from '../utils/telegram';
@@ -143,7 +143,6 @@ const SETTINGS_SCOPE_KEYS = {
     'webhook_password',
     'webhook_retry_count',
     'enable_ip_change_notification',
-    'enable_token_source_ip_notification',
     'offline_notify_never_reported',
   ],
 } as const satisfies Record<string, readonly (keyof typeof SETTING_SCHEMA)[]>;
@@ -1869,9 +1868,44 @@ adminRoutes.post('/notification/offline/edit', async (c) => {
   }
 });
 
-// 到期通知列表
-adminRoutes.get('/notification/expiry', async (c) => {
+// 公网 IP 变更通知（服务器层级开关）列表
+adminRoutes.get('/notification/ipchange', async (c) => {
   const database = getDatabase(c.env);
+  const notifications = await db.listIpChangeNotifications(database, true);
+  return c.json(notifications);
+});
+
+// 编辑公网 IP 变更通知（支持单个和批量）
+adminRoutes.post('/notification/ipchange/edit', async (c) => {
+  try {
+    const parsed = await readAdminJsonObjectOrArray(c);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.body;
+    const database = getDatabase(c.env);
+    const allowedClientIds = await getAllowedClientIds(database);
+    const items = Array.isArray(body) ? body : [body];
+    const normalized = [];
+    const errors: string[] = [];
+    for (const [index, item] of items.entries()) {
+      const validated = validateIpChangeNotificationInput(item, allowedClientIds);
+      if (!validated.ok) {
+        errors.push(...validated.errors.map(error => `${index}: ${error}`));
+      } else {
+        normalized.push(validated.item);
+      }
+    }
+    if (errors.length > 0) {
+      return c.json({ error: 'IP 变更通知校验失败', details: errors }, 400);
+    }
+    const changed = await db.setIpChangeNotifications(database, normalized);
+    return c.json({ success: true, updated: normalized.length, changed, noop: changed === 0 });
+  } catch {
+    return c.json({ error: '保存失败' }, 500);
+  }
+});
+
+// 到期通知列表
+adminRoutes.get('/notification/expiry', async (c) => {  const database = getDatabase(c.env);
   const notifications = await db.listExpiryNotifications(database, true);
   return c.json(notifications);
 });

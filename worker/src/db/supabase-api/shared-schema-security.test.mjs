@@ -54,14 +54,14 @@ test('AUD-09 installation preserves unrelated shared-schema access and defaults'
           where n.nspname='public' and c.relname in ('clients','records','gpu_records','gpu_snapshots',
           'users','login_rate_limits','settings','themes','theme_assets','ping_tasks','ping_records',
           'ping_snapshots','offline_notifications',
-          'expiry_notifications','load_notifications','audit_logs') and c.relrowsecurity and c.relforcerowsecurity) as protected_tables,
+          'expiry_notifications','load_notifications','audit_logs','ip_change_notifications') and c.relrowsecurity and c.relforcerowsecurity) as protected_tables,
         (select count(*)::integer from pg_proc p join pg_namespace n on n.oid=p.pronamespace
           where n.nspname='public' and p.proname like 'cfm_%' and
           (has_function_privilege('anon',p.oid,'execute') or has_function_privilege('authenticated',p.oid,'execute'))) as public_rpcs
     `)).rows[0];
     assert.deepEqual(appAccess, {
       unrelated_select: false, unrelated_sequence: false, public_settings: false,
-      protected_tables: 16, public_rpcs: 0,
+      protected_tables: 17, public_rpcs: 0,
     });
     await applyApplicationMigrations(database);
     assert.deepEqual(await unrelatedPrivileges(database), after, 'repeat install preserves the same ACLs');

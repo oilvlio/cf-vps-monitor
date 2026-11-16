@@ -695,6 +695,18 @@ export async function markOfflineNotificationSent(database: QueryDatabase, clien
   return sba.markSupabaseOfflineNotificationSent(database.env, client, time, token);
 }
 
+export async function listIpChangeNotifications(database: QueryDatabase, _fresh = false): Promise<t.IpChangeNotification[]> {
+  return sba.listSupabaseIpChangeNotifications(database.env);
+}
+
+export async function isIpChangeNotificationEnabled(database: QueryDatabase, client: string): Promise<boolean> {
+  return sba.ipChangeNotificationEnabled(database.env, client);
+}
+
+export async function setIpChangeNotifications(database: QueryDatabase, items: t.IpChangeNotification[]): Promise<number> {
+  return sba.setSupabaseIpChangeNotifications(database.env, items);
+}
+
 
 export async function listExpiryNotifications(database: QueryDatabase, _fresh = false): Promise<t.ExpiryNotification[]> {
   return sba.listSupabaseExpiryNotifications(database.env);

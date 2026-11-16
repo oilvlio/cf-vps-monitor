@@ -14,7 +14,7 @@ import { SettingCard, SettingInput, SettingTextarea, SettingToggle } from '../..
 import { summarizeSelectionValue } from '../../utils/batchPrefill';
 import { getChangedSettings, type SettingsMap } from '../../utils/settingsDiff';
 
-const notificationTabValues = ['settings', 'offline', 'expiry', 'load', 'sourceip'] as const;
+const notificationTabValues = ['settings', 'offline', 'expiry', 'load', 'ipchange'] as const;
 
 /**
  * 默认离线通知宽限期（秒）。
@@ -47,6 +47,10 @@ type ExpiryNotification = {
   advance_days?: number;
   last_notified?: string | null;
 };
+type IpChangeNotification = {
+  client: string;
+  enable?: boolean;
+};
 type LoadNotification = {
   id: number;
   name?: string;
@@ -66,7 +70,7 @@ const emptyTabState: Record<NotificationTab, boolean> = {
   offline: false,
   expiry: false,
   load: false,
-  sourceip: false,
+  ipchange: false,
 };
 
 function toNotificationTab(value?: string): NotificationTab {
@@ -106,6 +110,7 @@ export default function AdminNotifications() {
   const [loadedTabs, setLoadedTabs] = useState<Record<NotificationTab, boolean>>(emptyTabState);
   const [offlineNotifications, setOfflineNotifications] = useState<OfflineNotification[]>([]);
   const [expiryNotifications, setExpiryNotifications] = useState<ExpiryNotification[]>([]);
+  const [ipChangeNotifications, setIpChangeNotifications] = useState<IpChangeNotification[]>([]);
   const [clients, setClients] = useState<NotificationClient[]>([]);
   const [loadNotifications, setLoadNotifications] = useState<LoadNotification[]>([]);
   const [settings, setSettings] = useState<SettingsMap>({});
@@ -117,6 +122,7 @@ export default function AdminNotifications() {
   const [smtpOpen, setSmtpOpen] = useState(false);
   const [telegramOpen, setTelegramOpen] = useState(false);
   const [webhookOpen, setWebhookOpen] = useState(false);
+  const [ipChangeServersOpen, setIpChangeServersOpen] = useState(true);
   const clientsRef = useRef<NotificationClient[]>([]);
   const clientsLoadedRef = useRef(false);
   const clientsLoadPromiseRef = useRef<Promise<NotificationClient[]> | null>(null);
@@ -261,14 +267,37 @@ export default function AdminNotifications() {
     setTabBusy('load', false);
   }, [apiFetch, ensureClientsLoaded, loadedTabs.load, markTabLoaded, setTabBusy]);
 
+  const loadIpChangeTab = useCallback(async (force = false) => {
+    if (!force && loadedTabs.ipchange) return;
+    setTabBusy('ipchange', true);
+    const results = await Promise.allSettled([
+      apiFetch('/admin/notification/ipchange'),
+      ensureClientsLoaded(),
+      loadedTabs.settings ? Promise.resolve(null) : apiFetch('/admin/settings?scope=notification'),
+    ]);
+    const [ipChangeData, , settingsData] = results.map((result) => result.status === 'fulfilled' ? result.value : null);
+    if (Array.isArray(ipChangeData)) setIpChangeNotifications(ipChangeData as IpChangeNotification[]);
+    if (settingsData && typeof settingsData === 'object') {
+      const nextSettings = settingsData as SettingsMap;
+      setSettings(nextSettings);
+      setOriginalSettings(nextSettings);
+      syncChannelCards(nextSettings.notification_method || 'telegram');
+    }
+    if (results.some((result) => result.status === 'rejected')) {
+      toast.error('来源 IP 通知数据加载失败，请稍后刷新');
+    } else {
+      markTabLoaded('ipchange');
+    }
+    setTabBusy('ipchange', false);
+  }, [apiFetch, ensureClientsLoaded, loadedTabs.settings, loadedTabs.ipchange, markTabLoaded, setTabBusy, syncChannelCards]);
+
   const loadActiveTab = useCallback((tab: NotificationTab, force = false) => {
     if (tab === 'settings') return loadSettingsTab(force);
     if (tab === 'offline') return loadOfflineTab(force);
     if (tab === 'expiry') return loadExpiryTab(force);
-    // 来源 IP 通知只是一个开关，与「通知设置」共用同一份设置数据。
-    if (tab === 'sourceip') return loadSettingsTab(force);
+    if (tab === 'ipchange') return loadIpChangeTab(force);
     return loadLoadTab(force);
-  }, [loadExpiryTab, loadLoadTab, loadOfflineTab, loadSettingsTab]);
+  }, [loadExpiryTab, loadLoadTab, loadOfflineTab, loadSettingsTab, loadIpChangeTab]);
 
   useEffect(() => {
     void loadActiveTab(activeTab);
@@ -287,6 +316,12 @@ export default function AdminNotifications() {
     return map;
   }, [expiryNotifications]);
 
+  const ipChangeNotificationMap = useMemo(() => {
+    const map = new Map<string, IpChangeNotification>();
+    ipChangeNotifications.forEach((n) => map.set(n.client, n));
+    return map;
+  }, [ipChangeNotifications]);
+
   const filteredClients = useMemo(() => {
     if (!searchTerm.trim()) return clients;
     const term = searchTerm.toLowerCase();
@@ -296,6 +331,20 @@ export default function AdminNotifications() {
       c.region?.toLowerCase().includes(term)
     );
   }, [clients, searchTerm]);
+
+  // ─── Source IP: toggle ───
+  const toggleIpChange = (clientUuid: string, enable: boolean) => runAction('ipchange:' + clientUuid, async () => {
+    const result = await apiFetch('/admin/notification/ipchange/edit', {
+      method: 'POST',
+      body: JSON.stringify({ client: clientUuid, enable }),
+    });
+    if (result.success) {
+      toast.success(enable ? '已开启来源 IP 通知' : '已关闭来源 IP 通知');
+      await loadIpChangeTab(true);
+    } else {
+      toast.error(result.error || '操作失败');
+    }
+  });
 
   // ─── Offline: toggle ───
   const toggleOffline = (clientUuid: string, enable: boolean) => runAction('offline:' + clientUuid, async () => {
@@ -692,6 +741,7 @@ export default function AdminNotifications() {
 
   const offlineStatsCount = offlineNotifications.filter((n) => n.enable).length;
   const expiryStatsCount = expiryNotifications.filter((n) => n.enable).length;
+  const ipChangeStatsCount = ipChangeNotifications.filter((n) => n.enable).length;
   const notificationMethod = settings.notification_method || 'telegram';
   const webhookFormat = settings.webhook_format || 'generic';
   const webhookSecretHint = webhookFormat === 'feishu' || webhookFormat === 'dingtalk'
@@ -715,8 +765,8 @@ export default function AdminNotifications() {
       : notificationMethod === 'none'
         ? 'gray'
         : 'green';
-  const showClientSearch = activeTab === 'offline' || activeTab === 'expiry';
-  const headerAction = activeTab === 'settings' || activeTab === 'sourceip' ? (
+  const showClientSearch = activeTab === 'offline' || activeTab === 'expiry' || activeTab === 'ipchange';
+  const headerAction = activeTab === 'settings' || activeTab === 'ipchange' ? (
     <Button onClick={saveNotificationSettings} disabled={settingsSaving || tabLoading.settings}>
       <Save size={14} /> {settingsSaving ? '保存中…' : '保存设置'}
     </Button>
@@ -764,8 +814,8 @@ export default function AdminNotifications() {
             <Tabs.Trigger value="load">
               <TrendingUp size={14} /> {loadedTabs.load ? `负载通知 (${loadNotifications.length} 条)` : '负载通知'}
             </Tabs.Trigger>
-            <Tabs.Trigger value="sourceip">
-              <Globe size={14} /> 来源 IP 通知
+            <Tabs.Trigger value="ipchange">
+              <Globe size={14} /> {loadedTabs.ipchange ? `IP 变更通知 (${ipChangeStatsCount} 开启)` : 'IP 变更通知'}
             </Tabs.Trigger>
           </Tabs.List>
           {!showClientSearch && (
@@ -1397,22 +1447,71 @@ export default function AdminNotifications() {
             )}
           </Tabs.Content>
 
-          {/* ─── Token Source IP Tab ─── */}
-          <Tabs.Content value="sourceip">
-            {tabLoading.settings ? (
+          {/* ─── Public IP Change Tab ─── */}
+          <Tabs.Content value="ipchange">
+            {tabLoading.ipchange ? (
               <Loading />
             ) : (
-              <SettingCard
-                title="Agent Token 来源 IP 变化通知"
-                description="可选功能，默认关闭；通过「通知设置」中选择的全局渠道发送"
-              >
-                <SettingToggle
-                  label="启用来源 IP 变化通知"
-                  description="当同一个 Agent Token 的请求来源 IP 发生变化时发送通知，内容包含变化前后的完整 IP（明文），不再写入审计日志。修改后需点击右上角「保存设置」。"
-                  checked={settings.enable_token_source_ip_notification === 'true'}
-                  onCheckedChange={(checked) => updateSetting('enable_token_source_ip_notification', checked ? 'true' : 'false')}
-                />
-              </SettingCard>
+              <Flex direction="column" gap="4">
+                <SettingCard
+                  title="公网 IP 变更通知"
+                  description="可选功能，默认关闭；通过「通知设置」中选择的全局渠道发送"
+                >
+                  <SettingToggle
+                    label="启用公网 IP 变更通知（全局）"
+                    description="总闸开关：当节点上报的公网出口 IP 发生变化时发送通知（IPv4 / IPv6 分开比较）。检测依据是 Agent 通过 api.ipify.org 等公网接口探测到的出口 IP，即节点页面展示的 IP，不是连接 Worker 的源 IP，因此双栈机器在两个地址族之间切换不会误报。修改后需点击右上角「保存设置」。"
+                    checked={settings.enable_ip_change_notification === 'true'}
+                    onCheckedChange={(checked) => updateSetting('enable_ip_change_notification', checked ? 'true' : 'false')}
+                  />
+                  <Text size="1" color="gray" mt="2">
+                    下方还必须开启对应服务器的开关，两处同时开启才会发送。
+                  </Text>
+                </SettingCard>
+
+                <SettingCard
+                  title="服务器开关"
+                  description="选择要监控公网 IP 变更的服务器，与上方全局开关同时开启才生效"
+                  open={ipChangeServersOpen}
+                  onOpenChange={setIpChangeServersOpen}
+                >
+                  {filteredClients.length === 0 ? (
+                    <Flex justify="center" py="6">
+                      <Text color="gray">暂无匹配的服务器</Text>
+                    </Flex>
+                  ) : (
+                    <Table.Root className="notification-config-table" variant="surface">
+                      <Table.Header>
+                        <Table.Row>
+                          <Table.ColumnHeaderCell>服务器</Table.ColumnHeaderCell>
+                          <Table.ColumnHeaderCell width="76px"><NotificationTableHeader label="状态" /></Table.ColumnHeaderCell>
+                        </Table.Row>
+                      </Table.Header>
+                      <Table.Body>
+                        {filteredClients.map((client) => {
+                          const enabled = ipChangeNotificationMap.get(client.uuid)?.enable || false;
+                          const displayIp = clientDisplayIp(client);
+                          return (
+                            <Table.Row key={client.uuid}>
+                              <Table.Cell>
+                                <Text size="2" weight="medium">{client.name || '未命名'}</Text>
+                                {displayIp && <Text size="1" color="gray" ml="2">{displayIp}</Text>}
+                              </Table.Cell>
+                              <Table.Cell>
+                                <Switch
+                                  size="1"
+                                  checked={enabled}
+                                  onCheckedChange={(v) => toggleIpChange(client.uuid, v)}
+                                  disabled={pendingActions.has(`ipchange:${client.uuid}`)}
+                                />
+                              </Table.Cell>
+                            </Table.Row>
+                          );
+                        })}
+                      </Table.Body>
+                    </Table.Root>
+                  )}
+                </SettingCard>
+              </Flex>
             )}
           </Tabs.Content>
         </Box>

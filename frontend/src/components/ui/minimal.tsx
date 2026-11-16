@@ -5,7 +5,7 @@
  * 后续迁移其他后台页面时直接复用这里的组件。
  */
 import React, { useId, useState } from 'react';
-import { Info, X } from 'lucide-react';
+import { ChevronRight, Info, X } from 'lucide-react';
 import { AlertDialog, Dialog as DialogPrimitive, Switch as SwitchPrimitive, Tooltip } from 'radix-ui';
 
 function cx(...parts: Array<string | false | null | undefined>): string {
@@ -44,6 +44,42 @@ export function CardHeader({ title, description, action }: { title: string; desc
       </div>
       {action}
     </header>
+  );
+}
+
+/* ========== CollapsibleCard（默认收起的渠道卡片，对齐 Monitor 默认主题） ==========
+ * 标题行：旋转箭头 + 标题 + 简述，右侧放状态徽标（如「已配置 / 当前通道」），
+ * 这样收起时也能一眼看出状态。原生 <details>，键盘与读屏开箱即用。
+ */
+export function CollapsibleCard({
+  title,
+  description,
+  badges,
+  open,
+  onOpenChange,
+  children,
+}: {
+  title: string;
+  description?: string;
+  badges?: React.ReactNode;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <Card className="sa-collapsible">
+      <details open={open} onToggle={(event) => onOpenChange(event.currentTarget.open)}>
+        <summary className="sa-card-header sa-collapsible-summary">
+          <span className="sa-card-heading">
+            <ChevronRight className="sa-chevron" size={16} aria-hidden="true" />
+            <span className="sa-card-title">{title}</span>
+            {description && <span className="sa-card-description">{description}</span>}
+          </span>
+          {badges && <span className="sa-collapsible-badges">{badges}</span>}
+        </summary>
+        {children}
+      </details>
+    </Card>
   );
 }
 

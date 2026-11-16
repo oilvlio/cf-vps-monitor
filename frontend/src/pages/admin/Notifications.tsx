@@ -14,6 +14,7 @@ import {
   Card,
   CardHeader,
   Checkbox,
+  CollapsibleCard,
   Dialog,
   Field,
   FormInput,
@@ -145,6 +146,8 @@ export default function AdminNotifications() {
   const [originalSettings, setOriginalSettings] = useState<SettingsMap>({});
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [testRecipient, setTestRecipient] = useState('');
+  // 渠道卡片默认收起（对齐 Monitor 默认主题）；展开状态放在页面级，切换页签不会丢。
+  const [channelOpen, setChannelOpen] = useState<Record<'email' | 'telegram' | 'webhook', boolean>>({ email: false, telegram: false, webhook: false });
   const [testEmailSending, setTestEmailSending] = useState(false);
   const [testWebhookSending, setTestWebhookSending] = useState(false);
   const clientsRef = useRef<NotificationClient[]>([]);
@@ -561,6 +564,8 @@ export default function AdminNotifications() {
 
   const handleNotificationMethodChange = (value: string) => {
     updateSetting('notification_method', value);
+    const channel = value === 'email' ? 'email' : value === 'telegram' ? 'telegram' : value === 'webhook' ? 'webhook' : null;
+    if (channel) setChannelOpen((prev) => ({ ...prev, [channel]: true }));
   };
 
   const saveNotificationSettings = async () => {
@@ -765,6 +770,22 @@ export default function AdminNotifications() {
   const ipChangeStatsCount = ipChangeNotifications.filter((n) => n.enable).length;
   const notificationMethod = settings.notification_method || 'telegram';
   const webhookFormat = settings.webhook_format || 'generic';
+  // 「已配置」只看必填项是否齐全：已保存的密钥不会回显，所以同时认 *_set 标记和本次输入。
+  const channelConfigured = {
+    email: Boolean(settings.email_smtp_host?.trim() && settings.email_smtp_from_address?.trim() && settings.email_smtp_recipients?.trim()),
+    telegram: (settings.telegram_bot_token_set === 'true' || Boolean(settings.telegram_bot_token?.trim()))
+      && (settings.telegram_chat_id_set === 'true' || Boolean(settings.telegram_chat_id?.trim())),
+    webhook: settings.webhook_url_set === 'true' || Boolean(settings.webhook_url?.trim()),
+  };
+  const selectedChannel = notificationMethod === 'email' || notificationMethod === 'telegram' || notificationMethod === 'webhook'
+    ? notificationMethod
+    : null;
+  const channelBadges = (channel: 'email' | 'telegram' | 'webhook') => (
+    <>
+      {selectedChannel === channel && <Badge variant="success">当前通道</Badge>}
+      <Badge variant={channelConfigured[channel] ? 'secondary' : 'outline'}>{channelConfigured[channel] ? '已配置' : '未配置'}</Badge>
+    </>
+  );
   const webhookSecretHint = webhookFormat === 'feishu' || webhookFormat === 'dingtalk'
     ? '用于平台签名校验'
     : webhookFormat === 'generic'
@@ -779,13 +800,6 @@ export default function AdminNotifications() {
       : notificationMethod === 'none'
         ? '关闭'
         : 'Telegram';
-  const notificationMethodBadge = notificationMethod === 'email'
-    ? 'info'
-    : notificationMethod === 'webhook'
-      ? 'warning'
-      : notificationMethod === 'none'
-        ? 'outline'
-        : 'success';
 
   const tabOptions: Array<{ value: NotificationTab; label: string }> = [
     { value: 'settings', label: '通知设置' },
@@ -794,6 +808,8 @@ export default function AdminNotifications() {
     { value: 'load', label: loadedTabs.load ? `负载通知 (${loadNotifications.length} 条)` : '负载通知' },
     { value: 'ipchange', label: loadedTabs.ipchange ? `IP 变更通知 (${ipChangeStatsCount} 开启)` : 'IP 变更通知' },
   ];
+
+  const formWidthTab = activeTab === 'settings' || activeTab === 'ipchange';
 
   const headerAction = activeTab === 'settings' || activeTab === 'ipchange' ? (
     <Button onClick={() => void saveNotificationSettings()} disabled={settingsSaving || tabLoading[activeTab]}>
@@ -819,7 +835,7 @@ export default function AdminNotifications() {
         </div>
       </div>
 
-      <div className="sa-page-actions">
+      <div className={`sa-page-actions${formWidthTab ? ' sa-page-narrow' : ''}`}>
         <Segmented label="通知类型" value={activeTab} onChange={handleTabChange} options={tabOptions} />
         {headerAction && <div className="sa-toolbar-group">{headerAction}</div>}
       </div>
@@ -847,17 +863,22 @@ export default function AdminNotifications() {
                     <option value="email">SMTP 邮件</option>
                     <option value="webhook">Webhook</option>
                   </select>
-                  <Badge variant={notificationMethodBadge}>{notificationMethodLabel}</Badge>
                 </SettingRow>
               </Rows>
+              {selectedChannel && !channelConfigured[selectedChannel] && (
+                <Notice tone="warning" title={`${notificationMethodLabel} 尚未配置完整`}>
+                  当前发送方式是 {notificationMethodLabel}，但必填项还没填全，通知暂时不会发出。展开下方对应渠道补全后再保存。
+                </Notice>
+              )}
             </Card>
 
-            <Card>
-              <CardHeader
-                title="SMTP 邮件通知"
-                description="发件服务器、账号和默认收件人"
-                action={notificationMethod === 'email' ? <Badge variant="success">当前通道</Badge> : undefined}
-              />
+            <CollapsibleCard
+              title="SMTP 邮件通知"
+              description="发件服务器、账号和默认收件人"
+              badges={channelBadges('email')}
+              open={channelOpen.email}
+              onOpenChange={(open) => setChannelOpen((prev) => ({ ...prev, email: open }))}
+            >
               <Rows>
                 <Field
                   label="SMTP Host"
@@ -943,14 +964,15 @@ export default function AdminNotifications() {
                   </Button>
                 </SettingRow>
               </Rows>
-            </Card>
+            </CollapsibleCard>
 
-            <Card>
-              <CardHeader
-                title="Telegram 通知"
-                description="Bot 与辅助告警策略"
-                action={notificationMethod === 'telegram' ? <Badge variant="success">当前通道</Badge> : undefined}
-              />
+            <CollapsibleCard
+              title="Telegram 通知"
+              description="Bot 与辅助告警策略"
+              badges={channelBadges('telegram')}
+              open={channelOpen.telegram}
+              onOpenChange={(open) => setChannelOpen((prev) => ({ ...prev, telegram: open }))}
+            >
               <Rows>
                 <Field
                   label="Bot Token"
@@ -980,14 +1002,15 @@ export default function AdminNotifications() {
                   </Button>
                 </SettingRow>
               </Rows>
-            </Card>
+            </CollapsibleCard>
 
-            <Card>
-              <CardHeader
-                title="Webhook 通知"
-                description="HTTPS 回调地址和消息格式"
-                action={notificationMethod === 'webhook' ? <Badge variant="success">当前通道</Badge> : undefined}
-              />
+            <CollapsibleCard
+              title="Webhook 通知"
+              description="HTTPS 回调地址和消息格式"
+              badges={channelBadges('webhook')}
+              open={channelOpen.webhook}
+              onOpenChange={(open) => setChannelOpen((prev) => ({ ...prev, webhook: open }))}
+            >
               <Rows>
                 <Field
                   label="Webhook URL"
@@ -1095,7 +1118,7 @@ export default function AdminNotifications() {
                   </Button>
                 </SettingRow>
               </Rows>
-            </Card>
+            </CollapsibleCard>
           </div>
         )
       )}
@@ -1407,7 +1430,7 @@ export default function AdminNotifications() {
       {/* ─── 公网 IP 变更通知 ─── */}
       {activeTab === 'ipchange' && (
         tabLoading.ipchange ? <Loading /> : (
-          <div className="sa-page">
+          <div className="sa-page sa-page-narrow">
             <Card>
               <CardHeader title="公网 IP 变更通知" description="可选功能，默认关闭；通过「通知设置」中选择的全局渠道发送" />
               <Rows>

@@ -2400,3 +2400,78 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* ---------- CollapsibleCard ---------- */
+.sa-collapsible details > summary {
+  list-style: none;
+}
+
+.sa-collapsible details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.sa-collapsible-summary {
+  cursor: pointer;
+  user-select: none;
+  border-bottom: 0;
+  transition: background-color 0.15s;
+}
+
+.sa-collapsible-summary:hover {
+  background: color-mix(in oklab, var(--sa-muted) 50%, transparent);
+}
+
+.sa-collapsible details[open] > .sa-collapsible-summary {
+  border-bottom: 1px solid var(--sa-border);
+}
+
+.sa-collapsible-summary:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px color-mix(in oklab, var(--sa-ring) 60%, transparent);
+}
+
+.sa-collapsible-summary .sa-card-heading {
+  align-items: center;
+  gap: 2px 10px;
+}
+
+.sa-chevron {
+  flex-shrink: 0;
+  align-self: center;
+  margin-right: -4px;
+  color: var(--sa-muted-foreground);
+  transition: transform 0.15s;
+}
+
+.sa-collapsible details[open] .sa-chevron {
+  transform: rotate(90deg);
+}
+
+.sa-collapsible-badges {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ---------- 窄屏细节：分段标签可横向滑动，渠道卡片保持单行 ---------- */
+@media (max-width: 640px) {
+  .sa-segmented {
+    max-width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .sa-segmented::-webkit-scrollbar {
+    display: none;
+  }
+
+  .sa-segmented-item {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+
+  .sa-collapsible-summary .sa-card-description {
+    display: none;
+  }
+}

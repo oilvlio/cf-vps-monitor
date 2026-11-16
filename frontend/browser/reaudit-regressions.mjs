@@ -814,6 +814,34 @@ try {
     data.observed = { pageErrors: [...data.errors] };
     assert.deepEqual(data.errors, []);
   });
+  await check('R-F15-notify-channels', 'notification channel cards start collapsed, open on channel switch and report configured state', async (page, data) => {
+    await page.goto(origin + '/admin/notifications/settings');
+    await page.getByText('Telegram 通知', { exact: true }).waitFor();
+    const card = (title) => page.locator('.sa-collapsible', { hasText: title });
+    const isOpen = (title) => card(title).locator('details').evaluate((element) => element.open);
+    for (const title of ['SMTP 邮件通知', 'Telegram 通知', 'Webhook 通知']) {
+      assert.equal(await isOpen(title), false, `R-F15: ${title} starts collapsed`);
+      assert.equal(await card(title).getByText('未配置', { exact: true }).count(), 1, `R-F15: ${title} shows its state while closed`);
+    }
+
+    await page.getByRole('combobox', { name: '通知发送方式', exact: true }).selectOption('email');
+    assert.equal(await isOpen('SMTP 邮件通知'), true, 'R-F15: choosing a channel opens its card');
+    assert.equal(await page.getByText('SMTP 邮件 尚未配置完整').count(), 1, 'R-F15: an incomplete selected channel is called out');
+    assert.equal(await card('SMTP 邮件通知').getByText('当前通道', { exact: true }).count(), 1);
+
+    await page.getByRole('textbox', { name: 'SMTP Host', exact: true }).fill('smtp.example.com');
+    await page.getByRole('textbox', { name: '发件人邮箱', exact: true }).fill('monitor@example.com');
+    await page.getByRole('textbox', { name: '收件地址', exact: true }).fill('ops@example.com');
+    await card('SMTP 邮件通知').getByText('已配置', { exact: true }).waitFor();
+    assert.equal(await page.getByText('SMTP 邮件 尚未配置完整').count(), 0, 'R-F15: the warning clears once required fields are filled');
+
+    await card('SMTP 邮件通知').locator('summary').click();
+    assert.equal(await isOpen('SMTP 邮件通知'), false, 'R-F15: the summary toggles the card closed');
+    await page.getByRole('radio', { name: /离线通知/ }).click();
+    await page.getByRole('radio', { name: '通知设置', exact: true }).click();
+    assert.equal(await isOpen('SMTP 邮件通知'), false, 'R-F15: collapsed state survives switching tabs');
+    assert.deepEqual(data.errors, []);
+  });
 } finally {
   await finish();
 }

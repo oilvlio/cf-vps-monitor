@@ -1,53 +1,51 @@
 import { useEffect, useMemo, useState } from 'react';
-import {
-  Flex,
-  Card,
-  Text,
-  Heading,
-  Badge,
-  Table,
-  Select,
-  TextField,
-  Button,
-  Dialog,
-} from '@radix-ui/themes';
 import { ScrollText, Search, Shield, Clock3, User, FileText } from 'lucide-react';
 import Loading from '../../components/Loading';
 import { useApi } from '../../contexts/AuthContext';
 import { getAuditLogDetailSearchText, getAuditLogDetailText, getAuditLogRawDetailText } from '../../utils/audit-log';
 import { AuditLogEntry, normalizeAuditLogsPage } from '../../utils/audit-log-response';
+import {
+  Badge,
+  Button,
+  Card,
+  Dialog,
+  StatGrid,
+} from '../../components/ui/minimal';
 
-const actionLabels: Record<string, { label: string; color: string }> = {
-  login: { label: '登录', color: 'green' },
-  account_username_edit: { label: '修改用户名', color: 'orange' },
-  client_add: { label: '添加服务器', color: 'blue' },
-  client_edit: { label: '编辑服务器', color: 'blue' },
-  client_remove: { label: '删除服务器', color: 'red' },
-  chpasswd: { label: '修改密码', color: 'orange' },
-  agent_token_source_ip_change: { label: 'Token 来源变化', color: 'orange' },
-  settings_save: { label: '保存设置', color: 'blue' },
-  settings_edit: { label: '修改设置', color: 'blue' },
-  ping_add: { label: '添加 Ping', color: 'blue' },
-  ping_edit: { label: '编辑 Ping', color: 'blue' },
-  ping_assign: { label: '分配 Ping', color: 'blue' },
-  ping_delete: { label: '删除 Ping', color: 'red' },
-  offline_notification_edit: { label: '离线通知', color: 'orange' },
-  load_notification_add: { label: '负载通知', color: 'blue' },
-  load_notification_edit: { label: '编辑负载', color: 'blue' },
-  load_notification_delete: { label: '删除负载', color: 'red' },
-  record_clear: { label: '清除记录', color: 'red' },
-  record_clear_all: { label: '清除全部', color: 'red' },
-  backup_restore: { label: '恢复备份', color: 'purple' },
-  cron_cleanup: { label: '定时清理', color: 'gray' },
-  offline_notify: { label: '离线告警', color: 'red' },
-  init: { label: '系统初始化', color: 'gray' },
+type BadgeVariant = 'secondary' | 'outline' | 'warning' | 'success' | 'danger' | 'info';
+
+const actionLabels: Record<string, { label: string; variant: BadgeVariant }> = {
+  login: { label: '登录', variant: 'success' },
+  account_username_edit: { label: '修改用户名', variant: 'warning' },
+  client_add: { label: '添加服务器', variant: 'info' },
+  client_edit: { label: '编辑服务器', variant: 'info' },
+  client_remove: { label: '删除服务器', variant: 'danger' },
+  chpasswd: { label: '修改密码', variant: 'warning' },
+  agent_token_source_ip_change: { label: 'Token 来源变化', variant: 'warning' },
+  settings_save: { label: '保存设置', variant: 'info' },
+  settings_edit: { label: '修改设置', variant: 'info' },
+  ping_add: { label: '添加 Ping', variant: 'info' },
+  ping_edit: { label: '编辑 Ping', variant: 'info' },
+  ping_assign: { label: '分配 Ping', variant: 'info' },
+  ping_delete: { label: '删除 Ping', variant: 'danger' },
+  offline_notification_edit: { label: '离线通知', variant: 'warning' },
+  load_notification_add: { label: '负载通知', variant: 'info' },
+  load_notification_edit: { label: '编辑负载', variant: 'info' },
+  load_notification_delete: { label: '删除负载', variant: 'danger' },
+  record_clear: { label: '清除记录', variant: 'danger' },
+  record_clear_all: { label: '清除全部', variant: 'danger' },
+  backup_restore: { label: '恢复备份', variant: 'outline' },
+  cron_cleanup: { label: '定时清理', variant: 'secondary' },
+  offline_notify: { label: '离线告警', variant: 'danger' },
+  init: { label: '系统初始化', variant: 'secondary' },
 };
 
-function SummaryCards({
-  logs,
-}: {
-  logs: AuditLogEntry[];
-}) {
+function actionInfo(action?: string | null) {
+  if (!action) return { label: '-', variant: 'secondary' as BadgeVariant };
+  return actionLabels[action] || { label: action, variant: 'secondary' as BadgeVariant };
+}
+
+function SummaryCards({ logs }: { logs: AuditLogEntry[] }) {
   const userCount = new Set(logs.map((log) => log.user).filter(Boolean)).size;
   const highRiskCount = logs.filter((log) =>
     ['client_remove', 'record_clear', 'record_clear_all', 'backup_restore', 'ping_delete'].includes(log.action || ''),
@@ -58,25 +56,16 @@ function SummaryCards({
     return now.toDateString() === date.toDateString();
   }).length;
 
-  const cards = [
-    { title: '当前页日志', value: String(logs.length), icon: <FileText size={16} />, color: 'var(--blue-9)' },
-    { title: '活跃用户', value: String(userCount), icon: <User size={16} />, color: 'var(--cyan-9)' },
-    { title: '今日操作', value: String(todayCount), icon: <Clock3 size={16} />, color: 'var(--green-9)' },
-    { title: '高风险动作', value: String(highRiskCount), icon: <Shield size={16} />, color: 'var(--red-9)' },
-  ];
-
   return (
-    <Flex className="audit-summary-action-row" justify="between" align="center" wrap="wrap" gap="3">
-      <div className="audit-summary-strip">
-        {cards.map((card) => (
-          <div className="audit-summary-item" key={card.title}>
-            <span className="audit-summary-icon" style={{ color: card.color }} aria-hidden="true">{card.icon}</span>
-            <Text className="audit-summary-label" size="1" color="gray">{card.title}</Text>
-            <Text className="audit-summary-value" size="3" weight="bold">{card.value}</Text>
-          </div>
-        ))}
-      </div>
-    </Flex>
+    <StatGrid
+      label="审计日志概览"
+      items={[
+        { label: '当前页日志', value: String(logs.length), icon: <FileText /> },
+        { label: '活跃用户', value: String(userCount), icon: <User /> },
+        { label: '今日操作', value: String(todayCount), icon: <Clock3 /> },
+        { label: '高风险动作', value: String(highRiskCount), icon: <Shield /> },
+      ]}
+    />
   );
 }
 
@@ -143,185 +132,162 @@ export default function AdminAuditLogs() {
   if (loading) return <Loading />;
 
   return (
-    <div>
-      <Flex className="admin-audit-page" direction="column" gap="2">
-        <Flex className="admin-parent-title-row" align="center" justify="between" gap="3" wrap="wrap">
-          <Flex align="center" gap="2">
-            <ScrollText size={20} />
-            <Heading size="5">审计日志</Heading>
-          </Flex>
-        </Flex>
+    <div className="sa-scope sa-page">
+      <div className="admin-parent-title-row">
+        <div className="sa-page-title">
+          <ScrollText size={20} />
+          <span>审计日志</span>
+        </div>
+      </div>
 
-        <SummaryCards
-          logs={logs}
-        />
+      <SummaryCards logs={logs} />
 
-        {error && (
-          <Card className="admin-error-card">
-            <Text size="2" color="red" weight="bold">审计日志加载失败</Text>
-            <Text size="1" color="gray" style={{ display: 'block', marginTop: 4 }}>{error}</Text>
-          </Card>
-        )}
+      {error && (
+        <div className="sa-alert" role="alert">
+          <span>审计日志加载失败：{error}</span>
+        </div>
+      )}
 
-        <Card>
-          <div className="audit-filter-toolbar">
-            <div className="audit-filter-top-row">
-              <TextField.Root
-                className="audit-filter-search"
+      <Card>
+        <div className="sa-toolbar">
+          <div className="sa-toolbar-group">
+            <div className="sa-search">
+              <Search size={14} aria-hidden="true" />
+              <input
+                className="sa-input"
                 placeholder="搜索 ID、用户、动作、详情..."
+                aria-label="搜索日志"
                 value={search}
-                onChange={e => setSearch((e.target as HTMLInputElement).value)}
-              >
-                <TextField.Slot><Search size={14} /></TextField.Slot>
-              </TextField.Root>
-
-              <Select.Root value={filter} onValueChange={setFilter}>
-                <Select.Trigger className="audit-action-select" />
-                <Select.Content>
-                  <Select.Item value="all">全部操作</Select.Item>
-                  {uniqueActions.map(action => (
-                    <Select.Item key={action} value={action}>
-                      {actionLabels[action]?.label || action}
-                    </Select.Item>
-                  ))}
-                </Select.Content>
-              </Select.Root>
-
-              <Select.Root value={pageSize} onValueChange={(value) => { setPage(1); setPageSize(value); }}>
-                <Select.Trigger className="audit-page-size-select" />
-                <Select.Content>
-                  <Select.Item value="20">每页 20 条</Select.Item>
-                  <Select.Item value="50">每页 50 条</Select.Item>
-                  <Select.Item value="100">每页 100 条</Select.Item>
-                </Select.Content>
-              </Select.Root>
-
-              <Flex className="audit-filter-result-row" align="center">
-                <Badge variant="soft" color="blue">本页筛选结果 {filteredLogs.length}</Badge>
-              </Flex>
+                onChange={(event) => setSearch(event.target.value)}
+              />
             </div>
+            <select
+              className="sa-input sa-select"
+              aria-label="操作类型筛选"
+              value={filter}
+              onChange={(event) => setFilter(event.target.value)}
+            >
+              <option value="all">全部操作</option>
+              {uniqueActions.map(action => (
+                <option key={action} value={action}>{actionInfo(action).label}</option>
+              ))}
+            </select>
+            <select
+              className="sa-input sa-select"
+              aria-label="每页条数"
+              value={pageSize}
+              onChange={(event) => { setPage(1); setPageSize(event.target.value); }}
+            >
+              <option value="20">每页 20 条</option>
+              <option value="50">每页 50 条</option>
+              <option value="100">每页 100 条</option>
+            </select>
           </div>
-        </Card>
+          <div className="sa-toolbar-group">
+            <Badge variant="info">本页筛选结果 {filteredLogs.length}</Badge>
+          </div>
+        </div>
 
-        <Card className="audit-log-table-card">
-          <Table.Root>
-            <Table.Header>
-              <Table.Row>
-                <Table.ColumnHeaderCell style={{ width: '84px' }}>ID</Table.ColumnHeaderCell>
-                <Table.ColumnHeaderCell style={{ width: '170px' }}>时间</Table.ColumnHeaderCell>
-                <Table.ColumnHeaderCell style={{ width: '120px' }}>用户</Table.ColumnHeaderCell>
-                <Table.ColumnHeaderCell style={{ width: '140px' }}>操作</Table.ColumnHeaderCell>
-                <Table.ColumnHeaderCell>详情</Table.ColumnHeaderCell>
-              </Table.Row>
-            </Table.Header>
-            <Table.Body>
-              {filteredLogs.map(log => {
-                const actionInfo = log.action ? actionLabels[log.action] : undefined;
-                return (
-                  <Table.Row key={log.id}>
-                    <Table.Cell>
-                      <Button variant="ghost" size="1" onClick={() => setSelectedLog(log)}>
-                        {log.id}
-                      </Button>
-                    </Table.Cell>
-                    <Table.Cell>
-                      <Text size="1" style={{ fontFamily: 'monospace' }}>
-                        {new Date(log.time).toLocaleString('zh-CN')}
-                      </Text>
-                    </Table.Cell>
-                    <Table.Cell>
-                      <Text size="1">{log.user || '-'}</Text>
-                    </Table.Cell>
-                    <Table.Cell>
-                      <Badge size="1" variant="soft" color={(actionInfo?.color as any) || 'gray'}>
-                        {actionInfo?.label || log.action || '-'}
-                      </Badge>
-                    </Table.Cell>
-                    <Table.Cell>
-                      <button
-                        type="button"
-                        className="audit-detail-preview"
-                        onClick={() => setSelectedLog(log)}
-                        title="查看完整详情"
-                        aria-label={`查看日志 ${log.id} 完整详情`}
-                      >
-                        {getAuditLogDetailText(log.detail)}
-                      </button>
-                    </Table.Cell>
-                  </Table.Row>
-                );
-              })}
-            </Table.Body>
-          </Table.Root>
-          {filteredLogs.length === 0 && (
-            <Text color="gray" align="center" style={{ padding: '20px', display: 'block' }}>
-              {search || filter !== 'all' ? '没有匹配的日志' : '暂无日志记录'}
-            </Text>
-          )}
-        </Card>
-
-        <Flex justify="between" align="center" wrap="wrap" gap="3">
-          <Text size="2" color="gray">
-            {pageLabel}
-          </Text>
-          <Flex gap="2">
-            <Button variant="soft" disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
+        <div className="sa-table-scroll">
+          <table className="sa-table">
+            <thead>
+              <tr>
+                <th className="sa-col-md" style={{ width: 84 }}>ID</th>
+                <th style={{ width: 170 }}>时间</th>
+                <th style={{ width: 120 }}>用户</th>
+                <th style={{ width: 150 }}>操作</th>
+                <th>详情</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredLogs.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="sa-empty">
+                    {search || filter !== 'all' ? '没有匹配的日志' : '暂无日志记录'}
+                  </td>
+                </tr>
+              ) : (
+                filteredLogs.map(log => {
+                  const info = actionInfo(log.action);
+                  return (
+                    <tr className="sa-tr" key={log.id}>
+                      <td className="sa-col-md">
+                        <Button variant="outline" size="sm" onClick={() => setSelectedLog(log)} aria-label={`查看日志 ${log.id}`}>
+                          {log.id}
+                        </Button>
+                      </td>
+                      <td><span className="sa-mono sa-muted">{new Date(log.time).toLocaleString('zh-CN')}</span></td>
+                      <td>{log.user || '-'}</td>
+                      <td><Badge variant={info.variant}>{info.label}</Badge></td>
+                      <td>
+                        <button
+                          type="button"
+                          className="sa-clamp"
+                          onClick={() => setSelectedLog(log)}
+                          title="查看完整详情"
+                          aria-label={`查看日志 ${log.id} 完整详情`}
+                        >
+                          {getAuditLogDetailText(log.detail)}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+        <div className="sa-table-footer sa-table-footer-row">
+          <span>{pageLabel}</span>
+          <div className="sa-toolbar-group">
+            <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
               上一页
             </Button>
-            <Button variant="soft" disabled={!hasMore} onClick={() => setPage((value) => value + 1)}>
+            <Button variant="outline" size="sm" disabled={!hasMore} onClick={() => setPage((value) => value + 1)}>
               下一页
             </Button>
-          </Flex>
-        </Flex>
-      </Flex>
+          </div>
+        </div>
+      </Card>
 
-      <Dialog.Root open={!!selectedLog} onOpenChange={(open) => !open && setSelectedLog(null)}>
-        <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 620 }}>
-          <Dialog.Title>日志详情</Dialog.Title>
-          {selectedLog && (
-            <Flex direction="column" gap="3">
-              {(() => {
-                const detailText = getAuditLogDetailText(selectedLog.detail);
-                const rawDetailText = getAuditLogRawDetailText(selectedLog.detail);
-                const showRawDetail = rawDetailText !== '-' && rawDetailText !== detailText;
-                return (
-                  <>
-              <Flex justify="between" align="center">
-                <Badge variant="soft" color={(selectedLog.action ? actionLabels[selectedLog.action]?.color as any : undefined) || 'gray'}>
-                  {selectedLog.action ? actionLabels[selectedLog.action]?.label || selectedLog.action : '-'}
-                </Badge>
-                <Text size="1" color="gray">{new Date(selectedLog.time).toLocaleString('zh-CN')}</Text>
-              </Flex>
-              <Card>
-                <Flex direction="column" gap="2">
-                  <Text size="2"><strong>ID:</strong> {selectedLog.id}</Text>
-                  <Text size="2"><strong>用户:</strong> {selectedLog.user || '-'}</Text>
-                  <Text size="2"><strong>级别:</strong> {selectedLog.level || 'info'}</Text>
-                  <Text size="2"><strong>动作:</strong> {selectedLog.action || '-'}</Text>
-                  <Text size="2"><strong>详情:</strong></Text>
-                  <Text className="audit-detail-full" size="2" color="gray">
-                    {detailText}
-                  </Text>
-                  {showRawDetail && (
-                    <>
-                      <Text size="2"><strong>原始详情:</strong></Text>
-                      <Text className="audit-detail-full" size="2" color="gray">
-                        {rawDetailText}
-                      </Text>
-                    </>
-                  )}
-                </Flex>
-              </Card>
-                  </>
-                );
-              })()}
-              <Flex justify="end">
-                <Button variant="soft" onClick={() => setSelectedLog(null)}>关闭</Button>
-              </Flex>
-            </Flex>
-          )}
-        </Dialog.Content>
-      </Dialog.Root>
+      <Dialog
+        open={Boolean(selectedLog)}
+        onOpenChange={(open) => { if (!open) setSelectedLog(null); }}
+        size="lg"
+        title="日志详情"
+        footer={<Button variant="outline" onClick={() => setSelectedLog(null)}>关闭</Button>}
+      >
+        {selectedLog && (() => {
+          const info = actionInfo(selectedLog.action);
+          const detailText = getAuditLogDetailText(selectedLog.detail);
+          const rawDetailText = getAuditLogRawDetailText(selectedLog.detail);
+          const showRawDetail = rawDetailText !== '-' && rawDetailText !== detailText;
+          return (
+            <div className="sa-detail-stack">
+              <div className="sa-detail-meta">
+                <Badge variant={info.variant}>{info.label}</Badge>
+                <span className="sa-muted sa-mono">{new Date(selectedLog.time).toLocaleString('zh-CN')}</span>
+              </div>
+              <div className="sa-kv">
+                <div className="sa-kv-row"><span className="sa-kv-label">ID</span><span className="sa-kv-value">{selectedLog.id}</span></div>
+                <div className="sa-kv-row"><span className="sa-kv-label">用户</span><span className="sa-kv-value">{selectedLog.user || '-'}</span></div>
+                <div className="sa-kv-row"><span className="sa-kv-label">级别</span><span className="sa-kv-value">{selectedLog.level || 'info'}</span></div>
+                <div className="sa-kv-row"><span className="sa-kv-label">动作</span><span className="sa-kv-value">{selectedLog.action || '-'}</span></div>
+              </div>
+              <div>
+                <div className="sa-form-label">详情</div>
+                <pre className="sa-code-block sa-pre">{detailText}</pre>
+              </div>
+              {showRawDetail && (
+                <div>
+                  <div className="sa-form-label">原始详情</div>
+                  <pre className="sa-code-block sa-pre">{rawDetailText}</pre>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+      </Dialog>
     </div>
   );
 }

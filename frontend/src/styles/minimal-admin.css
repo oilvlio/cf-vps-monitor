@@ -1170,6 +1170,33 @@
   flex-shrink: 0;
 }
 
+.sa-cell-name {
+  flex: 0 1 auto;
+  font-weight: 600;
+}
+
+.sa-cell-ip {
+  flex: 0 1 auto;
+  font-size: 11.5px;
+}
+
+.sa-empty-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 48px 16px;
+  color: var(--sa-muted-foreground);
+  font-size: 13px;
+  text-align: center;
+}
+
+.sa-empty-block svg {
+  color: var(--sa-muted-foreground);
+  opacity: 0.6;
+}
+
 .sa-empty {
   padding: 32px 12px !important;
   color: var(--sa-muted-foreground);
@@ -1181,6 +1208,33 @@
   border-top: 1px solid var(--sa-border);
   color: var(--sa-muted-foreground);
   font-size: 12.5px;
+}
+
+.sa-table-footer-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+
+/* ---------- 详情弹窗 ---------- */
+.sa-detail-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.sa-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sa-detail-stack .sa-form-label {
+  margin-bottom: 6px;
 }
 
 .sa-checkbox {
@@ -1476,6 +1530,10 @@
   font-weight: 600;
 }
 
+.admin-ping-mobile-meta {
+  display: none;
+}
+
 .admin-ping-target {
   max-width: 340px;
 }
@@ -1494,6 +1552,34 @@
 
 .sa-scope-cell .sa-badge {
   flex-shrink: 0;
+}
+
+@media (max-width: 640px) {
+  .admin-ping-mobile-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin-top: 4px;
+    color: var(--sa-muted-foreground);
+    font-size: 12px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+  }
+
+  .admin-ping-mobile-meta > span {
+    white-space: normal;
+  }
+
+  .admin-ping-task-row > td:nth-child(4),
+  .admin-ping-task-row > td:nth-child(5),
+  .admin-ping-task-row > td:nth-child(6) {
+    display: none;
+  }
+
+  .admin-ping-task-row > .sa-td-name {
+    width: 100%;
+    white-space: normal;
+  }
 }
 
 .sa-td-server {
@@ -1566,4 +1652,751 @@
   width: 36px;
   height: 36px;
   border-radius: 8px;
+}
+
+/* =====================================================================
+ * 通用弹窗（Radix Dialog）
+ * ===================================================================== */
+.sa-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  z-index: 1001;
+  display: flex;
+  flex-direction: column;
+  width: calc(100% - 32px);
+  max-height: calc(100dvh - 48px);
+  border: 1px solid var(--sa-border);
+  border-radius: calc(var(--sa-radius) + 2px);
+  background: var(--sa-background);
+  color: var(--sa-foreground);
+  box-shadow: 0 18px 48px oklch(0 0 0 / 30%);
+  transform: translate(-50%, -50%);
+  overflow: hidden;
+}
+
+.sa-modal-sm {
+  max-width: 420px;
+}
+
+.sa-modal-md {
+  max-width: 560px;
+}
+
+.sa-modal-lg {
+  max-width: 720px;
+}
+
+.sa-modal-xl {
+  max-width: 920px;
+}
+
+.sa-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--sa-border);
+}
+
+.sa-modal-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sa-modal-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.sa-modal-description {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--sa-muted-foreground);
+}
+
+.sa-modal-close {
+  all: unset;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: calc(var(--sa-radius) - 4px);
+  color: var(--sa-muted-foreground);
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.sa-modal-close:hover {
+  background: var(--sa-accent);
+  color: var(--sa-foreground);
+}
+
+.sa-modal-close:focus-visible {
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--sa-ring) 50%, transparent);
+}
+
+.sa-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+  padding: 16px 20px;
+  overflow-y: auto;
+}
+
+.sa-modal-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--sa-border);
+  background: color-mix(in oklab, var(--sa-muted) 45%, var(--sa-background));
+}
+
+.sa-modal-footer .sa-modal-footer-start {
+  margin-right: auto;
+}
+
+@media (max-width: 640px) {
+  .sa-modal {
+    width: calc(100% - 20px);
+    max-height: calc(100dvh - 24px);
+  }
+
+  .sa-modal-header,
+  .sa-modal-body {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  .sa-modal-footer {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+}
+
+/* ---------- 弹窗 / 表单里的字段：标签在上 ---------- */
+.sa-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.sa-form-label {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--sa-foreground);
+}
+
+.sa-form-hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--sa-muted-foreground);
+}
+
+.sa-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 14px;
+}
+
+.sa-form-grid > .sa-form-span {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 640px) {
+  .sa-form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ---------- 只读代码块 / 详情键值 ---------- */
+.sa-code-block {
+  min-width: 0;
+  max-height: 240px;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--sa-border);
+  border-radius: calc(var(--sa-radius) - 2px);
+  background: var(--sa-muted);
+  color: var(--sa-foreground);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.sa-kv {
+  display: flex;
+  flex-direction: column;
+}
+
+.sa-kv-row {
+  display: grid;
+  grid-template-columns: minmax(96px, 150px) minmax(0, 1fr);
+  gap: 4px 16px;
+  align-items: baseline;
+  padding: 6px 0;
+  font-size: 13px;
+}
+
+.sa-kv-row + .sa-kv-row {
+  border-top: 1px solid var(--sa-border);
+}
+
+.sa-kv-label {
+  color: var(--sa-muted-foreground);
+}
+
+.sa-kv-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.sa-clamp {
+  display: -webkit-box;
+  overflow: hidden;
+  max-width: 420px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--sa-muted-foreground);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: break-word;
+  cursor: pointer;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.sa-clamp:hover {
+  color: var(--sa-foreground);
+}
+
+.sa-clamp:focus-visible {
+  border-radius: 4px;
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--sa-ring) 50%, transparent);
+}
+
+.sa-pre {
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+/* ---------- Badge：状态色 ---------- */
+.sa-badge-success {
+  border-color: color-mix(in oklab, oklch(0.696 0.17 162.48) 40%, transparent);
+  background: color-mix(in oklab, oklch(0.696 0.17 162.48) 14%, transparent);
+  color: oklch(0.508 0.118 165.612);
+}
+
+.dark .sa-badge-success {
+  color: oklch(0.845 0.143 164.978);
+}
+
+.sa-badge-danger {
+  border-color: color-mix(in oklab, var(--sa-destructive) 40%, transparent);
+  background: color-mix(in oklab, var(--sa-destructive) 12%, transparent);
+  color: var(--sa-destructive);
+}
+
+.sa-badge-info {
+  border-color: color-mix(in oklab, oklch(0.546 0.245 262.881) 35%, transparent);
+  background: color-mix(in oklab, oklch(0.546 0.245 262.881) 12%, transparent);
+  color: oklch(0.488 0.243 264.376);
+}
+
+.dark .sa-badge-info {
+  color: oklch(0.809 0.105 251.813);
+}
+
+/* ---------- 页面级操作条（标题下方靠右） ---------- */
+.sa-page-narrow {
+  width: 100%;
+  max-width: 960px;
+}
+
+.sa-client-picker {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  max-height: 220px;
+  padding: 10px;
+  overflow-y: auto;
+  border: 1px solid var(--sa-border);
+  border-radius: calc(var(--sa-radius) - 2px);
+}
+
+.sa-client-picker label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: calc(var(--sa-radius) - 4px);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sa-client-picker label:hover {
+  background: var(--sa-accent);
+}
+
+.sa-client-picker label.is-selected {
+  border-color: var(--sa-border);
+  background: var(--sa-muted);
+}
+
+@media (max-width: 640px) {
+  .sa-client-picker {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.sa-page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+
+.sa-page-actions p {
+  margin: 0;
+  min-width: 0;
+  flex: 1 1 320px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--sa-muted-foreground);
+}
+
+/* =====================================================================
+ * 主题管理
+ * ===================================================================== */
+.sa-theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.sa-theme-card {
+  gap: 10px;
+  padding: 12px;
+}
+
+.sa-theme-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  max-height: 150px;
+  overflow: hidden;
+  border-radius: calc(var(--sa-radius) - 2px);
+  background: var(--sa-muted);
+  color: var(--sa-muted-foreground);
+}
+
+.sa-theme-preview img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.sa-theme-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.sa-theme-name {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.sa-theme-meta {
+  font-size: 12px;
+  color: var(--sa-muted-foreground);
+}
+
+.sa-theme-description {
+  margin: 0;
+  min-height: 34px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--sa-muted-foreground);
+}
+
+.sa-theme-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: auto;
+}
+
+.sa-theme-config {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sa-theme-config-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.sa-theme-color {
+  width: 100%;
+  min-height: 32px;
+  padding: 3px;
+  border: 1px solid var(--sa-input);
+  border-radius: calc(var(--sa-radius) - 2px);
+  background: transparent;
+}
+
+.sa-theme-range {
+  width: 100%;
+  accent-color: var(--sa-primary);
+}
+
+.sa-theme-css-guide {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--sa-border);
+  border-radius: calc(var(--sa-radius) - 2px);
+  background: color-mix(in oklab, var(--sa-muted) 45%, transparent);
+}
+
+.sa-theme-snippets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.sa-theme-config-title {
+  margin-top: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--sa-foreground);
+}
+
+.sa-form-label-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sa-theme-css-input {
+  min-height: 180px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+}
+
+.sa-thirdparty-body {
+  gap: 12px;
+  padding-bottom: 4px;
+}
+
+.sa-thirdparty-body > * {
+  margin-left: 16px;
+  margin-right: 16px;
+}
+
+/* =====================================================================
+ * 关于
+ * ===================================================================== */
+.sa-about-hero {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+}
+
+.sa-about-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 68px;
+  height: 68px;
+  border-radius: 18px;
+  background: var(--sa-primary);
+  color: var(--sa-primary-foreground);
+}
+
+.sa-about-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.sa-about-subtitle {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: var(--sa-muted-foreground);
+}
+
+.sa-about-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.sa-about-stack {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.sa-about-stack-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--sa-border);
+  border-radius: calc(var(--sa-radius) - 2px);
+  background: color-mix(in oklab, var(--sa-muted) 40%, transparent);
+}
+
+.sa-about-stack-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: var(--sa-accent);
+  color: var(--sa-foreground);
+}
+
+.sa-about-features {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 16px;
+  margin-top: 10px;
+}
+
+.sa-about-feature {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.sa-about-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  margin-top: 6px;
+  border-radius: 999px;
+  background: var(--sa-primary);
+}
+
+.sa-about-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--sa-muted-foreground);
+}
+
+.sa-about-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.sa-about-feature-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sa-about-feature-title svg {
+  color: var(--sa-muted-foreground);
+}
+
+@media (max-width: 860px) {
+  .sa-about-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .sa-about-features {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* =====================================================================
+ * 账户 / MFA
+ * ===================================================================== */
+.sa-qr-box {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 200px;
+  aspect-ratio: 1;
+  overflow: hidden;
+  border: 1px solid var(--sa-border);
+  border-radius: calc(var(--sa-radius) - 2px);
+  background: #fff;
+  color: var(--sa-muted-foreground);
+}
+
+.sa-qr-box img {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.sa-secret {
+  display: block;
+  margin-top: 6px;
+  padding: 8px 10px;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--sa-border);
+  border-radius: calc(var(--sa-radius) - 2px);
+  background: var(--sa-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.sa-recovery-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.sa-recovery-grid code {
+  min-width: 0;
+  padding: 8px;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--sa-border);
+  border-radius: calc(var(--sa-radius) - 2px);
+  background: var(--sa-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  text-align: center;
+}
+
+.sa-mfa-layout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 20px;
+}
+
+.sa-mfa-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.sa-mfa-status {
+  display: grid;
+  grid-template-columns: minmax(90px, auto) minmax(0, 1fr);
+  gap: 6px 16px;
+  padding: 10px 0;
+  border-top: 1px solid var(--sa-border);
+  border-bottom: 1px solid var(--sa-border);
+  font-size: 13px;
+}
+
+.sa-mfa-status dt {
+  color: var(--sa-muted-foreground);
+}
+
+.sa-mfa-status dd {
+  margin: 0;
+}
+
+.sa-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--sa-border);
+}
+
+.sa-mfa-body {
+  gap: 14px;
+  padding-bottom: 4px;
+}
+
+.sa-mfa-body > * {
+  margin-left: 16px;
+  margin-right: 16px;
+}
+
+.sa-mfa-body > .sa-form-actions {
+  margin-left: 0;
+  margin-right: 0;
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+.sa-mfa-rebind {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--sa-border);
+  border-radius: calc(var(--sa-radius) - 2px);
+  background: color-mix(in oklab, var(--sa-muted) 40%, transparent);
+}
+
+.sa-mfa-rebind .sa-form-actions {
+  padding: 4px 0 0;
+  border-top: 0;
+}
+
+@media (max-width: 640px) {
+  .sa-recovery-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }

@@ -36,7 +36,7 @@ export default function PriceTags({
   return (
     <Flex gap="1" wrap="wrap" style={style}>
       {hasPrice && (
-        <Badge size="1" variant="soft" color="iris">
+        <Badge size="1" variant="soft" color="gray">
           <span style={{ fontSize: 11 }}>
             {price === -1 ? '免费' : billingLabel ? `${currency}${price}/${billingLabel}` : `${currency}${price}`}
           </span>

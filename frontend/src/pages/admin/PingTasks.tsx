@@ -21,7 +21,6 @@ import {
   Box,
   Button,
   Checkbox,
-  Dialog,
   Flex,
   Grid,
   Select,
@@ -41,6 +40,7 @@ import {
   Button as SaButton,
   Card as SaCard,
   ConfirmDialog,
+  Dialog as MinimalDialog,
   Segmented,
   StatGrid,
 } from '../../components/ui/minimal';
@@ -181,9 +181,7 @@ function TaskDialog({
   };
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 620 }}>
-        <Dialog.Title>{editingTask ? '编辑 Ping 任务' : '添加 Ping 任务'}</Dialog.Title>
+    <MinimalDialog open={open} onOpenChange={onOpenChange} title={editingTask ? '编辑 Ping 任务' : '添加 Ping 任务'} size="lg">
         <Flex direction="column" gap="3" style={{ padding: '8px 0', maxHeight: 560, overflow: 'auto' }}>
           <Grid columns={{ initial: '1', sm: '2' }} gap="3">
             <label>
@@ -294,8 +292,7 @@ function TaskDialog({
           <Button variant="soft" onClick={() => onOpenChange(false)}>取消</Button>
           <Button onClick={handleSave} disabled={saving}>{saving ? '保存中...' : '保存'}</Button>
         </Flex>
-      </Dialog.Content>
-    </Dialog.Root>
+    </MinimalDialog>
   );
 }
 
@@ -436,9 +433,7 @@ function NodeTasksDialog({
   };
 
   return (
-    <Dialog.Root open={Boolean(client)} onOpenChange={(open) => !open && onClose()}>
-      <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 560 }}>
-        <Dialog.Title>分配监控任务{client ? ` · ${client.name}` : ''}</Dialog.Title>
+    <MinimalDialog open={Boolean(client)} onOpenChange={(open) => !open && onClose()} title={`分配监控任务${client ? ` · ${client.name}` : ''}`} size="md">
 
         <Flex direction="column" gap="3" style={{ padding: '8px 0' }}>
           <Flex gap="2" align="center" wrap="wrap">
@@ -530,8 +525,7 @@ function NodeTasksDialog({
             <Button onClick={handleSave} disabled={saving || changed === 0}>{saving ? '保存中...' : '保存'}</Button>
           </Flex>
         </Flex>
-      </Dialog.Content>
-    </Dialog.Root>
+    </MinimalDialog>
   );
 }
 
@@ -583,6 +577,10 @@ function TaskRow({
       </td>
       <td className="sa-td-name">
         <span className="sa-ellipsis admin-ping-task-name" title={task.name}>{task.name}</span>
+        <span className="admin-ping-mobile-meta">
+          <span className="sa-mono">{task.target}</span>
+          <span>{task.all_clients ? '所有服务器' : isUnboundTask(task) ? '未分配服务器' : `${task.clients?.length || 0} 台 · ${boundNames}`}</span>
+        </span>
       </td>
       <td><SaBadge variant="secondary">{task.type.toUpperCase()}</SaBadge></td>
       <td><span className="sa-mono sa-ellipsis admin-ping-target" title={task.target}>{task.target}</span></td>

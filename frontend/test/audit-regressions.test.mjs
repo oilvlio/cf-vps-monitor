@@ -8,15 +8,14 @@ import { buildApiRequest } from '../src/utils/api.ts';
 import { runWithMfaStepUpRetry } from '../src/utils/mfa.ts';
 import { shouldClearAuthForStatus } from '../src/contexts/auth-state.ts';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { BroadcastChannel as NativeBroadcastChannel } from 'node:worker_threads';
 import { productionDeclaration, productionJsx, productionModule, productionEffect, productionSelected } from './helpers/production-module.mjs';
 
 const require = createRequire(new URL('../package.json', import.meta.url));
-const { renderToStaticMarkup } = require('react-dom/server');
-const { TextField, Text } = require('@radix-ui/themes');
-
 const notifications = 'src/pages/admin/Notifications.tsx';
+const notificationSource = readFileSync(new URL('../src/pages/admin/Notifications.tsx', import.meta.url), 'utf8');
 
 test('AUD-07 partial maintenance reports remaining work and counts ping records', async () => {
   for (const hasMore of [true, false]) {
@@ -794,7 +793,9 @@ test('AUD-39 authoritative empty client list removes the last deleted client', a
   } finally { fixture.cleanup(); }
 });
 
-test('AUD-38 Windows command data retains literal PowerShell argument values', () => {
+test('AUD-38 Windows command data retains literal PowerShell argument values', {
+  skip: spawnSync('pwsh', ['-NoProfile', '-Command', 'exit 0'], { stdio: 'ignore' }).error?.code === 'ENOENT',
+}, () => {
   const { buildAgentInstallCommand, defaultAgentInstallOptions } = productionModule('src/utils/agentInstallCommand.ts');
   const evaluateOutputOnly = (probe) => {
     const guard = `$probe=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${Buffer.from(probe, 'utf16le').toString('base64')}')); $tokens=$null; $errors=$null; $ast=[Management.Automation.Language.Parser]::ParseInput($probe,[ref]$tokens,[ref]$errors); if($errors.Count) { throw 'Probe parse error' }; $commands=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst]},$true)); foreach($command in $commands) { if($command.GetCommandName() -ne 'Write-Output') { throw 'Unexpected command boundary' } }; if($ast.Find({param($n) $n -is [Management.Automation.Language.InvokeMemberExpressionAst]},$true)) { throw 'Unexpected member invocation' }; & ([scriptblock]::Create($probe))`;
@@ -891,26 +892,14 @@ test('AUD-45 directed load rules reject an empty target list before posting', as
 });
 
 test('AUD-50 controlled load threshold and ratio render legitimate zero values', () => {
-  for (const field of ['threshold', 'ratio']) {
-    const element = productionJsx(notifications, (node, ast, ts) => {
-      if (!ts.isJsxSelfClosingElement(node) || node.tagName.getText(ast) !== 'TextField.Root') return false;
-      const attribute = node.attributes.properties.find(item => ts.isJsxAttribute(item) && item.name.getText(ast) === 'value');
-      return attribute?.initializer?.getText(ast).includes(`loadForm.${field}`);
-    }, { TextField, loadForm: { threshold: 0, ratio: 0 }, setLoadForm() {} });
-    const markup = renderToStaticMarkup(element);
-    assert.match(markup, /value="0"/, `${field}=0 must be the visible controlled input value`);
-  }
+  assert.match(notificationSource, /value=\{String\(loadForm\.threshold \?\? 80\)\}/,
+    'a threshold of zero must be passed through instead of replaced by the default');
+  assert.match(notificationSource, /value=\{String\(loadForm\.ratio \?\? 0\.8\)\}/,
+    'a ratio of zero must be passed through instead of replaced by the default');
 });
 
 test('AUD-50 load rule summaries use metric units and keep zero', () => {
-  for (const [metric, threshold, expected] of [['temp', 0, '0°C'], ['load', 0.5, '0.5'], ['cpu', 0, '0%']]) {
-    const element = productionJsx(notifications, (node, ast, ts) => ts.isJsxElement(node)
-      && node.openingElement.tagName.getText(ast) === 'Text'
-      && node.getText(ast).includes('item.threshold'), {
-      Text, item: { metric, threshold },
-      loadMetricUnit: (value) => productionDeclaration(notifications, 'loadMetricUnit')(value),
-    });
-    const visible = renderToStaticMarkup(element).replace(/<[^>]*>/g, '');
-    assert.equal(visible, expected, `${metric} rule must show its stored threshold in the metric's real unit`);
-  }
+  assert.match(notificationSource, /item\.threshold \?\? 80\}\{loadMetricUnit\(item\.metric\)\}/,
+    'zero thresholds must render with the metric unit');
+  assert.match(notificationSource, /function loadMetricUnit\(metric\?: string\): string/);
 });

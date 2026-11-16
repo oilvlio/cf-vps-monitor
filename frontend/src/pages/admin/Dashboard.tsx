@@ -21,12 +21,14 @@ import {
   Card as SaCard,
   Checkbox as SaCheckbox,
   ConfirmDialog,
+  Dialog as MinimalDialog,
+  FormInput,
   Segmented,
   StatGrid,
 } from '../../components/ui/minimal';
 import {
-  Flex, Text, Box, Button, TextField,
-  Dialog, Switch, Separator, TextArea, SegmentedControl, Select
+  Flex, Text, Box, Button,
+  Switch, Separator, Select
 } from '@radix-ui/themes';
 import {
   Plus, Pencil, Trash2, Copy, Search,
@@ -438,17 +440,15 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: Command
     });
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content className="admin-command-dialog" style={{ maxWidth: 680 }}>
-        <Dialog.Title>生成 CF VPS Monitor Agent 安装命令</Dialog.Title>
-        <Dialog.Description size="2" mb="2">节点: {client.name}</Dialog.Description>
-        <SegmentedControl.Root value={platform} onValueChange={(v) => setPlatform(v as AgentInstallPlatform)} style={{ marginBottom: 12 }}>
-          <SegmentedControl.Item value="unix">Unix 自动检测</SegmentedControl.Item>
-          <SegmentedControl.Item value="windows">Windows</SegmentedControl.Item>
-        </SegmentedControl.Root>
+    <MinimalDialog open={open} onOpenChange={onOpenChange} title="生成 CF VPS Monitor Agent 安装命令" description={`节点: ${client.name}`} size="xl" className="admin-command-dialog">
+        <Segmented
+          value={platform}
+          onChange={(value) => setPlatform(value as AgentInstallPlatform)}
+          options={[{ value: 'unix', label: 'Unix 自动检测' }, { value: 'windows', label: 'Windows' }]}
+        />
 
         <Flex className="admin-command-options-scroll" direction="column" gap="3">
-          <FieldInput label="连接地址" value={serverUrl} onChange={setServerUrl} placeholder={window.location.origin} />
+          <FormInput label="连接地址" value={serverUrl} onChange={setServerUrl} placeholder={window.location.origin} />
           <Text size="2" weight="bold">安装选项</Text>
           <div className="install-options-grid">
             <label>
@@ -462,17 +462,17 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: Command
                 </Select.Content>
               </Select.Root>
             </label>
-            <FieldInput label="GitHub 代理" value={installOptions.ghproxy} onChange={(v) => setOption('ghproxy', v)} placeholder="为空则不使用代理" />
-            <FieldInput label="下载代理" value={installOptions.downloadProxy} onChange={(v) => setOption('downloadProxy', v)} placeholder="例如 http://127.0.0.1:10808" />
-            <FieldInput label="安装目录" value={installOptions.dir} onChange={(v) => setOption('dir', v)} placeholder={platform === 'windows' ? 'C:\\Program Files\\CF VPS Monitor' : '自动选择系统目录或用户目录'} />
-            <FieldInput label="服务名称" value={installOptions.serviceName} onChange={(v) => setOption('serviceName', v)} placeholder={platform === 'windows' ? 'CFVpsMonitorAgent' : 'cf-vps-monitor-agent'} />
-            <FieldInput label="二进制下载地址" value={installOptions.binaryUrl || ''} onChange={(v) => setOption('binaryUrl', v)} placeholder="为空则自动下载预编译二进制" />
-            <FieldInput label="SHA256SUMS 地址" value={installOptions.checksumUrl || ''} onChange={(v) => setOption('checksumUrl', v)} placeholder="自定义二进制地址必须填写" />
-            <FieldInput label="Release Tag" value={installOptions.releaseTag || ''} onChange={(v) => setOption('releaseTag', v)} placeholder="为空则使用最新发布版" />
-            <FieldInput label="磁盘包含" value={installOptions.mountInclude} onChange={(v) => setOption('mountInclude', v)} placeholder="例如 /,/data,/dev/sd*" />
-            <FieldInput label="磁盘排除" value={installOptions.mountExclude} onChange={(v) => setOption('mountExclude', v)} placeholder="例如 /boot,tmpfs,/run" />
-            <FieldInput label="网卡包含" value={installOptions.nicInclude} onChange={(v) => setOption('nicInclude', v)} placeholder="例如 eth*,ens*" />
-            <FieldInput label="网卡排除" value={installOptions.nicExclude} onChange={(v) => setOption('nicExclude', v)} placeholder="例如 lo,docker*,veth*" />
+            <FormInput label="GitHub 代理" value={installOptions.ghproxy} onChange={(v) => setOption('ghproxy', v)} placeholder="为空则不使用代理" />
+            <FormInput label="下载代理" value={installOptions.downloadProxy} onChange={(v) => setOption('downloadProxy', v)} placeholder="例如 http://127.0.0.1:10808" />
+            <FormInput label="安装目录" value={installOptions.dir} onChange={(v) => setOption('dir', v)} placeholder={platform === 'windows' ? 'C:\\Program Files\\CF VPS Monitor' : '自动选择系统目录或用户目录'} />
+            <FormInput label="服务名称" value={installOptions.serviceName} onChange={(v) => setOption('serviceName', v)} placeholder={platform === 'windows' ? 'CFVpsMonitorAgent' : 'cf-vps-monitor-agent'} />
+            <FormInput label="二进制下载地址" value={installOptions.binaryUrl || ''} onChange={(v) => setOption('binaryUrl', v)} placeholder="为空则自动下载预编译二进制" />
+            <FormInput label="SHA256SUMS 地址" value={installOptions.checksumUrl || ''} onChange={(v) => setOption('checksumUrl', v)} placeholder="自定义二进制地址必须填写" />
+            <FormInput label="Release Tag" value={installOptions.releaseTag || ''} onChange={(v) => setOption('releaseTag', v)} placeholder="为空则使用最新发布版" />
+            <FormInput label="磁盘包含" value={installOptions.mountInclude} onChange={(v) => setOption('mountInclude', v)} placeholder="例如 /,/data,/dev/sd*" />
+            <FormInput label="磁盘排除" value={installOptions.mountExclude} onChange={(v) => setOption('mountExclude', v)} placeholder="例如 /boot,tmpfs,/run" />
+            <FormInput label="网卡包含" value={installOptions.nicInclude} onChange={(v) => setOption('nicInclude', v)} placeholder="例如 eth*,ens*" />
+            <FormInput label="网卡排除" value={installOptions.nicExclude} onChange={(v) => setOption('nicExclude', v)} placeholder="例如 lo,docker*,veth*" />
             <label>
               <Text size="2" weight="bold" style={{ display: 'block', marginBottom: 4 }}>GPU 采集</Text>
               <Select.Root value={installOptions.enableGpu ? 'on' : 'off'} onValueChange={(v) => setOption('enableGpu', v === 'on')}>
@@ -508,7 +508,7 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: Command
                   </Select.Root>
                 </label>
                 {installOptions.allowHostLoad && (
-                  <FieldInput label="宿主机核数" value={installOptions.hostCpuCores} onChange={(v) => setOption('hostCpuCores', v)} type="number" min={1} step={1} placeholder="填写后按容器核数折算，使负载色点反映宿主机利用率" />
+                  <FormInput label="宿主机核数" value={installOptions.hostCpuCores} onChange={(v) => setOption('hostCpuCores', v)} type="number" min={1} step={1} placeholder="填写后按容器核数折算，使负载色点反映宿主机利用率" />
                 )}
               </>
             )}
@@ -523,8 +523,7 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: Command
           <Button variant="soft" onClick={() => onOpenChange(false)}>关闭</Button>
           <Button onClick={() => copyToClipboard(cmd, '命令已复制')} disabled={loadingToken || !agentToken}><Copy size={14} /> 复制命令</Button>
         </Flex>
-      </Dialog.Content>
-    </Dialog.Root>
+    </MinimalDialog>
   );
 }
 
@@ -544,10 +543,7 @@ function DetailDialog({ client, open, onOpenChange }: { client: AdminClient; ope
   ];
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content className="admin-node-dialog" style={{ maxWidth: 600 }}>
-        <Dialog.Title>机器详细信息</Dialog.Title>
-        <Dialog.Description size="2" mb="3">{client.name}</Dialog.Description>
+    <MinimalDialog open={open} onOpenChange={onOpenChange} title="机器详细信息" description={client.name} size="lg">
         <Flex className="admin-node-detail-list" direction="column" gap="1">
           {fields.map(([label, value]) => (
             <div key={label} className="admin-node-detail-row">
@@ -563,54 +559,7 @@ function DetailDialog({ client, open, onOpenChange }: { client: AdminClient; ope
           ))}
         </Flex>
         <Flex justify="end" mt="3"><Button onClick={() => onOpenChange(false)}>完成</Button></Flex>
-      </Dialog.Content>
-    </Dialog.Root>
-  );
-}
-
-function FieldInput({
-  label,
-  value,
-  onChange,
-  textarea,
-  type,
-  placeholder,
-  helper,
-  min,
-  max,
-  step,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  textarea?: boolean;
-  type?: string;
-  placeholder?: string;
-  helper?: string;
-  min?: string | number;
-  max?: string | number;
-  step?: string | number;
-}) {
-  return (
-    <label>
-      <Text size="2" weight="bold" style={{ display: 'block', marginBottom: 4 }}>{label}</Text>
-      {textarea
-        ? <TextArea style={{ width: '100%' }} value={value} onChange={e => onChange(e.target.value)} rows={2} placeholder={placeholder} />
-        : (
-          <TextField.Root
-            style={{ width: '100%' }}
-            value={value}
-            onChange={e => onChange(e.target.value)}
-            type={(type || 'text') as never}
-            placeholder={placeholder}
-            min={min as never}
-            max={max as never}
-            step={step as never}
-          />
-        )
-      }
-      {helper && <Text size="1" color="gray" style={{ display: 'block', marginTop: 4 }}>{helper}</Text>}
-    </label>
+    </MinimalDialog>
   );
 }
 
@@ -675,21 +624,19 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
   };
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content aria-describedby={undefined} className="admin-node-dialog admin-node-edit-dialog" style={{ maxWidth: 640 }}>
-        <Dialog.Title>编辑服务器</Dialog.Title>
+    <MinimalDialog open={open} onOpenChange={onOpenChange} title="编辑服务器" size="lg" className="admin-node-dialog admin-node-edit-dialog">
         <div className="admin-node-dialog-scroll">
           <Flex className="admin-node-edit-form" direction="column" gap="3">
-            <FieldInput label="名称" value={String(form.name || '')} onChange={v => update('name', v)} />
-            <FieldInput label="私有备注" value={String(form.remark || '')} onChange={v => update('remark', v)} textarea />
-            <FieldInput label="公开备注" value={String(form.public_remark || '')} onChange={v => update('public_remark', v)} textarea />
-            <FieldInput label="分组" value={String(form.group || '')} onChange={v => update('group', v)} />
-            <FieldInput label="标签 (分号分隔)" value={String(form.tags || '')} onChange={v => update('tags', v)} />
+            <FormInput label="名称" value={String(form.name || '')} onChange={v => update('name', v)} />
+            <FormInput label="私有备注" value={String(form.remark || '')} onChange={v => update('remark', v)} textarea />
+            <FormInput label="公开备注" value={String(form.public_remark || '')} onChange={v => update('public_remark', v)} textarea />
+            <FormInput label="分组" value={String(form.group || '')} onChange={v => update('group', v)} />
+            <FormInput label="标签 (分号分隔)" value={String(form.tags || '')} onChange={v => update('tags', v)} />
             <Separator size="4" />
             <Text size="2" weight="bold">计费信息</Text>
             <div className="billing-price-grid">
               <Box>
-                <FieldInput
+                <FormInput
                   label="价格"
                   value={String(form.price ?? 0)}
                   onChange={v => update('price', v)}
@@ -699,7 +646,7 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
                 />
               </Box>
               <Box>
-                <FieldInput label="货币" value={String(form.currency || '¥')} onChange={v => update('currency', v)} />
+                <FormInput label="货币" value={String(form.currency || '¥')} onChange={v => update('currency', v)} />
               </Box>
               <Text className="billing-price-helper" size="1" color="gray">
                 0 不显示，-1 表示免费
@@ -719,7 +666,7 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
               onChange={(value) => update('traffic_limit_form', value)}
             />
             <Box>
-              <FieldInput
+              <FormInput
                 label="流量重置日"
                 value={String(form.traffic_reset_day ?? 1)}
                 onChange={v => update('traffic_reset_day', v)}
@@ -752,8 +699,7 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
           <Button variant="soft" onClick={() => onOpenChange(false)}>取消</Button>
           <Button onClick={handleSave} disabled={saving}>{saving ? '保存中...' : '保存'}</Button>
         </Flex>
-      </Dialog.Content>
-    </Dialog.Root>
+    </MinimalDialog>
   );
 }
 
@@ -793,19 +739,13 @@ function AddDialog({ open, onOpenChange, onSaved }: { open: boolean; onOpenChang
   };
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 420 }}>
-        <Dialog.Title>添加服务器</Dialog.Title>
-        <Flex direction="column" gap="3" mt="2">
-          <FieldInput label="服务器名称" value={name} onChange={setName} placeholder="可选，创建后可修改" />
+    <MinimalDialog open={open} onOpenChange={onOpenChange} title="添加服务器" size="sm"
+      footer={<><SaButton variant="outline" onClick={() => onOpenChange(false)}>取消</SaButton><SaButton onClick={handleAdd} disabled={loading}>{loading ? '创建中...' : '创建'}</SaButton></>}>
+        <Flex direction="column" gap="3">
+          <FormInput label="服务器名称" value={name} onChange={setName} placeholder="可选，创建后可修改" />
           <Text size="1" color="gray">创建后将生成 Token，用于 Agent 连接</Text>
         </Flex>
-        <Flex gap="3" justify="end" mt="4">
-          <Button variant="soft" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={handleAdd} disabled={loading}>{loading ? '创建中...' : '创建'}</Button>
-        </Flex>
-      </Dialog.Content>
-    </Dialog.Root>
+    </MinimalDialog>
   );
 }
 
@@ -830,18 +770,17 @@ function DeleteDialog({ client, open, onOpenChange, onDeleted }: { client: Admin
     }
   };
 
-  return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 400 }}>
-        <Dialog.Title>确认删除</Dialog.Title>
-        <Text size="2">确定要删除服务器 <strong>{client?.name}</strong> 吗？此操作不可撤销。</Text>
-        <Flex gap="3" justify="end" mt="4">
-          <Button variant="soft" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button color="red" onClick={handleDelete} disabled={deleting}>{deleting ? '删除中...' : '确认删除'}</Button>
-        </Flex>
-      </Dialog.Content>
-    </Dialog.Root>
-  );
+  return <ConfirmDialog
+    open={open}
+    onOpenChange={onOpenChange}
+    title="确认删除"
+    description={<>确定要删除服务器 <strong>{client?.name}</strong> 吗？此操作不可撤销。</>}
+    confirmLabel={deleting ? '删除中...' : '确认删除'}
+    destructive
+    keepOpenOnConfirm
+    confirmDisabled={deleting}
+    onConfirm={handleDelete}
+  />;
 }
 
 function RotateTokenDialog({ client, open, onOpenChange, onRotated }: { client: AdminClient | null; open: boolean; onOpenChange: (v: boolean) => void; onRotated: (token?: string) => void }) {
@@ -870,21 +809,17 @@ function RotateTokenDialog({ client, open, onOpenChange, onRotated }: { client: 
     }
   };
 
-  return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 420 }}>
-        <Dialog.Title>重置 Agent Token</Dialog.Title>
-        <Flex direction="column" gap="2">
-          <Text size="2">确定要重置 <strong>{client?.name}</strong> 的 Agent Token 吗？</Text>
-          <Text size="2" color="gray">旧 Agent 会立刻无法继续上报，需要用新的安装命令或配置重新启动。</Text>
-        </Flex>
-        <Flex gap="3" justify="end" mt="4">
-          <Button variant="soft" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button color="red" onClick={handleRotate} disabled={rotating}>{rotating ? '重置中...' : '确认重置'}</Button>
-        </Flex>
-      </Dialog.Content>
-    </Dialog.Root>
-  );
+  return <ConfirmDialog
+    open={open}
+    onOpenChange={onOpenChange}
+    title="重置 Agent Token"
+    description={<><p>确定要重置 <strong>{client?.name}</strong> 的 Agent Token 吗？</p><p>旧 Agent 会立刻无法继续上报，需要用新的安装命令或配置重新启动。</p></>}
+    confirmLabel={rotating ? '重置中...' : '确认重置'}
+    destructive
+    keepOpenOnConfirm
+    confirmDisabled={rotating}
+    onConfirm={handleRotate}
+  />;
 }
 
 export default function AdminDashboard() {

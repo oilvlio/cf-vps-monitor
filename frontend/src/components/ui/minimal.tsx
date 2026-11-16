@@ -1,11 +1,12 @@
 /**
- * 极简后台基础组件，API 与视觉对齐 shadcn-admin（Button / Card / Input / Switch / AlertDialog）。
+ * 极简后台基础组件，API 与视觉对齐 shadcn-admin
+ * （Button / Card / Input / Switch / AlertDialog / Dialog）。
  * 样式见 styles/minimal-admin.css；没有引入 Tailwind，避免与 Radix Themes 的 CSS 变量冲突。
  * 后续迁移其他后台页面时直接复用这里的组件。
  */
 import React, { useId, useState } from 'react';
-import { Info } from 'lucide-react';
-import { AlertDialog, Switch as SwitchPrimitive, Tooltip } from 'radix-ui';
+import { Info, X } from 'lucide-react';
+import { AlertDialog, Dialog as DialogPrimitive, Switch as SwitchPrimitive, Tooltip } from 'radix-ui';
 
 function cx(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(' ');
@@ -81,14 +82,15 @@ interface FieldProps {
   aside?: string;
   value: string;
   onChange: (value: string) => void;
-  type?: 'text' | 'number';
+  type?: 'text' | 'number' | 'password';
   placeholder?: string;
   /** 输入框内右侧的单位，例如「秒」。仅作视觉提示，不参与无障碍名称。 */
   suffix?: string;
   disabled?: boolean;
+  autoComplete?: string;
 }
 
-export function Field({ label, hint, aside, value, onChange, type = 'text', placeholder, suffix, disabled }: FieldProps) {
+export function Field({ label, hint, aside, value, onChange, type = 'text', placeholder, suffix, disabled, autoComplete }: FieldProps) {
   const id = useId();
   const hintId = `${id}-hint`;
   return (
@@ -108,6 +110,7 @@ export function Field({ label, hint, aside, value, onChange, type = 'text', plac
             value={value}
             placeholder={placeholder}
             disabled={disabled}
+            autoComplete={autoComplete}
             aria-describedby={hint ? hintId : undefined}
             onChange={(event) => onChange(event.target.value)}
           />
@@ -120,14 +123,69 @@ export function Field({ label, hint, aside, value, onChange, type = 'text', plac
 }
 
 /* ========== Switch 行 ========== */
-interface SwitchRowProps {
+export function Switch({
+  checked,
+  onCheckedChange,
+  disabled,
+  id,
+  'aria-label': ariaLabel,
+  'aria-describedby': ariaDescribedBy,
+}: {
+  checked: boolean;
+  onCheckedChange: (checked: boolean) => void;
+  disabled?: boolean;
+  id?: string;
+  'aria-label'?: string;
+  'aria-describedby'?: string;
+}) {
+  return (
+    <SwitchPrimitive.Root
+      id={id}
+      className="sa-switch"
+      checked={checked}
+      disabled={disabled}
+      aria-label={ariaLabel}
+      aria-describedby={ariaDescribedBy}
+      onCheckedChange={onCheckedChange}
+    >
+      <SwitchPrimitive.Thumb className="sa-switch-thumb" />
+    </SwitchPrimitive.Root>
+  );
+}
+
+/** 弹窗里的开关字段：标签在上，开关在下方（带状态文字）。 */
+export function FormSwitch({
+  label,
+  hint,
+  checked,
+  onCheckedChange,
+  disabled,
+}: {
+  label: string;
+  hint?: string;
+  checked: boolean;
+  onCheckedChange: (checked: boolean) => void;
+  disabled?: boolean;
+}) {
+  const id = useId();
+  return (
+    <div className="sa-scope sa-form-field">
+      <label htmlFor={id} className="sa-form-label">{label}</label>
+      <div className="sa-control">
+        <Switch id={id} checked={checked} onCheckedChange={onCheckedChange} disabled={disabled} />
+        <span className="sa-muted">{checked ? '已开启' : '已关闭'}</span>
+      </div>
+      {hint && <span className="sa-form-hint">{hint}</span>}
+    </div>
+  );
+}
+
+export function SwitchRow({ label, description, checked, onCheckedChange }: {
   label: string;
   description?: string;
   checked: boolean;
   onCheckedChange: (checked: boolean) => void;
-}
-
-export function SwitchRow({ label, description, checked, onCheckedChange }: SwitchRowProps) {
+}) {
   const id = useId();
   return (
     <div className="sa-scope sa-row">
@@ -135,15 +193,12 @@ export function SwitchRow({ label, description, checked, onCheckedChange }: Swit
         <label htmlFor={id} className="sa-label">{label}</label>
         {description && <InfoTip text={description} />}
       </div>
-      <SwitchPrimitive.Root
+      <Switch
         id={id}
-        className="sa-switch"
         checked={checked}
         onCheckedChange={onCheckedChange}
         aria-describedby={description ? `${id}-description` : undefined}
-      >
-        <SwitchPrimitive.Thumb className="sa-switch-thumb" />
-      </SwitchPrimitive.Root>
+      />
       {description && <span id={`${id}-description`} className="sa-sr-only">{description}</span>}
     </div>
   );
@@ -211,8 +266,244 @@ export function Checkbox({
 }
 
 /* ========== Badge ========== */
-export function Badge({ variant = 'secondary', className, ...props }: React.HTMLAttributes<HTMLSpanElement> & { variant?: 'secondary' | 'outline' | 'warning' }) {
+export function Badge({ variant = 'secondary', className, ...props }: React.HTMLAttributes<HTMLSpanElement> & { variant?: 'secondary' | 'outline' | 'warning' | 'success' | 'danger' | 'info' }) {
   return <span className={cx('sa-scope sa-badge', `sa-badge-${variant}`, className)} {...props} />;
+}
+
+/* ========== Notice（行内提示条） ========== */
+export function Notice({
+  tone = 'default',
+  title,
+  children,
+}: {
+  tone?: 'default' | 'warning' | 'success';
+  title?: string;
+  children?: React.ReactNode;
+}) {
+  return (
+    <div className={cx('sa-scope sa-notice', tone !== 'default' && `sa-notice-${tone}`)}>
+      {title && <strong>{title}</strong>}
+      {children && <span>{children}</span>}
+    </div>
+  );
+}
+
+/* ========== SelectField（一行：标签 + ⓘ + 原生下拉） ========== */
+export function SelectField<T extends string>({
+  label,
+  hint,
+  value,
+  onChange,
+  options,
+  width = 300,
+  disabled,
+}: {
+  label: string;
+  hint?: string;
+  value: T;
+  onChange: (value: T) => void;
+  options: Array<{ value: T; label: string }>;
+  width?: number | string;
+  disabled?: boolean;
+}) {
+  const id = useId();
+  const hintId = `${id}-hint`;
+  return (
+    <div className="sa-scope sa-row">
+      <div className="sa-row-label">
+        <label htmlFor={id} className="sa-label">{label}</label>
+        {hint && <InfoTip text={hint} />}
+      </div>
+      <div className="sa-control">
+        <select
+          id={id}
+          className="sa-input sa-select"
+          style={{ width }}
+          value={value}
+          disabled={disabled}
+          aria-describedby={hint ? hintId : undefined}
+          onChange={(event) => onChange(event.target.value as T)}
+        >
+          {options.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+      </div>
+      {hint && <span id={hintId} className="sa-sr-only">{hint}</span>}
+    </div>
+  );
+}
+
+/* ========== FormInput（弹窗里的字段：标签在上，输入框占满整行） ========== */
+interface FormInputProps {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  type?: 'text' | 'number' | 'password' | 'email' | 'tel' | 'url' | 'date';
+  placeholder?: string;
+  /** 常驻输入框下方的说明文字（弹窗里不隐藏，便于边填边看）。 */
+  hint?: string;
+  autoComplete?: string;
+  disabled?: boolean;
+  required?: boolean;
+  spellCheck?: boolean;
+  min?: string | number;
+  max?: string | number;
+  step?: string | number;
+  textarea?: boolean;
+  rows?: number;
+  inputMode?: 'text' | 'numeric' | 'decimal' | 'none' | 'tel' | 'search' | 'email' | 'url';
+}
+
+export function FormInput({
+  label,
+  value,
+  onChange,
+  type = 'text',
+  placeholder,
+  hint,
+  autoComplete,
+  disabled,
+  required,
+  spellCheck,
+  min,
+  max,
+  step,
+  textarea,
+  rows = 3,
+  inputMode,
+}: FormInputProps) {
+  const id = useId();
+  const hintId = `${id}-hint`;
+  return (
+    <label className="sa-scope sa-form-field" htmlFor={id}>
+      <span className="sa-form-label">{label}</span>
+      {textarea ? (
+        <textarea
+          id={id}
+          className="sa-input sa-textarea"
+          value={value}
+          rows={rows}
+          placeholder={placeholder}
+          disabled={disabled}
+          required={required}
+          aria-describedby={hint ? hintId : undefined}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      ) : (
+        <input
+          id={id}
+          className="sa-input"
+          type={type}
+          value={value}
+          placeholder={placeholder}
+          autoComplete={autoComplete}
+          disabled={disabled}
+          required={required}
+          spellCheck={spellCheck}
+          min={min}
+          max={max}
+          step={step}
+          inputMode={inputMode}
+          aria-describedby={hint ? hintId : undefined}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      )}
+      {hint && <span id={hintId} className="sa-form-hint">{hint}</span>}
+    </label>
+  );
+}
+
+/* ========== FormSelect（弹窗里的下拉：标签在上，下拉占满整行） ========== */
+export function FormSelect<T extends string>({
+  label,
+  hint,
+  value,
+  onChange,
+  options,
+  disabled,
+}: {
+  label: string;
+  hint?: string;
+  value: T;
+  onChange: (value: T) => void;
+  options: Array<{ value: T; label: string }>;
+  disabled?: boolean;
+}) {
+  const id = useId();
+  const hintId = `${id}-hint`;
+  return (
+    <label className="sa-scope sa-form-field" htmlFor={id}>
+      <span className="sa-form-label">{label}</span>
+      <select
+        id={id}
+        className="sa-input sa-select"
+        style={{ width: '100%' }}
+        value={value}
+        disabled={disabled}
+        aria-describedby={hint ? hintId : undefined}
+        onChange={(event) => onChange(event.target.value as T)}
+      >
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>{option.label}</option>
+        ))}
+      </select>
+      {hint && <span id={hintId} className="sa-form-hint">{hint}</span>}
+    </label>
+  );
+}
+
+/* ========== Dialog（通用弹窗：标题 / 可滚动内容 / 底部按钮） ========== */
+export type DialogSize = 'sm' | 'md' | 'lg' | 'xl';
+
+export function Dialog({
+  open,
+  onOpenChange,
+  title,
+  description,
+  size = 'md',
+  children,
+  footer,
+  className,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  title: React.ReactNode;
+  description?: React.ReactNode;
+  size?: DialogSize;
+  children?: React.ReactNode;
+  footer?: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
+      <DialogPrimitive.Portal>
+        <DialogPrimitive.Overlay className="sa-scope sa-overlay" />
+        <DialogPrimitive.Content
+          className={cx('sa-scope sa-modal', `sa-modal-${size}`, className)}
+          aria-describedby={undefined}
+        >
+          <header className="sa-modal-header">
+            <div className="sa-modal-heading">
+              <DialogPrimitive.Title className="sa-modal-title">{title}</DialogPrimitive.Title>
+              {description && (
+                <DialogPrimitive.Description className="sa-modal-description">
+                  {description}
+                </DialogPrimitive.Description>
+              )}
+            </div>
+            <DialogPrimitive.Close asChild>
+              <button type="button" className="sa-modal-close" aria-label="关闭">
+                <X size={16} aria-hidden="true" />
+              </button>
+            </DialogPrimitive.Close>
+          </header>
+          {children && <div className="sa-modal-body">{children}</div>}
+          {footer && <div className="sa-modal-footer">{footer}</div>}
+        </DialogPrimitive.Content>
+      </DialogPrimitive.Portal>
+    </DialogPrimitive.Root>
+  );
 }
 
 /* ========== 确认弹窗 ========== */

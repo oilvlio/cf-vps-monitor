@@ -1,18 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
-  Badge,
-  Box,
-  Button,
-  Callout,
-  Card,
-  Dialog,
-  Flex,
-  Heading,
-  Tabs,
-  Text,
-  TextField,
-} from '@radix-ui/themes';
-import {
   Copy,
   Download,
   KeyRound,
@@ -27,6 +14,19 @@ import QRCode from 'qrcode';
 import { toast } from 'sonner';
 import { useApi, useAuth } from '../../contexts/AuthContext';
 import { downloadRecoveryCodes, formatRecoveryCodesText, normalizeMfaCode, requestMfaStepUp } from '../../utils/mfa';
+import {
+  Badge,
+  Button,
+  Card,
+  CardHeader,
+  ConfirmDialog,
+  Dialog,
+  Field,
+  FormInput,
+  Notice,
+  Rows,
+  Segmented,
+} from '../../components/ui/minimal';
 
 type AccountTab = 'username' | 'password' | 'security';
 
@@ -218,142 +218,199 @@ export default function AdminAccount() {
     toast.success('恢复码已复制');
   };
 
-  return (
-    <div className="admin-account-page">
-      <Flex className="admin-parent-title-row" justify="between" align="center" mb="3">
-        <Flex align="center" gap="2"><User size={20} /><Heading size="5">账户设置</Heading></Flex>
-      </Flex>
+  const usernameChanged = username.trim() !== (user?.username || '');
 
-      <Flex className="admin-subnav-action-row" justify="between" align="center" wrap="wrap" gap="3" mb="3">
-        <Tabs.Root value={activeTab} onValueChange={(value) => setActiveTab(value as AccountTab)}>
-          <Tabs.List className="admin-subnav-row">
-            <Tabs.Trigger value="username">更改用户名</Tabs.Trigger>
-            <Tabs.Trigger value="password">更改密码</Tabs.Trigger>
-            <Tabs.Trigger value="security">身份验证</Tabs.Trigger>
-          </Tabs.List>
-        </Tabs.Root>
-      </Flex>
+  return (
+    <div className="sa-scope sa-page sa-page-narrow">
+      <div className="admin-parent-title-row">
+        <div className="sa-page-title">
+          <User size={20} />
+          <span>账户设置</span>
+        </div>
+      </div>
+
+      <div className="sa-page-actions">
+        <Segmented
+          label="账户设置分类"
+          value={activeTab}
+          onChange={setActiveTab}
+          options={[
+            { value: 'username', label: '更改用户名' },
+            { value: 'password', label: '更改密码' },
+            { value: 'security', label: '身份验证' },
+          ]}
+        />
+      </div>
 
       {activeTab === 'username' && (
-        <Card className="admin-account-card">
-          <Heading size="3" mb="3">更改用户名</Heading>
-          <Flex direction="column" gap="3">
-            <label>
-              <Text size="2" weight="bold">用户名</Text>
-              <TextField.Root className="admin-account-input" value={username} autoComplete="username" spellCheck={false} onChange={e => setUsername(e.target.value)} />
-            </label>
-            <Button variant="soft" onClick={handleChangeUsername} disabled={savingUsername || username.trim() === (user?.username || '')}>
-              <Save size={16} />{savingUsername ? '保存中...' : '修改用户名'}
+        <Card>
+          <CardHeader title="更改用户名" description="用于登录后台的用户名。" />
+          <Rows>
+            <Field label="用户名" value={username} onChange={setUsername} autoComplete="username" />
+          </Rows>
+          <div className="sa-form-actions">
+            <Button onClick={handleChangeUsername} disabled={savingUsername || !usernameChanged}>
+              <Save size={16} /> {savingUsername ? '保存中…' : '修改用户名'}
             </Button>
-          </Flex>
+          </div>
         </Card>
       )}
 
       {activeTab === 'password' && (
-        <Card className="admin-account-card">
-          <Heading size="3" mb="3">更改密码</Heading>
-          <Flex direction="column" gap="3">
-            <label><Text size="2" weight="bold">旧密码</Text><TextField.Root className="admin-account-input" type="password" value={oldPassword} autoComplete="current-password" onChange={e => setOldPassword(e.target.value)} /></label>
-            <label><Text size="2" weight="bold">新密码</Text><TextField.Root className="admin-account-input" type="password" value={newPassword} autoComplete="new-password" onChange={e => setNewPassword(e.target.value)} /></label>
-            <label><Text size="2" weight="bold">确认新密码</Text><TextField.Root className="admin-account-input" type="password" value={confirmPassword} autoComplete="new-password" onChange={e => setConfirmPassword(e.target.value)} /></label>
-            <Button onClick={handleChangePassword} disabled={saving}><Save size={16} />{saving ? '保存中...' : '修改密码'}</Button>
-          </Flex>
+        <Card>
+          <CardHeader title="更改密码" description="修改后需使用新密码重新登录。" />
+          <Rows>
+            <Field label="旧密码" type="password" value={oldPassword} onChange={setOldPassword} autoComplete="current-password" />
+            <Field label="新密码" type="password" value={newPassword} onChange={setNewPassword} autoComplete="new-password" hint="至少 6 位字符。" />
+            <Field label="确认新密码" type="password" value={confirmPassword} onChange={setConfirmPassword} autoComplete="new-password" />
+          </Rows>
+          <div className="sa-form-actions">
+            <Button onClick={handleChangePassword} disabled={saving}>
+              <Save size={16} /> {saving ? '保存中…' : '修改密码'}
+            </Button>
+          </div>
         </Card>
       )}
 
       {activeTab === 'security' && (
-        <Card className="admin-account-card admin-account-security-card">
-          <Flex justify="between" align="center" gap="3" mb="4" wrap="wrap">
-            <Box>
-              <Heading size="3">TOTP 双重身份验证</Heading>
-              <Text size="2" color="gray">兼容 Google Authenticator、Microsoft Authenticator、1Password 等验证器。</Text>
-            </Box>
-            <Badge color={mfaStatus?.enabled ? 'green' : 'gray'} size="2">
-              {mfaStatus?.enabled ? '已启用' : '未启用'}
-            </Badge>
-          </Flex>
-
-          {!mfaStatus ? (
-            <Text color="gray">正在读取状态...</Text>
-          ) : mfaStatus.enabled && !setup ? (
-            <Flex direction="column" gap="4">
-              <Callout.Root color="green"><Callout.Icon><ShieldCheck size={18} /></Callout.Icon><Callout.Text>账户已受双重身份验证保护，敏感操作确认在通过后 5 分钟内有效。</Callout.Text></Callout.Root>
-              <Box className="mfa-status-grid">
-                <Text size="2" color="gray">启用时间</Text><Text size="2">{mfaStatus.enabled_at ? new Date(mfaStatus.enabled_at).toLocaleString() : '-'}</Text>
-                <Text size="2" color="gray">剩余恢复码</Text><Text size="2">{mfaStatus.recovery_codes_remaining} 个</Text>
-              </Box>
-              <Flex gap="2" wrap="wrap">
-                <Button variant="soft" onClick={() => setShowRebind((value) => !value)} disabled={mfaLoading}><QrCode size={16} />重新绑定验证器</Button>
-                <Button variant="soft" onClick={() => void regenerateRecoveryCodes()} disabled={mfaLoading}><RefreshCw size={16} />重新生成恢复码</Button>
-                <Button color="red" variant="soft" onClick={() => setDisableDialogOpen(true)} disabled={mfaLoading}><ShieldOff size={16} />关闭双重验证</Button>
-              </Flex>
-              {showRebind && (
-                <Box className="mfa-rebind-panel">
-                  <Text size="2" weight="bold">重新绑定验证器</Text>
-                  <Text size="2" color="gray">输入当前密码后生成新密钥；完成绑定前，现有验证器继续有效。</Text>
-                  <Flex gap="2" mt="2" wrap="wrap">
-                    <TextField.Root className="mfa-password-input" type="password" value={setupPassword} autoComplete="current-password" placeholder="当前密码" onChange={e => setSetupPassword(e.target.value)} />
-                    <Button onClick={() => void startMfaSetup()} disabled={mfaLoading || !setupPassword}><KeyRound size={16} />开始重新绑定</Button>
-                  </Flex>
-                </Box>
-              )}
-            </Flex>
-          ) : setup ? (
-            <Flex direction="column" gap="4">
-              <Callout.Root color="amber"><Callout.Icon><QrCode size={18} /></Callout.Icon><Callout.Text>扫描二维码后输入当前动态验证码。验证成功前不会替换现有配置。</Callout.Text></Callout.Root>
-              <Flex className="mfa-setup-layout" gap="4" align="start">
-                <Box className="mfa-qr-box">{qrDataUrl ? <img src={qrDataUrl} alt="TOTP 二维码" /> : <Text color="gray">正在生成二维码...</Text>}</Box>
-                <Flex direction="column" gap="3" className="mfa-setup-fields">
-                  <Box><Text size="2" weight="bold">无法扫码时手动输入</Text><code className="mfa-secret-code">{setup.secret}</code></Box>
-                  <label><Text size="2" weight="bold">6 位动态验证码</Text><TextField.Root className="admin-account-input" value={setupCode} inputMode="numeric" autoComplete="one-time-code" placeholder="000000" onChange={e => setSetupCode(e.target.value)} /></label>
-                  <Flex gap="2" wrap="wrap">
-                    <Button onClick={() => void enableMfa()} disabled={mfaLoading}><ShieldCheck size={16} />{mfaLoading ? '验证中...' : '确认启用'}</Button>
-                    <Button variant="soft" color="gray" onClick={() => { setSetup(null); setSetupCode(''); }} disabled={mfaLoading}>取消</Button>
-                  </Flex>
-                </Flex>
-              </Flex>
-            </Flex>
-          ) : (
-            <Flex direction="column" gap="4">
-              <Callout.Root><Callout.Icon><ShieldCheck size={18} /></Callout.Icon><Callout.Text>启用后，登录后台及执行敏感操作时需要动态验证码或恢复码。</Callout.Text></Callout.Root>
-              <label><Text size="2" weight="bold">当前密码</Text><TextField.Root className="admin-account-input" type="password" value={setupPassword} autoComplete="current-password" placeholder="验证当前密码后开始绑定" onChange={e => setSetupPassword(e.target.value)} /></label>
-              <Button onClick={() => void startMfaSetup()} disabled={mfaLoading || !setupPassword}><QrCode size={16} />{mfaLoading ? '处理中...' : '开始设置'}</Button>
-            </Flex>
-          )}
+        <Card>
+          <CardHeader
+            title="TOTP 双重身份验证"
+            description="兼容 Google Authenticator、Microsoft Authenticator、1Password 等验证器。"
+            action={<Badge variant={mfaStatus?.enabled ? 'success' : 'secondary'}>{mfaStatus?.enabled ? '已启用' : '未启用'}</Badge>}
+          />
+          <div className="sa-card-body sa-mfa-body">
+            {!mfaStatus ? (
+              <p className="sa-muted" style={{ margin: 0 }}>正在读取状态…</p>
+            ) : mfaStatus.enabled && !setup ? (
+              <>
+                <Notice tone="success" title="双重身份验证已开启">
+                  账户已受双重身份验证保护，敏感操作确认在通过后 5 分钟内有效。
+                </Notice>
+                <dl className="sa-mfa-status">
+                  <dt>启用时间</dt>
+                  <dd>{mfaStatus.enabled_at ? new Date(mfaStatus.enabled_at).toLocaleString() : '-'}</dd>
+                  <dt>剩余恢复码</dt>
+                  <dd>{mfaStatus.recovery_codes_remaining} 个</dd>
+                </dl>
+                <div className="sa-toolbar-group">
+                  <Button variant="outline" onClick={() => setShowRebind((value) => !value)} disabled={mfaLoading}>
+                    <QrCode size={16} /> 重新绑定验证器
+                  </Button>
+                  <Button variant="outline" onClick={() => void regenerateRecoveryCodes()} disabled={mfaLoading}>
+                    <RefreshCw size={16} /> 重新生成恢复码
+                  </Button>
+                  <Button variant="destructive" onClick={() => setDisableDialogOpen(true)} disabled={mfaLoading}>
+                    <ShieldOff size={16} /> 关闭双重验证
+                  </Button>
+                </div>
+                {showRebind && (
+                  <div className="sa-mfa-rebind">
+                    <div className="sa-form-label">重新绑定验证器</div>
+                    <p className="sa-form-hint" style={{ marginTop: 2 }}>输入当前密码后生成新密钥；完成绑定前，现有验证器继续有效。</p>
+                    <FormInput
+                      label="当前密码"
+                      type="password"
+                      value={setupPassword}
+                      onChange={setSetupPassword}
+                      autoComplete="current-password"
+                    />
+                    <div className="sa-form-actions">
+                      <Button onClick={() => void startMfaSetup()} disabled={mfaLoading || !setupPassword}>
+                        <KeyRound size={16} /> 开始重新绑定
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : setup ? (
+              <>
+                <Notice tone="warning" title="请扫描二维码">
+                  扫描二维码后输入当前动态验证码。验证成功前不会替换现有配置。
+                </Notice>
+                <div className="sa-mfa-layout">
+                  <div className="sa-qr-box">
+                    {qrDataUrl ? <img src={qrDataUrl} alt="TOTP 二维码" /> : <span className="sa-muted">正在生成二维码…</span>}
+                  </div>
+                  <div className="sa-mfa-fields">
+                    <div>
+                      <div className="sa-form-label">无法扫码时手动输入</div>
+                      <code className="sa-secret">{setup.secret}</code>
+                    </div>
+                    <FormInput
+                      label="6 位动态验证码"
+                      value={setupCode}
+                      onChange={setSetupCode}
+                      placeholder="000000"
+                      autoComplete="one-time-code"
+                    />
+                    <div className="sa-toolbar-group">
+                      <Button onClick={() => void enableMfa()} disabled={mfaLoading}>
+                        <ShieldCheck size={16} /> {mfaLoading ? '验证中…' : '确认启用'}
+                      </Button>
+                      <Button variant="outline" onClick={() => { setSetup(null); setSetupCode(''); }} disabled={mfaLoading}>
+                        取消
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <Notice title="启用双重身份验证">
+                  启用后，登录后台及执行敏感操作时需要动态验证码或恢复码。
+                </Notice>
+                <FormInput
+                  label="当前密码"
+                  type="password"
+                  value={setupPassword}
+                  onChange={setSetupPassword}
+                  autoComplete="current-password"
+                  placeholder="验证当前密码后开始绑定"
+                />
+                <div className="sa-form-actions">
+                  <Button onClick={() => void startMfaSetup()} disabled={mfaLoading || !setupPassword}>
+                    <QrCode size={16} /> {mfaLoading ? '处理中…' : '开始设置'}
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
         </Card>
       )}
 
-      <Dialog.Root open={disableDialogOpen} onOpenChange={(open) => { if (!mfaLoading) setDisableDialogOpen(open); }}>
-        <Dialog.Content style={{ maxWidth: 440 }}>
-          <Dialog.Title>
-            <Flex align="center" gap="2"><ShieldOff size={20} />确认关闭双重身份验证</Flex>
-          </Dialog.Title>
-          <Dialog.Description size="2" color="gray">
-            关闭后，登录和敏感操作将不再需要动态验证码，现有恢复码也会立即失效。
-          </Dialog.Description>
-          <Flex justify="end" gap="2" mt="4">
-            <Button variant="soft" color="gray" disabled={mfaLoading} onClick={() => setDisableDialogOpen(false)}>取消</Button>
-            <Button color="red" disabled={mfaLoading} onClick={() => void disableMfa()}>
-              <ShieldOff size={16} />{mfaLoading ? '关闭中...' : '确认关闭'}
-            </Button>
-          </Flex>
-        </Dialog.Content>
-      </Dialog.Root>
+      <ConfirmDialog
+        open={disableDialogOpen}
+        onOpenChange={(open) => { if (!mfaLoading) setDisableDialogOpen(open); }}
+        title="确认关闭双重身份验证"
+        description="关闭后，登录和敏感操作将不再需要动态验证码，现有恢复码也会立即失效。"
+        confirmLabel="确认关闭"
+        destructive
+        keepOpenOnConfirm
+        confirmDisabled={mfaLoading}
+        onConfirm={() => { void disableMfa(); }}
+      />
 
-      <Dialog.Root open={recoveryCodes.length > 0} onOpenChange={(open) => { if (!open) setRecoveryCodes([]); }}>
-        <Dialog.Content className="mfa-recovery-dialog" style={{ maxWidth: 520 }}>
-          <Dialog.Title>保存恢复码</Dialog.Title>
-          <Dialog.Description color="red" mb="3">恢复码只显示这一次。每个恢复码只能使用一次，请离线安全保存。</Dialog.Description>
-          <div className="mfa-recovery-code-grid">
-            {recoveryCodes.map((code) => <code key={code}>{code}</code>)}
-          </div>
-          <Flex justify="end" gap="2" mt="4" wrap="wrap">
-            <Button variant="soft" onClick={() => void copyRecoveryCodes()}><Copy size={16} />复制</Button>
-            <Button variant="soft" onClick={() => downloadRecoveryCodes(recoveryCodes, user?.username || 'admin')}><Download size={16} />下载文本</Button>
+      <Dialog
+        open={recoveryCodes.length > 0}
+        onOpenChange={(open) => { if (!open) setRecoveryCodes([]); }}
+        size="md"
+        title="保存恢复码"
+        description="恢复码只显示这一次。每个恢复码只能使用一次，请离线安全保存。"
+        footer={(
+          <>
+            <Button variant="outline" onClick={() => void copyRecoveryCodes()}><Copy size={16} /> 复制</Button>
+            <Button variant="outline" onClick={() => downloadRecoveryCodes(recoveryCodes, user?.username || 'admin')}>
+              <Download size={16} /> 下载文本
+            </Button>
             <Button onClick={() => setRecoveryCodes([])}>我已保存</Button>
-          </Flex>
-        </Dialog.Content>
-      </Dialog.Root>
+          </>
+        )}
+      >
+        <div className="sa-recovery-grid">
+          {recoveryCodes.map((code) => <code key={code}>{code}</code>)}
+        </div>
+      </Dialog>
     </div>
   );
 }

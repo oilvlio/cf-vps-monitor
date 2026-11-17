@@ -16,18 +16,6 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import {
-  Badge,
-  Box,
-  Button,
-  Checkbox,
-  Flex,
-  Grid,
-  Select,
-  Switch,
-  Text,
-  TextField,
-} from '@radix-ui/themes';
 import { Activity, Globe, Grip, ListChecks, Pencil, Plus, Search, Server, Trash2, Unlink } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
@@ -40,9 +28,15 @@ import {
   Button as SaButton,
   Card as SaCard,
   ConfirmDialog,
+  Checkbox as SaCheckbox,
   Dialog as MinimalDialog,
+  FormInput,
+  FormSelect,
+  InfoTip,
+  Notice,
   Segmented,
   StatGrid,
+  Switch as SaSwitch,
 } from '../../components/ui/minimal';
 
 interface PingTask {
@@ -181,117 +175,82 @@ function TaskDialog({
   };
 
   return (
-    <MinimalDialog open={open} onOpenChange={onOpenChange} title={editingTask ? '编辑 Ping 任务' : '添加 Ping 任务'} size="lg">
-        <Flex direction="column" gap="3" style={{ padding: '8px 0', maxHeight: 560, overflow: 'auto' }}>
-          <Grid columns={{ initial: '1', sm: '2' }} gap="3">
-            <label>
-              <Text size="2" weight="bold">名称</Text>
-              <TextField.Root
-                style={{ width: '100%', marginTop: 4 }}
-                value={String(formData.name || '')}
-                onChange={(event) => setFormData({ ...formData, name: event.target.value })}
-              />
-            </label>
-            <label>
-              <Text size="2" weight="bold">类型</Text>
-              <Select.Root
-                value={String(formData.type || 'icmp')}
-                onValueChange={(value) => setFormData({ ...formData, type: value })}
-              >
-                <Select.Trigger style={{ width: '100%', marginTop: 4 }} />
-                <Select.Content>
-                  <Select.Item value="icmp">ICMP Ping</Select.Item>
-                  <Select.Item value="tcp">TCP Ping</Select.Item>
-                  <Select.Item value="http">HTTP Ping</Select.Item>
-                </Select.Content>
-              </Select.Root>
-            </label>
-          </Grid>
+    <MinimalDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title={editingTask ? '编辑 Ping 任务' : '添加 Ping 任务'}
+      size="lg"
+      footer={(
+        <>
+          <SaButton variant="outline" onClick={() => onOpenChange(false)}>取消</SaButton>
+          <SaButton onClick={handleSave} disabled={saving}>{saving ? '保存中...' : '保存'}</SaButton>
+        </>
+      )}
+    >
+      <div className="sa-form-grid">
+        <FormInput label="名称" value={String(formData.name || '')} onChange={(value) => setFormData({ ...formData, name: value })} />
+        <FormSelect
+          label="类型"
+          value={String(formData.type || 'icmp')}
+          onChange={(value) => setFormData({ ...formData, type: value })}
+          options={[{ value: 'icmp', label: 'ICMP Ping' }, { value: 'tcp', label: 'TCP Ping' }, { value: 'http', label: 'HTTP Ping' }]}
+        />
+        <div className="sa-form-span">
+          <FormInput
+            label="目标地址"
+            value={String(formData.target || '')}
+            onChange={(value) => setFormData({ ...formData, target: value })}
+            hint="ICMP 示例 1.1.1.1；TCP 示例 1.1.1.1:443；HTTP 示例 https://example.com"
+          />
+        </div>
+      </div>
 
-          <label>
-            <Text size="2" weight="bold">目标地址</Text>
-            <Text size="1" color="gray" style={{ display: 'block', marginTop: 2 }}>
-              ICMP 示例 1.1.1.1；TCP 示例 1.1.1.1:443；HTTP 示例 https://example.com
-            </Text>
-            <TextField.Root
-              style={{ width: '100%', marginTop: 4 }}
-              value={String(formData.target || '')}
-              onChange={(event) => setFormData({ ...formData, target: event.target.value })}
-            />
+      <div className="sa-box">
+        <div className="sa-box-head">
+          <div className="sa-box-title">
+            应用范围
+            <InfoTip text="可应用到所有服务器、绑定到指定服务器，也可暂不分配，稍后在「服务器视图」里按服务器勾选。" />
+          </div>
+          <label className="sa-pick-toggle is-on">
+            所有服务器
+            <SaSwitch checked={allClients} onCheckedChange={(value) => setFormData({ ...formData, all_clients: value })} aria-label="所有服务器" />
           </label>
+        </div>
 
-          <Box style={{ border: '1px solid var(--gray-5)', borderRadius: 8, padding: 12 }}>
-            <Flex direction="column" gap="3">
-              <Flex align="center" justify="between" gap="3">
-                <Flex direction="column">
-                  <Text size="2" weight="bold">应用范围</Text>
-                  <Text size="1" color="gray">可应用到所有服务器、绑定到指定服务器，也可暂不分配，稍后在「服务器视图」里按服务器勾选</Text>
-                </Flex>
-                <Flex align="center" gap="2">
-                  <Switch checked={allClients} onCheckedChange={(value) => setFormData({ ...formData, all_clients: value })} />
-                  <Text size="2">所有服务器</Text>
-                </Flex>
-              </Flex>
+        <div className="sa-chip-list">
+          <SaBadge variant={allClients ? 'success' : 'secondary'}>{allClients ? '全局任务' : '定向任务'}</SaBadge>
+          {!allClients && (
+            <SaBadge variant={selectedClients.length > 0 ? 'info' : 'warning'}>已选服务器 {selectedClients.length}</SaBadge>
+          )}
+        </div>
 
-              <Flex gap="2" wrap="wrap">
-                <Badge variant="soft" color={allClients ? 'green' : 'gray'}>
-                  {allClients ? '当前为全局任务' : '当前为定向任务'}
-                </Badge>
-                {!allClients && (
-                  <Badge variant="soft" color={selectedClients.length > 0 ? 'blue' : 'amber'}>
-                    已选服务器 {selectedClients.length}
-                  </Badge>
-                )}
-              </Flex>
+        {!allClients && selectedClients.length === 0 && (
+          <Notice tone="warning">未选择服务器：任务会先保存，但暂不在任何服务器上运行。</Notice>
+        )}
 
-              {!allClients && selectedClients.length === 0 && (
-                <Text size="1" color="amber">
-                  未选择服务器：任务会先保存，但暂不在任何服务器上运行。
-                </Text>
-              )}
-
-              {!allClients && (
-                <Grid columns={{ initial: '1', sm: '2' }} gap="2">
-                  {clients.map((client) => {
-                    const selected = selectedClients.includes(client.uuid);
-                    return (
-                      <Box
-                        key={client.uuid}
-                        style={{
-                          padding: 10,
-                          cursor: 'pointer',
-                          borderRadius: 6,
-                          border: selected ? '1px solid var(--blue-8)' : '1px solid var(--gray-5)',
-                          background: selected ? 'var(--blue-2)' : 'var(--color-panel-solid)',
-                        }}
-                        onClick={() => toggleClient(client.uuid)}
-                      >
-                        <Flex align="center" gap="2">
-                          <Checkbox
-                            checked={selected}
-                            onClick={(event) => event.stopPropagation()}
-                            onCheckedChange={() => toggleClient(client.uuid)}
-                          />
-                          <Flex direction="column" style={{ minWidth: 0 }}>
-                            <Text size="2" weight="medium" truncate>{client.name}</Text>
-                            <Text size="1" color="gray" truncate>
-                              {(client.group || '未分组') + (client.region ? ` / ${client.region}` : '')}
-                            </Text>
-                          </Flex>
-                        </Flex>
-                      </Box>
-                    );
-                  })}
-                </Grid>
-              )}
-            </Flex>
-          </Box>
-        </Flex>
-
-        <Flex gap="3" justify="end" mt="4">
-          <Button variant="soft" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={handleSave} disabled={saving}>{saving ? '保存中...' : '保存'}</Button>
-        </Flex>
+        {!allClients && (
+          <div className="sa-pick-grid">
+            {clients.map((client) => {
+              const selected = selectedClients.includes(client.uuid);
+              return (
+                <div
+                  key={client.uuid}
+                  className={`sa-pick${selected ? ' is-selected' : ''}`}
+                  onClick={() => toggleClient(client.uuid)}
+                >
+                  <span onClick={(event) => event.stopPropagation()}>
+                    <SaCheckbox checked={selected} onCheckedChange={() => toggleClient(client.uuid)} aria-label={`选择 ${client.name}`} />
+                  </span>
+                  <span className="sa-pick-main">
+                    <span className="sa-pick-title"><span className="sa-ellipsis">{client.name}</span></span>
+                    <span className="sa-pick-sub">{(client.group || '未分组') + (client.region ? ` / ${client.region}` : '')}</span>
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </MinimalDialog>
   );
 }
@@ -359,7 +318,7 @@ function NodeTasksDialog({
   const visibleTasks = useMemo(() => {
     const query = search.trim().toLowerCase();
     if (!query) return tasks;
-    return tasks.filter((task) => [task.name, task.type, task.target].join(' ').toLowerCase().includes(query));
+    return tasks.filter((task) => [task.name, task.type].join(' ').toLowerCase().includes(query));
   }, [tasks, search]);
 
   const selectableVisible = visibleTasks.filter((task) => !task.all_clients);
@@ -433,98 +392,90 @@ function NodeTasksDialog({
   };
 
   return (
-    <MinimalDialog open={Boolean(client)} onOpenChange={(open) => !open && onClose()} title={`分配监控任务${client ? ` · ${client.name}` : ''}`} size="md">
+    <MinimalDialog
+      open={Boolean(client)}
+      onOpenChange={(open) => !open && onClose()}
+      title="分配监控任务"
+      description={client?.name}
+      size="md"
+      footer={(
+        <>
+          <span className="sa-muted sa-modal-footer-start">{changed > 0 ? `待保存 ${changed} 项改动` : '未作改动'}</span>
+          <SaButton variant="outline" onClick={onClose}>取消</SaButton>
+          <SaButton onClick={handleSave} disabled={saving || changed === 0}>{saving ? '保存中...' : '保存'}</SaButton>
+        </>
+      )}
+    >
+      <div className="sa-dialog-search">
+        <div className="sa-search">
+          <Search size={14} aria-hidden="true" />
+          <input
+            className="sa-input"
+            placeholder="搜索任务"
+            aria-label="搜索任务"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+        </div>
+        <SaButton variant="outline" size="sm" onClick={() => setVisible(true)} disabled={selectableVisible.length === 0}>全选</SaButton>
+        <SaButton variant="outline" size="sm" onClick={() => setVisible(false)} disabled={selectableVisible.length === 0}>清空</SaButton>
+      </div>
 
-        <Flex direction="column" gap="3" style={{ padding: '8px 0' }}>
-          <Flex gap="2" align="center" wrap="wrap">
-            <TextField.Root
-              style={{ flex: 1, minWidth: 180 }}
-              placeholder="搜索任务"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
+      {homeError && <Notice tone="warning">{homeError}</Notice>}
+
+      <div className="sa-pick-head">
+        任务
+        <InfoTip text={`勾选任务后，可在该任务右侧打开「首页显示」：首页节点卡片上的延迟 / 丢包色块只读这一个任务。${globalCount > 0 ? '「全局」任务跟随所有服务器，不能在这里逐台取消；如需只在部分服务器运行，请在任务里关闭「所有服务器」。' : ''}`} />
+      </div>
+
+      <div className="sa-pick-list sa-scroll-list">
+        {tasks.length === 0 ? (
+          <div className="sa-empty-block">暂无 Ping 任务，请先添加任务</div>
+        ) : visibleTasks.length === 0 ? (
+          <div className="sa-empty-block">没有匹配的任务</div>
+        ) : visibleTasks.map((task) => {
+          const isGlobal = task.all_clients;
+          const selected = isGlobal || chosen.includes(task.id);
+          return (
+            <div
+              key={task.id}
+              className={`sa-pick${selected ? ' is-selected' : ''}${isGlobal ? ' is-disabled' : ''}`}
+              onClick={() => { if (!isGlobal) toggle(task.id); }}
             >
-              <TextField.Slot><Search size={14} /></TextField.Slot>
-            </TextField.Root>
-            <Button size="1" variant="soft" onClick={() => setVisible(true)} disabled={selectableVisible.length === 0}>全选</Button>
-            <Button size="1" variant="soft" color="gray" onClick={() => setVisible(false)} disabled={selectableVisible.length === 0}>清空</Button>
-          </Flex>
-
-          {globalCount > 0 && (
-            <Text size="1" color="gray">
-              「全局」任务跟随所有服务器，不能在这里逐台取消；如需只在部分服务器运行，请在任务里关闭“所有服务器”。
-            </Text>
-          )}
-
-          {homeError && <Text size="1" color="red">{homeError}</Text>}
-          <Text size="1" color="gray">
-            勾选任务后，可在该任务右侧打开“首页显示”：首页节点卡片上的延迟 / 丢包色块只读这一个任务。
-          </Text>
-
-          <Flex direction="column" gap="2" style={{ maxHeight: 400, overflow: 'auto' }}>
-            {tasks.length === 0 ? (
-              <Text color="gray" align="center" style={{ display: 'block', padding: 24 }}>暂无 Ping 任务，请先添加任务</Text>
-            ) : visibleTasks.length === 0 ? (
-              <Text color="gray" align="center" style={{ display: 'block', padding: 24 }}>没有匹配的任务</Text>
-            ) : visibleTasks.map((task) => {
-              const isGlobal = task.all_clients;
-              const selected = isGlobal || chosen.includes(task.id);
-              return (
-                <Box
-                  key={task.id}
-                  style={{
-                    padding: 10,
-                    borderRadius: 6,
-                    cursor: isGlobal ? 'not-allowed' : 'pointer',
-                    opacity: isGlobal ? 0.75 : 1,
-                    border: selected ? '1px solid var(--blue-8)' : '1px solid var(--gray-5)',
-                    background: selected ? 'var(--blue-2)' : 'var(--color-panel-solid)',
-                  }}
-                  onClick={() => { if (!isGlobal) toggle(task.id); }}
+              <span onClick={(event) => event.stopPropagation()}>
+                <SaCheckbox
+                  checked={selected}
+                  disabled={isGlobal}
+                  onCheckedChange={() => { if (!isGlobal) toggle(task.id); }}
+                  aria-label={`选择 ${task.name}`}
+                />
+              </span>
+              <span className="sa-pick-main">
+                <span className="sa-pick-title">
+                  <span className="sa-ellipsis">{task.name}</span>
+                  <SaBadge variant="outline">{task.type.toUpperCase()}</SaBadge>
+                  {isGlobal && <SaBadge variant="success">全局</SaBadge>}
+                </span>
+              </span>
+              {selected && (
+                <label
+                  className={`sa-pick-toggle admin-ping-home-toggle${effectiveHomeId === task.id ? ' is-on' : ''}`}
+                  title="首页节点卡片的延迟 / 丢包色块读取这个任务，每台服务器只能选一个"
+                  onClick={(event) => event.stopPropagation()}
                 >
-                  <Flex align="center" gap="2">
-                    <Checkbox
-                      checked={selected}
-                      disabled={isGlobal}
-                      onClick={(event) => event.stopPropagation()}
-                      onCheckedChange={() => { if (!isGlobal) toggle(task.id); }}
-                    />
-                    <Flex direction="column" style={{ minWidth: 0, flex: 1 }}>
-                      <Flex align="center" gap="2">
-                        <Text size="2" weight="medium" truncate>{task.name}</Text>
-                        <Badge size="1" variant="soft">{task.type.toUpperCase()}</Badge>
-                        {isGlobal && <Badge size="1" variant="soft" color="green">全局</Badge>}
-                      </Flex>
-                      <Text size="1" color="gray" truncate style={{ fontFamily: 'monospace' }}>{task.target}</Text>
-                    </Flex>
-                    {selected && (
-                      <label
-                        className="admin-ping-home-toggle"
-                        title="首页节点卡片的延迟 / 丢包色块读取这个任务，每台服务器只能选一个"
-                        onClick={(event) => event.stopPropagation()}
-                      >
-                        <Text size="1" color={effectiveHomeId === task.id ? 'blue' : 'gray'}>首页显示</Text>
-                        <Switch
-                          size="1"
-                          checked={effectiveHomeId === task.id}
-                          disabled={!homeLoaded}
-                          onCheckedChange={(on) => toggleHome(task.id, on)}
-                        />
-                      </label>
-                    )}
-                  </Flex>
-                </Box>
-              );
-            })}
-          </Flex>
-        </Flex>
-
-        <Flex gap="3" justify="between" align="center" mt="4">
-          <Text size="1" color="gray">{changed > 0 ? `待保存 ${changed} 项改动` : '未作改动'}</Text>
-          <Flex gap="3">
-            <Button variant="soft" onClick={onClose}>取消</Button>
-            <Button onClick={handleSave} disabled={saving || changed === 0}>{saving ? '保存中...' : '保存'}</Button>
-          </Flex>
-        </Flex>
+                  首页显示
+                  <SaSwitch
+                    checked={effectiveHomeId === task.id}
+                    disabled={!homeLoaded}
+                    onCheckedChange={(on) => toggleHome(task.id, on)}
+                    aria-label={`首页显示 ${task.name}`}
+                  />
+                </label>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </MinimalDialog>
   );
 }

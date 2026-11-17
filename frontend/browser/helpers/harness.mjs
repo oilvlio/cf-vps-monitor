@@ -157,7 +157,9 @@ export async function createHarness({ selection = 'ALL', playwrightModule } = {}
         data.clients = body.uuids.map((uuid, index) => ({ ...data.clients.find(client => client.uuid === uuid), sort_order: index }));
         return json({ success: true });
       }
-      if (path === '/api/clients' || path === '/api/nodes') return json(clients);
+      if (path === '/api/clients' || path === '/api/legacy/nodes') return json(clients);
+      // /api/nodes 属于 Monitor 主题契约，形状是 { admin, nodes }，不是数组。
+      if (path === '/api/nodes') return json({ admin: false, nodes: clients });
       const clientEdit = /^\/api\/admin\/clients\/([^/]+)\/edit$/.exec(path);
       if (clientEdit) {
         const client = data.clients.find(item => item.uuid === clientEdit[1]);
@@ -179,6 +181,8 @@ export async function createHarness({ selection = 'ALL', playwrightModule } = {}
       if (path === '/api/ping' || path === '/api/ping/tasks') return json([]);
       if (path === '/api/admin/account/mfa') return json(data.mfa);
       if (path === '/api/admin/account/mfa/step-up') return json({ success: true });
+      if (/^\/api\/admin\/clients\/[^/]+\/token\/install$/.test(path)) return json({ token: 'synthetic-install-token' });
+      if (path === '/api/admin/home-ping') return json({ assignments: data.homePing || {} });
       if (path === '/api/admin/ping') return json(data.pingTasks || []);
       if (path === '/api/admin/ping/reorder') {
         data.pingTasks = body.ids.map((id, index) => ({ ...data.pingTasks.find(task => task.id === id), sort_order: index }));

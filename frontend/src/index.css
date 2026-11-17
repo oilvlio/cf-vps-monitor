@@ -1894,187 +1894,6 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   white-space: nowrap;
 }
 
-.admin-command-dialog {
-  width: min(92vw, 680px);
-}
-
-.admin-command-options-scroll {
-  max-height: 440px;
-  overflow: auto;
-  padding: 0 14px 2px 0;
-  scrollbar-gutter: stable;
-}
-
-.admin-command-code {
-  max-width: 100%;
-  margin-top: 12px;
-  padding: 12px 18px 12px 14px;
-  overflow: auto;
-  border-radius: 8px;
-  background: var(--gray-3);
-  font-family: monospace;
-  font-size: 12px;
-  line-height: 1.6;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  scrollbar-gutter: stable;
-}
-
-.billing-price-grid,
-.billing-schedule-grid,
-.install-options-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  align-items: start;
-}
-
-.billing-price-grid {
-  grid-template-columns: minmax(0, 118px) minmax(0, 76px) minmax(120px, 1fr);
-  gap: 8px;
-  justify-content: start;
-}
-
-.billing-price-helper {
-  min-width: 0;
-  min-height: 30px;
-  display: flex !important;
-  align-items: center;
-  align-self: end;
-  line-height: 1.25 !important;
-  overflow-wrap: anywhere;
-}
-
-.billing-schedule-grid {
-  grid-template-columns: minmax(0, 98px) minmax(0, 228px);
-  gap: 8px;
-  justify-content: start;
-}
-
-.billing-cycle-field,
-.expiry-date-field {
-  display: block;
-  min-width: 0;
-}
-
-.billing-cycle-select {
-  width: 100%;
-}
-
-.expiry-date-control-row {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 142px auto;
-  gap: 6px;
-  align-items: center;
-}
-
-.expiry-date-input {
-  width: 142px;
-  min-width: 142px;
-}
-
-.expiry-long-term-button {
-  height: 30px;
-  min-height: 30px;
-  padding-inline: 8px !important;
-  white-space: nowrap;
-}
-
-.billing-price-grid label,
-.billing-schedule-grid label,
-.install-options-grid label {
-  display: block;
-  min-width: 0;
-}
-
-.billing-price-grid .rt-TextFieldRoot,
-.billing-price-grid .rt-SelectTrigger,
-.billing-schedule-grid .rt-TextFieldRoot,
-.billing-schedule-grid .rt-SelectTrigger,
-.install-options-grid .rt-TextFieldRoot,
-.install-options-grid .rt-SelectTrigger {
-  min-height: 36px;
-}
-
-.billing-price-grid .rt-TextFieldRoot,
-.billing-price-grid .rt-SelectTrigger,
-.billing-schedule-grid .rt-TextFieldRoot,
-.billing-schedule-grid .rt-SelectTrigger {
-  min-height: 30px;
-  height: 30px;
-}
-
-.billing-switch-row {
-  display: grid !important;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px !important;
-}
-
-.billing-switch-item {
-  min-height: 32px;
-  min-width: 0;
-  padding: 6px 8px;
-  border: 1px solid var(--monitor-border);
-  border-radius: 8px;
-  background: var(--monitor-panel-muted);
-}
-
-.traffic-limit-controls {
-  min-width: 0;
-  display: grid !important;
-  grid-template-columns: 112px 58px 72px 118px;
-  gap: 8px !important;
-  align-items: center;
-  overflow: visible;
-  padding-bottom: 0;
-}
-
-.traffic-limit-controls > * {
-  flex: 0 0 auto;
-}
-
-.traffic-limit-editor .rt-TextFieldRoot,
-.traffic-limit-editor .rt-SelectTrigger {
-  min-height: 30px;
-  height: 30px;
-}
-
-.traffic-limit-mode-select {
-  width: 112px;
-}
-
-.traffic-limit-number-input {
-  width: 58px;
-}
-
-.traffic-limit-unit-select {
-  width: 72px;
-}
-
-.traffic-limit-type-select {
-  width: 118px;
-}
-
-.traffic-limit-bandwidth-unit-select {
-  width: 92px;
-}
-
-.install-option-checks {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px 12px;
-}
-
-.install-option-check {
-  min-height: 32px;
-  min-width: 0;
-  padding: 6px 8px;
-  border: 1px solid var(--monitor-border);
-  border-radius: 8px;
-  background: var(--monitor-panel-muted);
-}
-
 .admin-row-drag-handle {
   width: 24px;
   height: 24px;
@@ -2103,16 +1922,11 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
   opacity: 0.42;
 }
 
-.admin-ip-copy,
-.currency-symbol-button {
+.admin-ip-copy {
   width: 24px !important;
   min-width: 24px !important;
   height: 24px !important;
   cursor: pointer;
-}
-
-.currency-symbol-list {
-  margin-top: -4px;
 }
 
 .node-table-copyable-value {
@@ -2717,76 +2531,7 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
     padding-bottom: 8px;
   }
 
-  .billing-price-grid,
-  .install-options-grid,
-  .billing-switch-row,
-  .install-option-checks {
-    grid-template-columns: 1fr;
-  }
-
-  .billing-price-grid {
-    grid-template-columns: minmax(0, 92px) minmax(0, 62px) minmax(96px, 1fr);
-    gap: 7px;
-  }
-
-  .billing-schedule-grid {
-    grid-template-columns: minmax(0, 88px) minmax(0, 1fr);
-    gap: 7px;
-  }
-
-  .expiry-date-control-row {
-    grid-template-columns: 148px auto;
-    gap: 5px;
-    justify-content: start;
-  }
-
-  .expiry-date-input {
-    width: 148px;
-    min-width: 148px;
-  }
-
-  .expiry-long-term-button {
-    min-width: 0;
-    padding-inline: 6px !important;
-    font-size: 11.5px !important;
-  }
-
-  .billing-switch-row {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 7px !important;
-  }
-
-  .billing-switch-item {
-    min-height: 30px;
-    padding: 5px 7px;
-  }
-
-  .traffic-limit-controls {
-    grid-template-columns: 96px 46px 58px 100px;
-    gap: 6px !important;
-  }
-
-  .traffic-limit-mode-select {
-    width: 96px;
-  }
-
-  .traffic-limit-number-input {
-    width: 46px;
-  }
-
-  .traffic-limit-unit-select {
-    width: 58px;
-  }
-
-  .traffic-limit-type-select {
-    width: 100px;
-  }
-
-  .traffic-limit-bandwidth-unit-select {
-    width: 82px;
-  }
-
-  .monitor-dashboard-page {
+.monitor-dashboard-page {
     padding: 8px;
     gap: 8px;
   }
@@ -3305,26 +3050,6 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
     width: 34px !important;
     min-width: 34px !important;
     height: 34px !important;
-  }
-
-  .billing-schedule-grid {
-    grid-template-columns: minmax(0, 78px) minmax(0, 1fr);
-    gap: 5px;
-  }
-
-  .expiry-date-control-row {
-    grid-template-columns: 144px auto;
-    gap: 4px;
-  }
-
-  .expiry-date-input {
-    width: 144px;
-    min-width: 144px;
-  }
-
-  .expiry-long-term-button {
-    padding-inline: 5px !important;
-    font-size: 11px !important;
   }
 
   .node-table-detail-sections {

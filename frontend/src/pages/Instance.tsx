@@ -180,7 +180,9 @@ export default function Instance() {
     setClient(null);
     try {
       setError(null);
-      const data = await publicFetch(`/nodes${isAuthenticated ? '?include_hidden=1' : ''}`, { signal });
+      // 与首页同源：/clients 是内置主题的公开节点列表。/nodes 现在属于 Monitor 主题契约（{ admin, nodes }），
+      // 形状不同，这里读它会得到空列表，表现为「服务器不存在」。
+      const data = await publicFetch(`/clients${isAuthenticated ? '?include_hidden=1' : ''}`, { signal });
       if (signal?.aborted || requestId !== clientRequestRef.current) return;
       const visible = normalizePublicClients(data, { includeHidden: isAuthenticated });
       setClients(visible);

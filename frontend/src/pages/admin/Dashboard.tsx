@@ -23,13 +23,12 @@ import {
   ConfirmDialog,
   Dialog as MinimalDialog,
   FormInput,
+  FormSection,
+  FormSelect,
+  FormSwitch,
   Segmented,
   StatGrid,
 } from '../../components/ui/minimal';
-import {
-  Flex, Text, Box, Button,
-  Switch, Separator, Select
-} from '@radix-ui/themes';
 import {
   Plus, Pencil, Trash2, Copy, Search,
   Grip, RefreshCw, Download, EyeOff, Server, Wifi, Layers, KeyRound
@@ -440,89 +439,85 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: Command
     });
 
   return (
-    <MinimalDialog open={open} onOpenChange={onOpenChange} title="生成 CF VPS Monitor Agent 安装命令" description={`节点: ${client.name}`} size="xl" className="admin-command-dialog">
-        <Segmented
-          value={platform}
-          onChange={(value) => setPlatform(value as AgentInstallPlatform)}
-          options={[{ value: 'unix', label: 'Unix 自动检测' }, { value: 'windows', label: 'Windows' }]}
-        />
-
-        <Flex className="admin-command-options-scroll" direction="column" gap="3">
-          <FormInput label="连接地址" value={serverUrl} onChange={setServerUrl} placeholder={window.location.origin} />
-          <Text size="2" weight="bold">安装选项</Text>
-          <div className="install-options-grid">
-            <label>
-              <Text size="2" weight="bold" style={{ display: 'block', marginBottom: 4 }}>安装模式</Text>
-              <Select.Root value={installOptions.installMode} onValueChange={(v) => setOption('installMode', v as AgentInstallOptions['installMode'])}>
-                <Select.Trigger style={{ width: '100%' }} />
-                <Select.Content>
-                  <Select.Item value="auto">自动选择</Select.Item>
-                  <Select.Item value="system">系统服务</Select.Item>
-                  <Select.Item value="user">用户模式</Select.Item>
-                </Select.Content>
-              </Select.Root>
-            </label>
-            <FormInput label="GitHub 代理" value={installOptions.ghproxy} onChange={(v) => setOption('ghproxy', v)} placeholder="为空则不使用代理" />
-            <FormInput label="下载代理" value={installOptions.downloadProxy} onChange={(v) => setOption('downloadProxy', v)} placeholder="例如 http://127.0.0.1:10808" />
-            <FormInput label="安装目录" value={installOptions.dir} onChange={(v) => setOption('dir', v)} placeholder={platform === 'windows' ? 'C:\\Program Files\\CF VPS Monitor' : '自动选择系统目录或用户目录'} />
-            <FormInput label="服务名称" value={installOptions.serviceName} onChange={(v) => setOption('serviceName', v)} placeholder={platform === 'windows' ? 'CFVpsMonitorAgent' : 'cf-vps-monitor-agent'} />
-            <FormInput label="二进制下载地址" value={installOptions.binaryUrl || ''} onChange={(v) => setOption('binaryUrl', v)} placeholder="为空则自动下载预编译二进制" />
-            <FormInput label="SHA256SUMS 地址" value={installOptions.checksumUrl || ''} onChange={(v) => setOption('checksumUrl', v)} placeholder="自定义二进制地址必须填写" />
-            <FormInput label="Release Tag" value={installOptions.releaseTag || ''} onChange={(v) => setOption('releaseTag', v)} placeholder="为空则使用最新发布版" />
-            <FormInput label="磁盘包含" value={installOptions.mountInclude} onChange={(v) => setOption('mountInclude', v)} placeholder="例如 /,/data,/dev/sd*" />
-            <FormInput label="磁盘排除" value={installOptions.mountExclude} onChange={(v) => setOption('mountExclude', v)} placeholder="例如 /boot,tmpfs,/run" />
-            <FormInput label="网卡包含" value={installOptions.nicInclude} onChange={(v) => setOption('nicInclude', v)} placeholder="例如 eth*,ens*" />
-            <FormInput label="网卡排除" value={installOptions.nicExclude} onChange={(v) => setOption('nicExclude', v)} placeholder="例如 lo,docker*,veth*" />
-            <label>
-              <Text size="2" weight="bold" style={{ display: 'block', marginBottom: 4 }}>GPU 采集</Text>
-              <Select.Root value={installOptions.enableGpu ? 'on' : 'off'} onValueChange={(v) => setOption('enableGpu', v === 'on')}>
-                <Select.Trigger style={{ width: '100%' }} />
-                <Select.Content>
-                  <Select.Item value="off">关闭（默认，不探测、不上报 GPU）</Select.Item>
-                  <Select.Item value="on">开启（探测 nvidia-smi / rocm-smi）</Select.Item>
-                </Select.Content>
-              </Select.Root>
-            </label>
-            <label>
-              <Text size="2" weight="bold" style={{ display: 'block', marginBottom: 4 }}>日志等级</Text>
-              <Select.Root value={installOptions.logLevel} onValueChange={(v) => setOption('logLevel', v as AgentLogLevel)}>
-                <Select.Trigger style={{ width: '100%' }} />
-                <Select.Content>
-                  <Select.Item value="info">info（默认，仅记录启动、连接与异常）</Select.Item>
-                  <Select.Item value="debug">debug（含每次上报与 ack）</Select.Item>
-                  <Select.Item value="warn">warn</Select.Item>
-                  <Select.Item value="error">error</Select.Item>
-                </Select.Content>
-              </Select.Root>
-            </label>
-            {platform === 'unix' && (
-              <>
-                <label>
-                  <Text size="2" weight="bold" style={{ display: 'block', marginBottom: 4 }}>容器宿主机负载</Text>
-                  <Select.Root value={installOptions.allowHostLoad ? 'on' : 'off'} onValueChange={(v) => setOption('allowHostLoad', v === 'on')}>
-                    <Select.Trigger style={{ width: '100%' }} />
-                    <Select.Content>
-                      <Select.Item value="on">上报宿主机负载（默认）</Select.Item>
-                      <Select.Item value="off">不上报（LXC/Incus 等容器无法获得本机负载时留空）</Select.Item>
-                    </Select.Content>
-                  </Select.Root>
-                </label>
-                {installOptions.allowHostLoad && (
-                  <FormInput label="宿主机核数" value={installOptions.hostCpuCores} onChange={(v) => setOption('hostCpuCores', v)} type="number" min={1} step={1} placeholder="填写后按容器核数折算，使负载色点反映宿主机利用率" />
-                )}
-              </>
-            )}
-          </div>
-        </Flex>
-
-        <Box className="admin-command-code">{loadingToken ? '正在获取 Token...' : cmd}</Box>
-        <Flex justify="end" gap="2" mt="3">
-          <Button color="red" variant="soft" onClick={() => copyToClipboard(uninstallAllCmd, '彻底卸载命令已复制')}>
+    <MinimalDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="生成 CF VPS Monitor Agent 安装命令"
+      description={`节点: ${client.name}`}
+      size="xl"
+      className="admin-command-dialog"
+      footer={(
+        <>
+          <SaButton variant="outline" className="sa-modal-footer-start" onClick={() => copyToClipboard(uninstallAllCmd, '彻底卸载命令已复制')}>
             <Trash2 size={14} /> 彻底卸载
-          </Button>
-          <Button variant="soft" onClick={() => onOpenChange(false)}>关闭</Button>
-          <Button onClick={() => copyToClipboard(cmd, '命令已复制')} disabled={loadingToken || !agentToken}><Copy size={14} /> 复制命令</Button>
-        </Flex>
+          </SaButton>
+          <SaButton variant="outline" onClick={() => onOpenChange(false)}>关闭</SaButton>
+          <SaButton onClick={() => copyToClipboard(cmd, '命令已复制')} disabled={loadingToken || !agentToken}><Copy size={14} /> 复制命令</SaButton>
+        </>
+      )}
+    >
+      <Segmented
+        label="目标系统"
+        value={platform}
+        onChange={(value) => setPlatform(value as AgentInstallPlatform)}
+        options={[{ value: 'unix', label: 'Unix 自动检测' }, { value: 'windows', label: 'Windows' }]}
+      />
+
+      <pre className="sa-code-block admin-command-code" aria-label="安装命令">{loadingToken ? '正在获取 Token...' : cmd}</pre>
+
+      <div className="sa-form-grid">
+        <div className="sa-form-span">
+          <FormInput label="连接地址" value={serverUrl} onChange={setServerUrl} placeholder={window.location.origin} />
+        </div>
+        <FormSection title="安装选项" />
+        <FormSelect
+          label="安装模式"
+          value={installOptions.installMode}
+          onChange={(v) => setOption('installMode', v as AgentInstallOptions['installMode'])}
+          options={[{ value: 'auto', label: '自动选择' }, { value: 'system', label: '系统服务' }, { value: 'user', label: '用户模式' }]}
+        />
+        <FormInput label="GitHub 代理" value={installOptions.ghproxy} onChange={(v) => setOption('ghproxy', v)} placeholder="为空则不使用代理" />
+        <FormInput label="下载代理" value={installOptions.downloadProxy} onChange={(v) => setOption('downloadProxy', v)} placeholder="例如 http://127.0.0.1:10808" />
+        <FormInput label="安装目录" value={installOptions.dir} onChange={(v) => setOption('dir', v)} placeholder={platform === 'windows' ? 'C:\\Program Files\\CF VPS Monitor' : '自动选择系统目录或用户目录'} />
+        <FormInput label="服务名称" value={installOptions.serviceName} onChange={(v) => setOption('serviceName', v)} placeholder={platform === 'windows' ? 'CFVpsMonitorAgent' : 'cf-vps-monitor-agent'} />
+        <FormInput label="Release Tag" value={installOptions.releaseTag || ''} onChange={(v) => setOption('releaseTag', v)} placeholder="为空则使用最新发布版" />
+        <FormInput label="二进制下载地址" value={installOptions.binaryUrl || ''} onChange={(v) => setOption('binaryUrl', v)} placeholder="为空则自动下载预编译二进制" />
+        <FormInput label="SHA256SUMS 地址" value={installOptions.checksumUrl || ''} onChange={(v) => setOption('checksumUrl', v)} placeholder="自定义二进制地址必须填写" />
+        <FormInput label="磁盘包含" value={installOptions.mountInclude} onChange={(v) => setOption('mountInclude', v)} placeholder="例如 /,/data,/dev/sd*" />
+        <FormInput label="磁盘排除" value={installOptions.mountExclude} onChange={(v) => setOption('mountExclude', v)} placeholder="例如 /boot,tmpfs,/run" />
+        <FormInput label="网卡包含" value={installOptions.nicInclude} onChange={(v) => setOption('nicInclude', v)} placeholder="例如 eth*,ens*" />
+        <FormInput label="网卡排除" value={installOptions.nicExclude} onChange={(v) => setOption('nicExclude', v)} placeholder="例如 lo,docker*,veth*" />
+        <FormSelect
+          label="GPU 采集"
+          value={installOptions.enableGpu ? 'on' : 'off'}
+          onChange={(v) => setOption('enableGpu', v === 'on')}
+          options={[{ value: 'off', label: '关闭（默认，不探测、不上报 GPU）' }, { value: 'on', label: '开启（探测 nvidia-smi / rocm-smi）' }]}
+        />
+        <FormSelect
+          label="日志等级"
+          value={installOptions.logLevel}
+          onChange={(v) => setOption('logLevel', v as AgentLogLevel)}
+          options={[
+            { value: 'info', label: 'info（默认，仅记录启动、连接与异常）' },
+            { value: 'debug', label: 'debug（含每次上报与 ack）' },
+            { value: 'warn', label: 'warn' },
+            { value: 'error', label: 'error' },
+          ]}
+        />
+        {platform === 'unix' && (
+          <>
+            <FormSelect
+              label="容器宿主机负载"
+              value={installOptions.allowHostLoad ? 'on' : 'off'}
+              onChange={(v) => setOption('allowHostLoad', v === 'on')}
+              options={[{ value: 'on', label: '上报宿主机负载（默认）' }, { value: 'off', label: '不上报（LXC/Incus 等容器无法获得本机负载时留空）' }]}
+            />
+            {installOptions.allowHostLoad && (
+              <FormInput label="宿主机核数" value={installOptions.hostCpuCores} onChange={(v) => setOption('hostCpuCores', v)} type="number" min={1} step={1} placeholder="按容器核数折算，使负载色点反映宿主机利用率" />
+            )}
+          </>
+        )}
+      </div>
     </MinimalDialog>
   );
 }
@@ -543,22 +538,30 @@ function DetailDialog({ client, open, onOpenChange }: { client: AdminClient; ope
   ];
 
   return (
-    <MinimalDialog open={open} onOpenChange={onOpenChange} title="机器详细信息" description={client.name} size="lg">
-        <Flex className="admin-node-detail-list" direction="column" gap="1">
-          {fields.map(([label, value]) => (
-            <div key={label} className="admin-node-detail-row">
-              <Text className="admin-node-detail-label" size="2" color="gray">{label}</Text>
+    <MinimalDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="机器详细信息"
+      description={client.name}
+      size="lg"
+      footer={<SaButton onClick={() => onOpenChange(false)}>完成</SaButton>}
+    >
+      <div className="sa-kv">
+        {fields.map(([label, value]) => (
+          <div key={label} className="sa-kv-row">
+            <span className="sa-kv-label">{label}</span>
+            <span className="sa-kv-value">
               {label === 'IPv4' && client.ipv4 ? (
                 <CopyableIp value={client.ipv4} />
               ) : label === 'IPv6' && client.ipv6 ? (
                 <CopyableIp value={client.ipv6} muted />
               ) : (
-                <Text className="admin-node-detail-value" size="2">{value}</Text>
+                value
               )}
-            </div>
-          ))}
-        </Flex>
-        <Flex justify="end" mt="3"><Button onClick={() => onOpenChange(false)}>完成</Button></Flex>
+            </span>
+          </div>
+        ))}
+      </div>
     </MinimalDialog>
   );
 }
@@ -624,81 +627,70 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
   };
 
   return (
-    <MinimalDialog open={open} onOpenChange={onOpenChange} title="编辑服务器" size="lg" className="admin-node-dialog admin-node-edit-dialog">
-        <div className="admin-node-dialog-scroll">
-          <Flex className="admin-node-edit-form" direction="column" gap="3">
-            <FormInput label="名称" value={String(form.name || '')} onChange={v => update('name', v)} />
-            <FormInput label="私有备注" value={String(form.remark || '')} onChange={v => update('remark', v)} textarea />
-            <FormInput label="公开备注" value={String(form.public_remark || '')} onChange={v => update('public_remark', v)} textarea />
-            <FormInput label="分组" value={String(form.group || '')} onChange={v => update('group', v)} />
-            <FormInput label="标签 (分号分隔)" value={String(form.tags || '')} onChange={v => update('tags', v)} />
-            <Separator size="4" />
-            <Text size="2" weight="bold">计费信息</Text>
-            <div className="billing-price-grid">
-              <Box>
-                <FormInput
-                  label="价格"
-                  value={String(form.price ?? 0)}
-                  onChange={v => update('price', v)}
-                  type="number"
-                  min="-1"
-                  step="0.01"
-                />
-              </Box>
-              <Box>
-                <FormInput label="货币" value={String(form.currency || '¥')} onChange={v => update('currency', v)} />
-              </Box>
-              <Text className="billing-price-helper" size="1" color="gray">
-                0 不显示，-1 表示免费
-              </Text>
-            </div>
-            <CurrencySymbols onPick={(symbol) => update('currency', symbol)} />
-            <div className="billing-schedule-grid">
-              <Box>
-                <BillingCycleSelect value={form.billing_cycle as number | string | undefined} onChange={v => update('billing_cycle', v)} />
-              </Box>
-              <Box>
-                <ExpiryDateInput value={String(form.expired_at || '')} onChange={v => update('expired_at', v)} />
-              </Box>
-            </div>
-            <TrafficLimitEditor
-              value={(form.traffic_limit_form as TrafficLimitFormValue) || createTrafficLimitFormValue(0, 'sum')}
-              onChange={(value) => update('traffic_limit_form', value)}
-            />
-            <Box>
-              <FormInput
-                label="流量重置日"
-                value={String(form.traffic_reset_day ?? 1)}
-                onChange={v => update('traffic_reset_day', v)}
-                type="number"
-                min="1"
-                max="31"
-                step="1"
-              />
-              <Text size="1" color="gray" style={{ display: 'block', marginTop: 4 }}>
-                每月几号开始重新计算流量，保存后由服务端下发给探针，无需重装。
-                <Text size="1" color="gray"> 探针按天记录流量增量，改这个值只会换一个统计窗口，当期流量不会清零（探针保留最近一年的逐日数据）。</Text>
-              </Text>
-            </Box>
-            <Flex className="billing-switch-row" gap="3">
-              <Flex className="billing-switch-item" align="center" justify="between">
-                <Text size="2">对游客完全隐藏</Text>
-                <Switch checked={Boolean(form.hidden)} onCheckedChange={v => update('hidden', v)} />
-              </Flex>
-              <Flex className="billing-switch-item" align="center" justify="between">
-                <Text size="2">自动续费</Text>
-                <Switch checked={Boolean(form.auto_renewal)} onCheckedChange={v => update('auto_renewal', v)} />
-              </Flex>
-            </Flex>
-            <Text size="1" color="gray" style={{ display: 'block' }}>
-              「完全隐藏」后节点整体不出现在游客前台；价格信息会下发给主题，由主题决定是否展示。
-            </Text>
-          </Flex>
+    <MinimalDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="编辑服务器"
+      description={client?.name}
+      size="lg"
+      className="admin-node-edit-dialog"
+      footer={(
+        <>
+          <SaButton variant="outline" onClick={() => onOpenChange(false)}>取消</SaButton>
+          <SaButton onClick={handleSave} disabled={saving}>{saving ? '保存中...' : '保存'}</SaButton>
+        </>
+      )}
+    >
+      <div className="sa-form-grid">
+        <div className="sa-form-span">
+          <FormInput label="名称" value={String(form.name || '')} onChange={v => update('name', v)} />
         </div>
-        <Flex gap="3" justify="end" mt="4">
-          <Button variant="soft" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={handleSave} disabled={saving}>{saving ? '保存中...' : '保存'}</Button>
-        </Flex>
+        <FormInput label="私有备注" value={String(form.remark || '')} onChange={v => update('remark', v)} textarea rows={2} />
+        <FormInput label="公开备注" value={String(form.public_remark || '')} onChange={v => update('public_remark', v)} textarea rows={2} />
+        <FormInput label="分组" value={String(form.group || '')} onChange={v => update('group', v)} />
+        <FormInput label="标签 (分号分隔)" value={String(form.tags || '')} onChange={v => update('tags', v)} />
+
+        <FormSection title="计费信息" />
+        <FormInput
+          label="价格"
+          value={String(form.price ?? 0)}
+          onChange={v => update('price', v)}
+          type="number"
+          min="-1"
+          step="0.01"
+          hint="0 不显示，-1 表示免费"
+        />
+        <FormInput label="货币" value={String(form.currency || '¥')} onChange={v => update('currency', v)} />
+        <div className="sa-form-span">
+          <CurrencySymbols onPick={(symbol) => update('currency', symbol)} />
+        </div>
+        <BillingCycleSelect value={form.billing_cycle as number | string | undefined} onChange={v => update('billing_cycle', v)} />
+        <ExpiryDateInput value={String(form.expired_at || '')} onChange={v => update('expired_at', v)} />
+        <TrafficLimitEditor
+          value={(form.traffic_limit_form as TrafficLimitFormValue) || createTrafficLimitFormValue(0, 'sum')}
+          onChange={(value) => update('traffic_limit_form', value)}
+        />
+        <FormInput
+          label="流量重置日"
+          value={String(form.traffic_reset_day ?? 1)}
+          onChange={v => update('traffic_reset_day', v)}
+          type="number"
+          min="1"
+          max="31"
+          step="1"
+          tip="每月几号开始重新计算流量，保存后由服务端下发给探针，无需重装。探针按天记录流量增量，改这个值只会换一个统计窗口，当期流量不会清零（探针保留最近一年的逐日数据）。"
+        />
+        <div />
+
+        <FormSection title="显示与续费" />
+        <FormSwitch
+          label="对游客完全隐藏"
+          tip="「完全隐藏」后节点整体不出现在游客前台；价格信息会下发给主题，由主题决定是否展示。"
+          checked={Boolean(form.hidden)}
+          onCheckedChange={v => update('hidden', v)}
+        />
+        <FormSwitch label="自动续费" checked={Boolean(form.auto_renewal)} onCheckedChange={v => update('auto_renewal', v)} />
+      </div>
     </MinimalDialog>
   );
 }
@@ -739,12 +731,19 @@ function AddDialog({ open, onOpenChange, onSaved }: { open: boolean; onOpenChang
   };
 
   return (
-    <MinimalDialog open={open} onOpenChange={onOpenChange} title="添加服务器" size="sm"
-      footer={<><SaButton variant="outline" onClick={() => onOpenChange(false)}>取消</SaButton><SaButton onClick={handleAdd} disabled={loading}>{loading ? '创建中...' : '创建'}</SaButton></>}>
-        <Flex direction="column" gap="3">
-          <FormInput label="服务器名称" value={name} onChange={setName} placeholder="可选，创建后可修改" />
-          <Text size="1" color="gray">创建后将生成 Token，用于 Agent 连接</Text>
-        </Flex>
+    <MinimalDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="添加服务器"
+      size="sm"
+      footer={(
+        <>
+          <SaButton variant="outline" onClick={() => onOpenChange(false)}>取消</SaButton>
+          <SaButton onClick={handleAdd} disabled={loading}>{loading ? '创建中...' : '创建'}</SaButton>
+        </>
+      )}
+    >
+      <FormInput label="服务器名称" value={name} onChange={setName} placeholder="可选，创建后可修改" hint="创建后将生成 Token，用于 Agent 连接" />
     </MinimalDialog>
   );
 }

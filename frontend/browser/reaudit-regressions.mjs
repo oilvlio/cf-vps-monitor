@@ -842,6 +842,49 @@ try {
     assert.equal(await isOpen('SMTP 邮件通知'), false, 'R-F15: collapsed state survives switching tabs');
     assert.deepEqual(data.errors, []);
   });
+  await check('R-F16-instance-route', 'built-in instance page resolves the node from the native client list, not the Monitor-contract /api/nodes', async (page, data) => {
+    const uuid = data.clients[0].uuid;
+    await page.goto(origin + `/instance/${uuid}`);
+    await page.getByText(data.clients[0].name, { exact: true }).first().waitFor();
+    assert.equal(await page.getByText('服务器不存在').count(), 0, 'R-F16: a known node must not be reported as missing');
+    await page.goto(origin + '/instance/does-not-exist');
+    await page.getByText('服务器不存在').first().waitFor();
+  });
+  await check('R-F17-admin-dialogs', 'edit-server hints are hover-only and assign-task dialog never shows probe targets', async (page, data) => {
+    const explain = '每月几号开始重新计算流量';
+    const target = 'fj-ct-v4.ip.zstaticcdn.com:80';
+    data.pingTasks = [
+      { id: 1, name: '电信v4TCP', type: 'tcp', target, interval_sec: 60, all_clients: false, clients: [], sort_order: 0 },
+      { id: 2, name: 'Cloudflare DNS', type: 'icmp', target: '1.1.1.1', interval_sec: 60, all_clients: true, clients: [], sort_order: 1 },
+    ];
+    data.homePing = {};
+
+    await page.goto(origin + '/admin');
+    await page.locator('.admin-node-card').first().getByRole('button', { name: '编辑' }).click();
+    const dialog = page.getByRole('dialog');
+    const reset = dialog.getByRole('spinbutton', { name: '流量重置日', exact: true });
+    await reset.waitFor();
+    assert.equal(await page.locator('.sa-tooltip').count(), 0, 'R-F17: no hint text is shown until the info icon is used');
+    await dialog.locator('.sa-form-field', { hasText: '流量重置日' }).getByRole('button', { name: '查看说明' }).hover();
+    await page.locator('.sa-tooltip', { hasText: explain }).waitFor();
+    await reset.fill('9');
+    await dialog.getByRole('button', { name: '保存', exact: true }).click();
+    const edit = await waitForCall(data, call => /\/api\/admin\/clients\/[^/]+\/edit$/.test(call.path));
+    await settleCall(page, edit);
+    const sent = typeof edit.body === 'string' ? JSON.parse(edit.body) : edit.body;
+    assert.equal(sent.traffic_reset_day, 9, 'R-F17: the reset day typed in the dialog is what gets saved');
+
+    await page.goto(origin + '/admin/ping');
+    await page.getByRole('radio', { name: '服务器视图' }).click();
+    await page.getByRole('button', { name: /^分配 .* 的监控任务$/ }).first().click();
+    const assign = page.getByRole('dialog');
+    await assign.getByText('电信v4TCP', { exact: true }).waitFor();
+    assert.equal(await assign.getByText(target).count(), 0, 'R-F17: probe targets are not rendered in the assign dialog');
+    assert.equal(await assign.getByText('1.1.1.1').count(), 0);
+    await assign.getByRole('textbox', { name: '搜索任务' }).fill('zstaticcdn');
+    await assign.getByText('没有匹配的任务').waitFor();
+    assert.deepEqual(data.errors, []);
+  });
 } finally {
   await finish();
 }

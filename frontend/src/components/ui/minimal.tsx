@@ -193,12 +193,14 @@ export function Switch({
 export function FormSwitch({
   label,
   hint,
+  tip,
   checked,
   onCheckedChange,
   disabled,
 }: {
   label: string;
   hint?: string;
+  tip?: string;
   checked: boolean;
   onCheckedChange: (checked: boolean) => void;
   disabled?: boolean;
@@ -206,12 +208,16 @@ export function FormSwitch({
   const id = useId();
   return (
     <div className="sa-scope sa-form-field">
-      <label htmlFor={id} className="sa-form-label">{label}</label>
+      <div className="sa-form-label-row is-tip">
+        <label htmlFor={id} className="sa-form-label">{label}</label>
+        {tip && <InfoTip text={tip} />}
+      </div>
       <div className="sa-control">
-        <Switch id={id} checked={checked} onCheckedChange={onCheckedChange} disabled={disabled} />
+        <Switch id={id} checked={checked} onCheckedChange={onCheckedChange} disabled={disabled} aria-describedby={tip ? `${id}-tip` : undefined} />
         <span className="sa-muted">{checked ? '已开启' : '已关闭'}</span>
       </div>
       {hint && <span className="sa-form-hint">{hint}</span>}
+      {tip && <span id={`${id}-tip`} className="sa-sr-only">{tip}</span>}
     </div>
   );
 }
@@ -379,6 +385,8 @@ interface FormInputProps {
   placeholder?: string;
   /** 常驻输入框下方的说明文字（弹窗里不隐藏，便于边填边看）。 */
   hint?: string;
+  /** 较长的补充说明：收进标签旁的 ⓘ，悬停 / 聚焦 / 点按显示，同时挂到 aria-describedby。 */
+  tip?: string;
   autoComplete?: string;
   disabled?: boolean;
   required?: boolean;
@@ -398,6 +406,7 @@ export function FormInput({
   type = 'text',
   placeholder,
   hint,
+  tip,
   autoComplete,
   disabled,
   required,
@@ -411,43 +420,94 @@ export function FormInput({
 }: FormInputProps) {
   const id = useId();
   const hintId = `${id}-hint`;
+  const tipId = `${id}-tip`;
+  const describedBy = [hint ? hintId : '', tip ? tipId : ''].filter(Boolean).join(' ') || undefined;
+  const control = textarea ? (
+    <textarea
+      id={id}
+      className="sa-input sa-textarea"
+      value={value}
+      rows={rows}
+      placeholder={placeholder}
+      disabled={disabled}
+      required={required}
+      aria-describedby={describedBy}
+      onChange={(event) => onChange(event.target.value)}
+    />
+  ) : (
+    <input
+      id={id}
+      className="sa-input"
+      type={type}
+      value={value}
+      placeholder={placeholder}
+      autoComplete={autoComplete}
+      disabled={disabled}
+      required={required}
+      spellCheck={spellCheck}
+      min={min}
+      max={max}
+      step={step}
+      inputMode={inputMode}
+      aria-describedby={describedBy}
+      onChange={(event) => onChange(event.target.value)}
+    />
+  );
+
+  if (tip) {
+    // 带 ⓘ 时标签与输入框用 htmlFor 关联：ⓘ 不能放进 <label>，否则它的名字会混进输入框的可访问名称。
+    return (
+      <div className="sa-scope sa-form-field">
+        <div className="sa-form-label-row is-tip">
+          <label htmlFor={id} className="sa-form-label">{label}</label>
+          <InfoTip text={tip} />
+        </div>
+        {control}
+        {hint && <span id={hintId} className="sa-form-hint">{hint}</span>}
+        <span id={tipId} className="sa-sr-only">{tip}</span>
+      </div>
+    );
+  }
+
   return (
     <label className="sa-scope sa-form-field" htmlFor={id}>
       <span className="sa-form-label">{label}</span>
-      {textarea ? (
-        <textarea
-          id={id}
-          className="sa-input sa-textarea"
-          value={value}
-          rows={rows}
-          placeholder={placeholder}
-          disabled={disabled}
-          required={required}
-          aria-describedby={hint ? hintId : undefined}
-          onChange={(event) => onChange(event.target.value)}
-        />
-      ) : (
-        <input
-          id={id}
-          className="sa-input"
-          type={type}
-          value={value}
-          placeholder={placeholder}
-          autoComplete={autoComplete}
-          disabled={disabled}
-          required={required}
-          spellCheck={spellCheck}
-          min={min}
-          max={max}
-          step={step}
-          inputMode={inputMode}
-          aria-describedby={hint ? hintId : undefined}
-          onChange={(event) => onChange(event.target.value)}
-        />
-      )}
+      {control}
       {hint && <span id={hintId} className="sa-form-hint">{hint}</span>}
     </label>
   );
+}
+
+/** 弹窗里自定义控件的字段容器：标签（可带 ⓘ）+ 任意内容。 */
+export function FormField({
+  label,
+  tip,
+  hint,
+  children,
+  span,
+}: {
+  label: string;
+  tip?: string;
+  hint?: string;
+  children: React.ReactNode;
+  span?: boolean;
+}) {
+  const id = useId();
+  return (
+    <div className={cx('sa-scope sa-form-field', span && 'sa-form-span')} role="group" aria-labelledby={`${id}-label`}>
+      <div className="sa-form-label-row is-tip">
+        <span id={`${id}-label`} className="sa-form-label">{label}</span>
+        {tip && <InfoTip text={tip} />}
+      </div>
+      {children}
+      {hint && <span className="sa-form-hint">{hint}</span>}
+    </div>
+  );
+}
+
+/** 弹窗里的分组小标题。 */
+export function FormSection({ title, span = true }: { title: string; span?: boolean }) {
+  return <h4 className={cx('sa-scope sa-form-section', span && 'sa-form-span')}>{title}</h4>;
 }
 
 /* ========== FormSelect（弹窗里的下拉：标签在上，下拉占满整行） ========== */

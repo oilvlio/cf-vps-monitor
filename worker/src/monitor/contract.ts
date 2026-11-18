@@ -762,10 +762,11 @@ export function buildMonitorPingRows(
     }
   }
   ping.sort((a, b) => {
-    if (a.ts !== b.ts) return a.ts - b.ts;
     const orderDiff = (taskOrder?.get(a.task_id) ?? Number.MAX_SAFE_INTEGER)
       - (taskOrder?.get(b.task_id) ?? Number.MAX_SAFE_INTEGER);
-    return orderDiff || a.task_id - b.task_id;
+    if (orderDiff) return orderDiff;
+    if (a.ts !== b.ts) return a.ts - b.ts;
+    return a.task_id - b.task_id;
   });
   for (const [taskId, tally] of totals) {
     if (tally.lost > 0 && tally.total > 0) {

@@ -447,17 +447,20 @@ assert.equal(smallStep.ping[1].band, undefined, '零高度带不该出现');
 // 空输入
 eq(buildMonitorPingRows(null, 60), { ping: [], loss: {} });
 
-// 按 ts 再按 task_id 排序
-const sorted = buildMonitorPingRows({
-  3: [{ client: 'n', task_id: 3, time: '2026-01-01T00:05:00.000Z', value: 1 }],
-  1: [{ client: 'n', task_id: 1, time: '2026-01-01T00:05:00.000Z', value: 2 }],
-}, 60);
-eq(sorted.ping.map(row => row.task_id), [1, 3]);
-const prioritySorted = buildMonitorPingRows({
-  3: [{ client: 'n', task_id: 3, time: '2026-01-01T00:05:00.000Z', value: 1 }],
-  1: [{ client: 'n', task_id: 1, time: '2026-01-01T00:05:00.000Z', value: 2 }],
-}, 60, new Map([[3, 0], [1, 1]]));
-eq(prioritySorted.ping.map(row => row.task_id), [3, 1], 'same-timestamp rows follow backend task priority');
+// 与原版 a_probe_chart_follows_the_panel_order 一致：先按任务顺序，再按 ts。
+// 即使 a 在窗口第一个桶就回答，排在前面的 b 仍先出现。
+const panelOrder = buildMonitorPingRows({
+  1: [
+    { client: 'n', task_id: 1, time: '2026-01-01T00:00:00.000Z', value: 10 },
+    { client: 'n', task_id: 1, time: '2026-01-01T00:01:00.000Z', value: 10 },
+  ],
+  2: [{ client: 'n', task_id: 2, time: '2026-01-01T00:01:00.000Z', value: 20 }],
+  3: [{ client: 'n', task_id: 3, time: '2026-01-01T00:01:00.000Z', value: 30 }],
+}, 60, new Map([[2, 0], [1, 1], [3, 2]]));
+const t0 = Date.parse('2026-01-01T00:00:00.000Z') / 1000;
+eq(panelOrder.ping.map(row => [row.task_id, row.ts]), [
+  [2, t0 + 60], [1, t0], [1, t0 + 60], [3, t0 + 60],
+]);
 
 // --- probes / task ids ---
 eq(buildMonitorProbes([{ id: 1, name: '电信' }, { id: 2, name: '联通' }]), { 1: '电信', 2: '联通' });

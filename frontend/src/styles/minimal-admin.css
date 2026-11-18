@@ -1368,8 +1368,14 @@
 
 .admin-ip-copy {
   all: unset;
+  box-sizing: border-box;
   display: inline-flex;
-  padding: 3px;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  /* 按钮比文字行高，负外边距避免撑高行高；图标与 IP 文字垂直居中 */
+  margin-block: -2px;
+  padding: 0;
   border-radius: 4px;
   color: var(--sa-muted-foreground);
   cursor: pointer;
@@ -2481,6 +2487,28 @@
   justify-content: flex-start;
   align-items: center;
   gap: 6px;
+}
+
+/* 开关字段：标签（+ⓘ）在左，开关与「已开启/已关闭」在右，同一行 */
+.sa-form-field.is-inline {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px 12px;
+}
+
+.sa-form-field.is-inline > .sa-form-label-row {
+  min-width: 0;
+}
+
+.sa-form-field.is-inline > .sa-control {
+  flex: none;
+  gap: 8px;
+}
+
+.sa-form-field.is-inline > .sa-form-hint {
+  flex-basis: 100%;
 }
 
 .sa-form-section {

@@ -1923,9 +1923,9 @@ html[data-monitor-theme='aurora'] .node-filter-panel {
 }
 
 .admin-ip-copy {
-  width: 24px !important;
-  min-width: 24px !important;
-  height: 24px !important;
+  width: 20px !important;
+  min-width: 20px !important;
+  height: 20px !important;
   cursor: pointer;
 }
 

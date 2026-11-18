@@ -197,6 +197,7 @@ export function FormSwitch({
   checked,
   onCheckedChange,
   disabled,
+  inline,
 }: {
   label: string;
   hint?: string;
@@ -204,10 +205,12 @@ export function FormSwitch({
   checked: boolean;
   onCheckedChange: (checked: boolean) => void;
   disabled?: boolean;
+  /** 标签与开关同一行（默认标签在上、开关另起一行）。 */
+  inline?: boolean;
 }) {
   const id = useId();
   return (
-    <div className="sa-scope sa-form-field">
+    <div className={`sa-scope sa-form-field${inline ? ' is-inline' : ''}`}>
       <div className="sa-form-label-row is-tip">
         <label htmlFor={id} className="sa-form-label">{label}</label>
         {tip && <InfoTip text={tip} />}

@@ -684,12 +684,13 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
 
         <FormSection title="显示与续费" />
         <FormSwitch
+          inline
           label="对游客完全隐藏"
           tip="「完全隐藏」后节点整体不出现在游客前台；价格信息会下发给主题，由主题决定是否展示。"
           checked={Boolean(form.hidden)}
           onCheckedChange={v => update('hidden', v)}
         />
-        <FormSwitch label="自动续费" checked={Boolean(form.auto_renewal)} onCheckedChange={v => update('auto_renewal', v)} />
+        <FormSwitch inline label="自动续费" checked={Boolean(form.auto_renewal)} onCheckedChange={v => update('auto_renewal', v)} />
       </div>
     </MinimalDialog>
   );

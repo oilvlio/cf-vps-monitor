@@ -19,8 +19,8 @@ import {
 import type { SettingsLayoutOutletContext } from './SettingsLayout';
 
 // 默认值与允许范围需与 worker/src/settings/schema.ts 保持一致。
-const DEFAULT_RETENTION_HOURS = 168;
-const MAX_RETENTION_HOURS = 168;
+const DEFAULT_RETENTION_HOURS = 720;
+const MAX_RETENTION_HOURS = 720;
 const DEFAULT_ACTIVE_SAMPLE_SEC = 3;
 const DEFAULT_IDLE_UPLOAD_SEC = 120;
 const MIN_IDLE_UPLOAD_SEC = 60;
@@ -223,7 +223,7 @@ export default function SettingsGeneral() {
             placeholder={String(DEFAULT_RETENTION_HOURS)}
             value={getSettingValue(settings, 'record_preserve_time', getSettingValue(settings, 'ping_record_preserve_time', String(DEFAULT_RETENTION_HOURS)))}
             onChange={updateRetentionHours}
-            hint="超过这个时长的历史自动删除，最多 168 小时（7 天），监控与 Ping 历史通用。最近 1 天保留原始精度，更早的合并为每小时一个点。"
+            hint="超过这个时长的历史自动删除，最多 720 小时（30 天），监控与 Ping 历史通用。最近 1 天保留原始精度，更早的合并为每小时一个点。保留越久占用的数据库空间越大（约与天数成正比），超过熔断线会暂停历史写入。"
           />
         </Rows>
       </Card>

@@ -1,5 +1,14 @@
 import { validateWebhookUrl } from '../utils/webhook.ts';
 
+/**
+ * 历史保留时间（小时）：与 monitor-hub 的默认 30 天一致。
+ * 默认值必须与 supabase/migrations/1_schema.sql 的 seed 一致（seed 写的是真实行，
+ * 只对新装生效；存量部署保留各自已存的值，需要在后台「保留时间」里手动调整）。
+ * monitor 兼容层的 history_days / hours 上限（MONITOR_HISTORY_DAYS）也跟随这个上限。
+ */
+export const RECORD_RETENTION_DEFAULT_HOURS = 720;
+export const RECORD_RETENTION_MAX_HOURS = 720;
+
 type SettingType = 'string' | 'boolean' | 'integer' | 'enum';
 
 interface SettingDefinition {
@@ -86,17 +95,17 @@ export const SETTING_SCHEMA = {
   },
   record_preserve_time: {
     type: 'integer',
-    defaultValue: '168',
+    defaultValue: String(RECORD_RETENTION_DEFAULT_HOURS),
     public: false,
     min: 1,
-    max: 168,
+    max: RECORD_RETENTION_MAX_HOURS,
   },
   ping_record_preserve_time: {
     type: 'integer',
-    defaultValue: '168',
+    defaultValue: String(RECORD_RETENTION_DEFAULT_HOURS),
     public: false,
     min: 1,
-    max: 168,
+    max: RECORD_RETENTION_MAX_HOURS,
   },
   record_persist_interval_sec: {
     type: 'integer',
@@ -118,7 +127,9 @@ export const SETTING_SCHEMA = {
   },
   record_high_watermark_rows: {
     type: 'integer',
-    defaultValue: '700000',
+    // 30 天保留期下，每个节点的 records + ping_snapshots 约 4.3 万行（120s 间隔）；
+    // 行数线只是粗糙代理，真正卡磁盘的是下面的字节线，所以这里按保留期同比放宽。
+    defaultValue: '3000000',
     public: false,
     min: 1000,
     max: 10000000,

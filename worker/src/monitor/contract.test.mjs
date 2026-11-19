@@ -32,32 +32,44 @@ const {
   monitorTasksForClient,
 } = createWorkerLoader().load('worker/src/monitor/contract.ts');
 
-// --- step: 预算公式与 preview/hub.js 的 history() 一致（hours 已 clamp 到 7d） ---
-// budget = clamp(points || 1440, 60, 1440); step = 60 * max(1, ceil(hours*3600/60/budget))
+// --- step: 预算公式与 hub 的 span()（api.rs）一致 ---
+// budget = clamp(points || 1440, 60, 1440)
+// hours <= 7d: step = 60 * max(1, ceil(hours*3600/60/budget))
+// hours >  7d: 读小时级数据，step = 3600 * max(1, ceil(hours/budget))
 assert.equal(monitorStep(6), 60);            // 默认 points=1440
 assert.equal(monitorStep(6, 1440), 60);
 assert.equal(monitorStep(24, 1440), 60);
 assert.equal(monitorStep(24, 120), 720);
-assert.equal(monitorStep(168, 1440), 420);   // 7d 仍是分钟步长
-assert.equal(monitorStep(720, 1440), 420);   // 30d 档位被 clamp 到 7d
-assert.equal(monitorStep(720, 60), 10080);   // 7d 窗口 + points 下限 60 → 2.8h 步长
+assert.equal(monitorStep(168, 1440), 420);   // 7d 仍是分钟步长（DETAIL_DAYS 边界，含）
+assert.equal(monitorStep(168, 60), 10080);   // 7d 窗口 + points 下限 60 → 2.8h 步长
+assert.equal(monitorStep(169, 1440), 3600);  // 刚过 7d：小时级，整小时步长
+assert.equal(monitorStep(720, 1440), 3600);  // 30d：720 个 1 小时点，与 hub 一致
+assert.equal(monitorStep(720, 720), 3600);
+assert.equal(monitorStep(720, 60), 43200);   // 30d 窗口 + points 下限 60 → 12h 步长
 assert.equal(monitorStep(1, 30), 60);        // points 低于下限被夹到 60
 assert.equal(monitorStep(1, 99999), 60);     // ...高于上限夹到 1440
 
-// hours clamp：默认 6，[1, 7d]
+// hours clamp：默认 6，[1, 30d]
 assert.equal(monitorHours(undefined), 6);
 assert.equal(monitorHours('0'), 6);
 assert.equal(monitorHours('-5'), 6);
 assert.equal(monitorHours(1), 1);
-assert.equal(monitorHours(720), 7 * 24);       // 30 天档位被收到 rollup 保留上限
-assert.equal(monitorHours(99999), MONITOR_HISTORY_DAYS * 24);
+assert.equal(MONITOR_HISTORY_DAYS, 30, 'history_days 与 hub 默认保留期一致');
+assert.equal(monitorHours(720), 30 * 24);      // 30 天档位在保留期内，原样返回
+assert.equal(monitorHours(99999), MONITOR_HISTORY_DAYS * 24);  // 超出保留期被收到上限
 
-// 每个请求的 step 都是 60s 的整数倍（hours 已 clamp 到 7d，hub 的 3600s 分支走不到）
-for (const hours of [1, 6, 24, 72, 168, 169, 720]) {
+// 每个请求的 step 都是 60s 的整数倍；超过 7d 的窗口是整小时倍数（一个小时的汇总桶
+// 不跨两个点），且不超过 SQL 桶宽上限（一天）。
+for (const hours of [1, 6, 24, 72, 168, 169, 336, 720, 99999]) {
   for (const points of [60, 120, 360, 720, 1440]) {
     const step = monitorStep(hours, points);
     assert.equal(step % 60, 0, `step ${step} 应是 60 的整数倍`);
     assert.ok(step >= 60, 'step 至少一分钟');
+    assert.ok(step <= 86400, `step ${step} 不能超过 SQL 桶宽上限（一天）`);
+    if (hours > 168) assert.equal(step % 3600, 0, `hours=${hours} 的 step ${step} 应是整小时`);
+    // 点数预算：窗口内的桶数不超过预算（向上取整后只会更少）。
+    const windowHours = Math.min(hours, 720);
+    assert.ok((windowHours * 3600) / step <= Math.max(60, Math.min(points, 1440)) + 1e-9, `hours=${hours} points=${points} 超出点数预算`);
   }
 }
 
@@ -128,7 +140,7 @@ const me = buildMonitorMe({ siteUrl: 'https://status.example', siteName: '我的
 eq(me, {
   authed: false,
   github: false,
-  history_days: 7,
+  history_days: 30,
   public_page: true,
   site: 'https://status.example',
   site_name: '我的监控',

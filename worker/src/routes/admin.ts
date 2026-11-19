@@ -13,7 +13,7 @@ import { buildTotpUri, generateTotpSecret, verifyTotpCode } from '../auth/totp';
 import { invalidateAdminSessionCache } from '../auth/admin-session';
 import { hashPassword, validateAdminPasswordStrength, verifyPassword } from '../auth/password';
 import { clearMfaStepUpCookie, setAdminSessionCookie, setMfaStepUpCookie } from '../auth/session';
-import { SETTING_SCHEMA, buildAdminSettings, sanitizeSettingsForStorage } from '../settings/schema';
+import { RECORD_RETENTION_DEFAULT_HOURS, RECORD_RETENTION_MAX_HOURS, SETTING_SCHEMA, buildAdminSettings, sanitizeSettingsForStorage } from '../settings/schema';
 import {
   BACKUP_ENCRYPTION_ALGORITHM,
   ENCRYPTED_BACKUP_SCHEMA_ID,
@@ -901,8 +901,8 @@ function parseUniqueStringList(value: unknown, maxItems = 100): { ok: true; valu
 
 async function runMaintenanceCleanup(database: db.QueryDatabase, username: string, now = new Date()) {
   const settings = buildAdminSettings(await db.getSettingsByKeys(database, MAINTENANCE_CLEANUP_SETTING_KEYS));
-  const recordHours = Math.min(168, Math.max(1, Number(settings.record_preserve_time || 168)));
-  const pingHours = Math.min(168, Math.max(1, Number(settings.ping_record_preserve_time || recordHours)));
+  const recordHours = Math.min(RECORD_RETENTION_MAX_HOURS, Math.max(1, Number(settings.record_preserve_time || RECORD_RETENTION_DEFAULT_HOURS)));
+  const pingHours = Math.min(RECORD_RETENTION_MAX_HOURS, Math.max(1, Number(settings.ping_record_preserve_time || recordHours)));
   const auditHours = Math.max(24, Number(settings.audit_log_preserve_time || 2160));
   const before = {
     records: new Date(now.getTime() - recordHours * 60 * 60 * 1000).toISOString(),

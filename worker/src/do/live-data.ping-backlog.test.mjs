@@ -77,7 +77,8 @@ test('retrying an already stored batch does not duplicate rows', async t => {
 
 test('results probed before the retention window are discarded, future stamps are clamped', async t => {
   const { database, object } = await setup(t);
-  const receivedAt = T0 + 10 * 24 * 3600_000;
+  // 保留期是 30 天：探测时间比收到时间早 40 天，必然超出窗口。
+  const receivedAt = T0 + 40 * 24 * 3600_000;
   await object.persistPingResult('backlog-node', round(T0, 50, 60), receivedAt);
   await object.persistPingResult('backlog-node', round(receivedAt + 3600_000, 51, 61), receivedAt);
   const rows = (await database.query('select time, values_json from ping_snapshots order by time')).rows;

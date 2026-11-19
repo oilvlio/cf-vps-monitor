@@ -24,7 +24,7 @@ import { AuthConfigurationError, verifyAdminToken, type AdminJwtPayload } from '
 import { isMfaStepUpProtectedRequest } from './auth/mfa-policy';
 import { verifyMfaToken } from './auth/mfa-token';
 import { getAdminSessionToken, getMfaStepUpToken, verifyAdminCsrfToken } from './auth/session';
-import { buildAdminSettings } from './settings/schema';
+import { RECORD_RETENTION_DEFAULT_HOURS, RECORD_RETENTION_MAX_HOURS, buildAdminSettings } from './settings/schema';
 import { bestEffortRecordHealthEvent, errorDetail, type StoredHealthComponent } from './utils/observability';
 import { NOTIFICATION_DISPATCH_SETTING_KEYS, deliverNotification, dispatchNotification } from './utils/notification-dispatch';
 import { currentScheduledBudget, rotateScheduledItems, scheduledItems, ScheduledBudget, ScheduledBudgetExceeded, withScheduledBudget, type ScheduledCursorContext } from './utils/scheduled-budget';
@@ -566,8 +566,8 @@ async function runRecordCleanup(context: ScheduledRunContext, now: Date): Promis
   if (Number.isFinite(lastCleanupAt) && now.getTime() - lastCleanupAt < RECORD_CLEANUP_INTERVAL_MS) {
     return;
   }
-  const recordHours = Math.min(168, Math.max(1, Number(settings['record_preserve_time'] || 168)));
-  const pingHours = Math.min(168, Math.max(1, Number(settings['ping_record_preserve_time'] || recordHours)));
+  const recordHours = Math.min(RECORD_RETENTION_MAX_HOURS, Math.max(1, Number(settings['record_preserve_time'] || RECORD_RETENTION_DEFAULT_HOURS)));
+  const pingHours = Math.min(RECORD_RETENTION_MAX_HOURS, Math.max(1, Number(settings['ping_record_preserve_time'] || recordHours)));
   const auditHours = Math.max(24, Number(settings['audit_log_preserve_time'] || 2160));
 
   const recordBefore = new Date(now.getTime() - recordHours * 60 * 60 * 1000).toISOString();

@@ -13,6 +13,7 @@ import * as db from '../db/queries';
 import { getDatabase, type DatabaseProviderEnv } from '../db/provider';
 import { MAX_PING_RESULTS_PER_REPORT, MAX_PING_VALUE_MS, PING_LOSS_VALUE, validatePingResults } from '../utils/ping-result';
 import {
+  RECORD_RETENTION_MAX_HOURS,
   buildAdminSettings,
   isRecordPersistenceEnabled as normalizeRecordPersistenceEnabled,
 } from '../settings/schema';
@@ -56,12 +57,12 @@ const PING_RECORD_PERSIST_INTERVAL_MS = 120_000;
 const MIN_RECORD_PERSIST_INTERVAL_MS = 3_000;
 const MAX_RECORD_PERSIST_INTERVAL_MS = 3_600_000;
 const MIN_PING_RECORD_PERSIST_INTERVAL_MS = 60_000;
-// 积压的 Ping 结果最多允许比收到时间早多久；与历史最长保留期一致。
-const PING_OBSERVED_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+// 积压的 Ping 结果最多允许比收到时间早多久；与历史最长保留期一致（RECORD_RETENTION_MAX_HOURS）。
+const PING_OBSERVED_MAX_AGE_MS = RECORD_RETENTION_MAX_HOURS * 60 * 60 * 1000;
 const MAX_PING_RECORD_PERSIST_INTERVAL_MS = 3_600_000;
 const RECORD_SETTING_CACHE_MS = 30_000;
 const LIVE_VIEWER_WS_PROTOCOL = 'cf-monitor-viewer';
-const RECORD_HIGH_WATERMARK_DEFAULT_ROWS = 700_000;
+const RECORD_HIGH_WATERMARK_DEFAULT_ROWS = 3_000_000;
 const RECORD_HIGH_WATERMARK_MIN_ROWS = 1_000;
 const RECORD_HIGH_WATERMARK_MAX_ROWS = 10_000_000;
 // 字节熔断线：Supabase 卡的是磁盘字节，行数只是它的粗糙代理

@@ -17,14 +17,18 @@
  */
 
 import type { MonitorMetricsBucket, MonitorTrafficTotals, PingHistoryRecord, PingTask } from '../db/types';
+import { RECORD_RETENTION_MAX_HOURS } from '../settings/schema';
 import { toPublicClient, type PublicClient } from '../utils/public-client';
 import { trafficPeriodStart } from '../utils/traffic-samples';
 
-// 公开历史只暴露 7 天：rollup 的保留时间 record_preserve_time 默认且最大 168h
-// （见后台「保留时间」设置），再往前查只会得到空桶。monitor 的 history_days 和
-// hours 上限都用它，避免主题提供根本查不到数据的 30 天档位。
-export const MONITOR_HISTORY_DAYS = 7;
+// 公开历史暴露 30 天，与 monitor-hub 的默认保留期一致：record_preserve_time 默认且
+// 最大 720h（见后台「保留时间」设置，上限常量 RECORD_RETENTION_MAX_HOURS），再往前查
+// 只会得到空桶。monitor 的 history_days 和 hours 上限都用它。
+// 后台把保留时间调低时 history_days 仍报这个值（与保留上限对齐，不随设置动态变化）。
+export const MONITOR_HISTORY_DAYS = RECORD_RETENTION_MAX_HOURS / 24;
 export const MONITOR_MAX_HOURS = MONITOR_HISTORY_DAYS * 24;
+// hub 的 DETAIL_DAYS：窗口超过它就改读小时级数据，步长取整小时（见 monitorStep）。
+export const MONITOR_DETAIL_DAYS = 7;
 export const MONITOR_POINTS_MIN = 60;
 export const MONITOR_POINTS_MAX = 1440;
 export const MONITOR_POINTS_DEFAULT = 1440;
@@ -81,7 +85,7 @@ export function unixSeconds(value: unknown): number {
   return 0;
 }
 
-/** 请求的 hours，clamp 到 [1, 7d]（与 rollup 保留时间一致），默认 6（与 hub 的 history() 一致）。 */
+/** 请求的 hours，clamp 到 [1, 30d]（与历史保留时间一致），默认 6（与 hub 的 history() 一致）。 */
 export function monitorHours(raw: unknown): number {
   const parsed = typeof raw === 'number' ? raw : Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return 6;
@@ -90,10 +94,11 @@ export function monitorHours(raw: unknown): number {
 
 /**
  * 分桶步长（秒）：按 points 预算向上取整到分钟。
- * 预算公式与 hub 的 history() 一致；因为 hours 已被 clamp 到 7 天，hub 里
- * `hours > 7d` 的 3600s unit 分支永远不会走到。
+ * 与 hub 的 span()（api.rs）一致：
  *   budget = min(max(points || 1440, 60), 1440)
- *   step   = 60 * max(1, ceil(hours*3600 / 60 / budget))
+ *   hours <= 7d：unit = 60s，step = 60 * max(1, ceil(hours*3600 / 60 / budget))
+ *   hours >  7d：unit = 3600s（读小时级数据），step = 3600 * max(1, ceil(hours / budget))
+ * 小时级窗口的步长取整小时，保证一个小时的汇总桶不会跨两个点。
  */
 export function monitorStep(hoursInput: number, pointsInput?: unknown): number {
   const hours = monitorHours(hoursInput);
@@ -103,7 +108,8 @@ export function monitorStep(hoursInput: number, pointsInput?: unknown): number {
     MONITOR_POINTS_MIN,
     MONITOR_POINTS_MAX,
   );
-  return 60 * Math.max(1, Math.ceil((hours * 3600) / 60 / budget));
+  const unit = hours > MONITOR_DETAIL_DAYS * 24 ? 3600 : 60;
+  return unit * Math.max(1, Math.ceil((hours * 3600) / unit / budget));
 }
 
 /**

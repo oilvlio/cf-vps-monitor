@@ -37,7 +37,7 @@ const CLIENTS = [
     expired_at: '', traffic_limit: 0, traffic_limit_type: 'sum', traffic_reset_day: 1,
   },
   {
-    // 隐藏节点：留在 admin 元数据里，但绝不能进 monitor 帧。
+    // 隐藏节点：只进管理员连接的帧（public: false），绝不能进访客帧。
     uuid: 'node-hidden', name: '隐藏节点', sort_order: 3, hidden: true,
     region: 'JP', group: '', public_remark: '',
     os: 'Debian', kernel_version: '6.1', arch: 'x86_64', virtualization: 'kvm',
@@ -163,7 +163,7 @@ function seedLive(object, now) {
       timestamp: now - 5 * 3600 * 1000,
     },
   });
-  // 隐藏节点也有实时上报，但静态投影会把它过滤掉。
+  // 隐藏节点也有实时上报：访客帧的静态投影会过滤它，管理员帧会带上它。
   object.clients.set('node-hidden', {
     uuid: 'node-hidden',
     name: '隐藏节点',
@@ -185,7 +185,11 @@ test('静态投影由 admin 快照派生：冷启动即可出帧，无需 Worker
   assert.equal(socket.frames.length, 1);
   const frame = frameJson(socket.frames[0]);
   assert.equal(frame.admin, true);
-  assert.deepEqual(frame.nodes.map(node => node.id), [f.monitorNumericId('node-1'), f.monitorNumericId('node-2')]);
+  // 管理员连接的帧包含隐藏节点（排在最后：sort 3）；访客帧见下方专门的用例。
+  assert.deepEqual(
+    frame.nodes.map(node => node.id),
+    [f.monitorNumericId('node-1'), f.monitorNumericId('node-2'), f.monitorNumericId('node-hidden')],
+  );
 
   const online = frame.nodes[0];
   assert.equal(online.day_rx, 100);
@@ -269,9 +273,47 @@ test('admin 是每连接属性，不随共享投影广播', async () => {
   f.object.broadcastMonitorFrame(true);
   await f.storage.drain();
 
-  assert.equal(frameJson(admin.frames[0]).admin, true);
-  assert.equal(frameJson(guest.frames[0]).admin, false);
-  assert.deepEqual(frameJson(admin.frames[0]).nodes, frameJson(guest.frames[0]).nodes);
+  const adminFrame = frameJson(admin.frames[0]);
+  const guestFrame = frameJson(guest.frames[0]);
+  assert.equal(adminFrame.admin, true);
+  assert.equal(guestFrame.admin, false);
+
+  // 访客帧绝不含隐藏节点；管理员帧在此之上只多出隐藏节点，其余节点逐字段一致。
+  const hiddenId = f.monitorNumericId('node-hidden');
+  assert.equal(guestFrame.nodes.some(node => node.id === hiddenId), false);
+  assert.deepEqual(adminFrame.nodes.filter(node => node.id !== hiddenId), guestFrame.nodes);
+  assert.equal(adminFrame.nodes.filter(node => node.id === hiddenId).length, 1);
+});
+
+test('管理员帧里的隐藏节点：public=false、字段集与普通节点一致、带实时数据且不泄露私有字段', async () => {
+  const f = fixture({ storageEntries: [['admin-clients:snapshot', ADMIN_SNAPSHOT]] });
+  await ready(f.object);
+  seedLive(f.object, f.now);
+
+  const admin = monitoredSocket({ id: 'm-admin', admin: true });
+  const guest = monitoredSocket({ id: 'm-guest', admin: false });
+  f.object.registerSession(admin.ws, admin.ws.deserializeAttachment());
+  f.object.registerSession(guest.ws, guest.ws.deserializeAttachment());
+  f.object.broadcastMonitorFrame(true);
+  await f.storage.drain();
+
+  const hiddenId = f.monitorNumericId('node-hidden');
+  const adminFrame = frameJson(admin.frames[0]);
+  const hidden = adminFrame.nodes.find(node => node.id === hiddenId);
+  assert.ok(hidden, '管理员应看到隐藏节点');
+  assert.equal(hidden.public, false);
+  assert.equal(hidden.name, '隐藏节点');
+  assert.deepEqual(Object.keys(hidden).sort(), [...NODE_KEYS].sort(), '字段集必须与普通节点完全一致');
+  // 隐藏节点在线：管理员帧必须带上它的实时数据，而不是离线、全零。
+  assert.equal(hidden.online, true);
+  assert.ok(hidden.metrics);
+  assert.equal(hidden.metrics.cpu, 1, '应是隐藏节点自己的上报值');
+
+  // 访客帧的原文里连节点名都不能出现。
+  const guestText = JSON.stringify(frameJson(guest.frames[0]));
+  assert.equal(guestText.includes('隐藏节点'), false);
+  assert.equal(guestText.includes(String(hiddenId)), false);
+  assert.equal(frameJson(guest.frames[0]).nodes.length, 2);
 });
 
 test('/api/ws 帧：{admin, nodes} 全量快照，静态字段 + 实时合并', async () => {
@@ -287,7 +329,7 @@ test('/api/ws 帧：{admin, nodes} 全量快照，静态字段 + 实时合并', 
   assert.equal(socket.frames.length, 1);
   const frame = frameJson(socket.frames[0]);
   assert.equal(frame.admin, true);
-  assert.equal(frame.nodes.length, 2);
+  assert.equal(frame.nodes.length, 3, '管理员帧含隐藏节点');
 
   for (const node of frame.nodes) {
     assert.deepEqual(Object.keys(node).sort(), [...NODE_KEYS].sort());

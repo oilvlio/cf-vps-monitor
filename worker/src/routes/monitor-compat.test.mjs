@@ -50,10 +50,30 @@ const liveBody = {
   timestamp: NOW,
 };
 
+// 隐藏节点：只对管理员会话可见（getPublicClientsSnapshot 的 includeHidden）。
+const hiddenClient = { ...clients[1], uuid: 'node-hidden', name: '隐藏节点', hidden: true, sort_order: 9 };
+// DO 的 /live：只有带 include_hidden 才包含隐藏节点的实时条目（与真实 DO 一致）。
+function liveBodyFor(includeHidden) {
+  if (!includeHidden) return liveBody;
+  return {
+    ...liveBody,
+    online: [...liveBody.online, 'node-hidden'],
+    count: liveBody.count + 1,
+    data: { ...liveBody.data, 'node-hidden': { cpu: 3, timestamp: NOW - 5000, lastReportTime: NOW - 3000 } },
+  };
+}
+
+const liveRequests = [];
 const env = {
   LIVE_DATA: {
     idFromName: () => 'global',
-    get: () => ({ fetch: async () => new Response(JSON.stringify(liveBody), { headers: { 'Content-Type': 'application/json' } }) }),
+    get: () => ({
+      fetch: async (request) => {
+        const search = new URL(request.url).search;
+        liveRequests.push(search);
+        return new Response(JSON.stringify(liveBodyFor(search.includes('include_hidden=1'))), { headers: { 'Content-Type': 'application/json' } });
+      },
+    }),
   },
 };
 
@@ -133,7 +153,10 @@ const loader = createWorkerLoader({
   },
   overrides: {
     'worker/src/routes/public.ts': {
-      getPublicClientsSnapshot: async () => ({ clients, nodes: [], publicClientIds: new Set(clients.map(c => c.uuid)) }),
+      getPublicClientsSnapshot: async (_c, _database, _force, includeHidden) => {
+        const list = includeHidden ? [...clients, hiddenClient] : clients;
+        return { clients: list, nodes: [], publicClientIds: new Set(list.map(c => c.uuid)) };
+      },
       guardPublicMetadata: async () => null,
       guardMonitorMetrics: async () => null,
       hasAdminSession: async () => adminAllowed,
@@ -348,6 +371,50 @@ const get = path => monitorCompatRoutes.request(path, { method: 'GET' }, env);
       body: '[]',
     }, env);
     assert.equal(invalid.status, 400, 'configuration must be a JSON object');
+  } finally {
+    adminAllowed = false;
+  }
+}
+
+// --- 管理员会话可见隐藏节点（与内置前台一致），访客不可见 ---
+{
+  const HIDDEN_ID = monitorNumericId('node-hidden');
+
+  // 访客：没有隐藏节点，实时数据请求也不带 include_hidden。
+  liveRequests.length = 0;
+  const guest = await (await get('/nodes')).json();
+  assert.equal(guest.admin, false);
+  assert.equal(guest.nodes.some(n => n.id === HIDDEN_ID), false);
+  assert.ok(liveRequests.length > 0 && liveRequests.every(search => !search.includes('include_hidden')));
+  const guestMetrics = await (await get(`/nodes/${HIDDEN_ID}/metrics?hours=1`)).json();
+  assert.deepEqual(guestMetrics.metrics, [], '访客查隐藏节点历史得到空结果');
+
+  adminAllowed = true;
+  try {
+    liveRequests.length = 0;
+    const res = await monitorCompatRoutes.request('/nodes', {
+      method: 'GET',
+      headers: { Cookie: 'cf_monitor_session=test' },
+    }, env);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('Cache-Control'), /no-store/, '管理员响应不能进共享缓存');
+    const body = await res.json();
+    assert.equal(body.admin, true);
+    const hidden = body.nodes.find(n => n.id === HIDDEN_ID);
+    assert.ok(hidden, '管理员应看到隐藏节点');
+    assert.equal(hidden.public, false);
+    assert.equal(hidden.online, true, '隐藏节点的实时数据要带上');
+    assert.equal(hidden.metrics.cpu, 3);
+    // 其余节点与访客视图是同一批；字段集与普通节点一致（不多出私有字段）。
+    assert.deepEqual(body.nodes.filter(n => n.id !== HIDDEN_ID).map(n => n.id), guest.nodes.map(n => n.id));
+    assert.deepEqual(Object.keys(hidden).sort(), Object.keys(body.nodes.find(n => n.id === ID1)).sort());
+    assert.ok(liveRequests.some(search => search.includes('include_hidden=1')), '管理员请求实时数据应带 include_hidden');
+
+    // 管理员可以查看隐藏节点的历史。
+    recordCalls.length = 0;
+    const metrics = await (await get(`/nodes/${HIDDEN_ID}/metrics?hours=1`)).json();
+    assert.ok(metrics.metrics.length > 0, '管理员能拿到隐藏节点的历史');
+    assert.ok(recordCalls.includes('node-hidden'));
   } finally {
     adminAllowed = false;
   }

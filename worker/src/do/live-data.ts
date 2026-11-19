@@ -466,6 +466,8 @@ export class LiveDataDO {
   // MONITOR_DATA_REFRESH_MS 节流刷新，且只在存在 monitor 订阅者时才刷新。
   // 只保留公开节点；admin 是每个订阅连接自己的属性（见 SessionAttachment.admin）。
   private monitorStaticNodes: MonitorNodeStatic[] | null = null;
+  // 管理员连接用的投影：多出 hidden 节点（public: false）。没有隐藏节点时与上面同一个数组。
+  private monitorStaticNodesAdmin: MonitorNodeStatic[] | null = null;
   private monitorTrafficTotals: Record<string, db.MonitorTrafficTotals> = {};
   private monitorDataRefreshedAt = 0;
   private monitorDataPending: Promise<void> | null = null;
@@ -807,8 +809,10 @@ export class LiveDataDO {
    * buildMonitorStaticNodesFromClients：toPublicClient 白名单 + hidden 过滤 + 与
    * /api/nodes 一致的排序。
    */
-  private buildMonitorStaticNodes(): MonitorNodeStatic[] {
-    return buildMonitorStaticNodesFromClients(this.adminClientMetadata.values(), this.monitorTrafficTotals);
+  private buildMonitorStaticNodes(): { visible: MonitorNodeStatic[]; admin: MonitorNodeStatic[] } {
+    const admin = buildMonitorStaticNodesFromClients(this.adminClientMetadata.values(), this.monitorTrafficTotals, true);
+    const visible = admin.every(node => node.public) ? admin : admin.filter(node => node.public);
+    return { visible, admin };
   }
 
   /**
@@ -846,7 +850,9 @@ export class LiveDataDO {
       } catch {
         // 保持上一份投影；读取失败不应打断广播。
       } finally {
-        this.monitorStaticNodes = this.buildMonitorStaticNodes();
+        const projections = this.buildMonitorStaticNodes();
+        this.monitorStaticNodes = projections.visible;
+        this.monitorStaticNodesAdmin = projections.admin;
         this.monitorDataRefreshedAt = now;
       }
     })().catch(() => undefined).finally(() => {
@@ -947,7 +953,7 @@ export class LiveDataDO {
    * `admin` 取该连接建连时的身份，不能存在共享投影里——否则会广播给所有人。
    */
   private buildMonitorFrameText(nowMs: number, admin: boolean): string {
-    const meta = this.monitorStaticNodes;
+    const meta = admin ? this.monitorStaticNodesAdmin : this.monitorStaticNodes;
     if (!meta) return JSON.stringify({ admin, nodes: [] });
     const nodes = meta.map((node) => {
       // online 只看 this.clients（在线上报表）；lastKnownClients 是离线保留值，
@@ -955,7 +961,8 @@ export class LiveDataDO {
       const liveClient = this.clients.get(node.uuid);
       const retained = liveClient ?? this.lastKnownClients.get(node.uuid);
       const online = Boolean(liveClient && (!liveClient.expiresAt || liveClient.expiresAt > nowMs));
-      const live = retained ? this.projectSnapshotClient(retained, false, !online) : null;
+      // 管理员帧里的隐藏节点（public: false）也要带实时数据，否则会显示成离线、全零。
+      const live = retained ? this.projectSnapshotClient(retained, admin && !node.public, !online) : null;
       return buildMonitorNodeFromStatic({
         node,
         live,

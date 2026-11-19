@@ -172,7 +172,9 @@ monitorCompatRoutes.get('/nodes', async (c) => {
     database,
     env: c.env,
     siteUrl: requestOrigin(c),
-    snapshot: () => getPublicClientsSnapshot(c, database, false, false),
+    // 管理员会话看得到隐藏节点（与内置前台 include_hidden 一致）；字段仍是
+    // toPublicClient 白名单，不含 hostname / ip / remark 等私有字段。
+    snapshot: includeHidden => getPublicClientsSnapshot(c, database, false, includeHidden),
     adminSession: () => hasAdminSession(c),
   });
   const { admin, nodes } = loaded;
@@ -246,7 +248,8 @@ monitorCompatRoutes.get('/nodes/:id/metrics', async (c) => {
 
   const snapshotAt = performance.now();
   const database = getDatabase(c.env);
-  const snapshot = await getPublicClientsSnapshot(c, database, false, false);
+  // 非匿名即管理员会话：允许查看隐藏节点的历史，否则管理员点进隐藏节点只会得到空图表。
+  const snapshot = await getPublicClientsSnapshot(c, database, false, !anonymous);
   const snapshotMs = performance.now() - snapshotAt;
   monitorMetricsQuota.update(snapshot.clients.length);
   // 契约里的 id 是整数，DB 主键是 UUID：按同一套哈希映射回来，避免把哈希值当

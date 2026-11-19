@@ -33,10 +33,12 @@ export async function timed<T>(work: () => Promise<T>): Promise<Timed<T>> {
 /** loadNodes 需要的 Worker 绑定：只有 LIVE_DATA。 */
 export type LoadNodesEnv = { LIVE_DATA: Bindings['LIVE_DATA'] };
 
-async function readLive(env: LoadNodesEnv): Promise<LiveSnapshot> {
+async function readLive(env: LoadNodesEnv, includeHidden: boolean): Promise<LiveSnapshot> {
   try {
+    // 管理员会话才带 include_hidden：否则 DO 会把隐藏节点的实时条目过滤掉，
+    // 管理员看到的隐藏节点会是「离线、全零」。
     const response = await liveDataStub(env.LIVE_DATA)
-      .fetch(new Request('https://do/live', { method: 'GET' }));
+      .fetch(new Request(`https://do/live${includeHidden ? '?include_hidden=1' : ''}`, { method: 'GET' }));
     return await readLiveSnapshot(response) ?? { online: [], count: 0 };
   } catch {
     return { online: [], count: 0 };
@@ -76,21 +78,23 @@ export type LoadNodesDeps = {
   env: LoadNodesEnv;
   /** /api/nodes 请求的 origin（hub 契约里 me.site 的口径）。 */
   siteUrl: string;
-  /** 公开节点快照（带 overlay 与可见性处理）。 */
-  snapshot: () => Promise<{ clients: readonly PublicClient[] }>;
+  /** 公开节点快照（带 overlay 与可见性处理）；管理员会话时 includeHidden 为 true。 */
+  snapshot: (includeHidden: boolean) => Promise<{ clients: readonly PublicClient[] }>;
   /** 当前请求是否管理员会话。 */
   adminSession: () => Promise<boolean>;
 };
 
 export async function loadNodes(deps: LoadNodesDeps): Promise<LoadNodesResult> {
-  const [snapshotResult, liveResult, adminResult] = await Promise.all([
-    timed(() => deps.snapshot()),
-    timed(() => readLive(deps.env)),
-    timed(() => deps.adminSession()),
+  // 管理员身份要先于快照与实时数据确定：它决定是否包含隐藏节点。匿名请求没有会话
+  // cookie，这一步不碰库；管理员请求多一次（带缓存的）会话校验。
+  const adminResult = await timed(() => deps.adminSession());
+  const admin = adminResult.value;
+  const [snapshotResult, liveResult] = await Promise.all([
+    timed(() => deps.snapshot(admin)),
+    timed(() => readLive(deps.env, admin)),
   ]);
   const snapshot = snapshotResult.value;
   const live = liveResult.value;
-  const admin = adminResult.value;
 
   const onlineSet = new Set(live.online);
   const nowMs = Date.now();

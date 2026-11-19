@@ -604,19 +604,22 @@ export function buildMonitorNode(args: BuildMonitorNodeArgs): MonitorNode {
  *
  * 这是 Worker 侧 `getPublicClientsSnapshot`（toPublicClient 白名单 → buildMonitorNode）
  * 的对等路径：admin 行在这里同样先过 toPublicClient（去掉 token / token_hash，把
- * has_ipv4 收敛成布尔位），hidden 节点直接过滤，保证不随帧广播给访客。
+ * has_ipv4 收敛成布尔位）。hidden 节点默认过滤，保证不随帧广播给访客；只有管理员
+ * 连接的那份投影传 `includeHidden`，此时 hidden 节点以 `public: false` 出现，字段
+ * 仍然只有 toPublicClient 白名单里的那些（与内置前台 include_hidden 同口径）。
  * 两条路径的对等性由 contract.parity.test.mjs 盯着：同一行原始数据走两边，输出
  * 的 node JSON 必须完全一致。
  */
 export function buildMonitorStaticNodesFromClients(
   rawClients: Iterable<unknown>,
   totals?: Record<string, Pick<MonitorTraffic, 'day_rx' | 'day_tx' | 'total_rx' | 'total_tx'>> | null,
+  includeHidden = false,
 ): MonitorNodeStatic[] {
   const nodes: MonitorNodeStatic[] = [];
   for (const raw of rawClients) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
     const client = toPublicClient(raw as Parameters<typeof toPublicClient>[0]);
-    if (!client.uuid || client.hidden) continue;
+    if (!client.uuid || (client.hidden && !includeHidden)) continue;
     nodes.push(monitorNodeStatic(client, totals?.[client.uuid]));
   }
   // 与 /api/nodes 的排序一致：sort_order 升序，同序按名字。

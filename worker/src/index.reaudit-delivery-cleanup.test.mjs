@@ -12,6 +12,7 @@ async function fixture(t) {
   const history = name => (_db, before) => transport(name, { input_before_time: before });
   const { runRecordCleanup } = await loadTypeScriptFunctions(new URL('./index.ts', import.meta.url), ['runRecordCleanup'], {
     RECORD_CLEANUP_LAST_RUN_KEY: 'maintenance_last_cleanup_at', RECORD_CLEANUP_INTERVAL_MS: 86400000,
+    RECORD_RETENTION_DEFAULT_HOURS: 720, RECORD_RETENTION_MAX_HOURS: 720,
     db: {
       buildHistoryRollup: async () => ({}),
       deleteOldRecords: history('cfm_delete_old_records'),

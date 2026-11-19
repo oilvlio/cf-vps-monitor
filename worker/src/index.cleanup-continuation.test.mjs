@@ -11,6 +11,7 @@ async function cleanupHarness(database) {
   };
   const { runRecordCleanup } = await loadTypeScriptFunctions(new URL('./index.ts', import.meta.url), ['runRecordCleanup'], {
     RECORD_CLEANUP_LAST_RUN_KEY: 'maintenance_last_cleanup_at', RECORD_CLEANUP_INTERVAL_MS: 86_400_000,
+    RECORD_RETENTION_DEFAULT_HOURS: 720, RECORD_RETENTION_MAX_HOURS: 720,
     db: {
       buildHistoryRollup: async () => ({}),
       deleteOldRecords: deletes('cfm_delete_old_records'),

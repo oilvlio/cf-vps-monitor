@@ -29,7 +29,7 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 - **Agent TCP Ping 日志**：失败日志包含 DNS 解析错误或 TCP 连接错误详情；若连接成功但重测仍超过阈值，也会标明持续高延迟或疑似 SYN 重传。
 - **行为调整**：月度流量改为 vnstat 式按天存增量，并且全部放在服务端：Agent 只上报各网卡的内核累计读数（不再有 `traffic-state.json` 等任何本地流量状态），Supabase 换算增量、按 Agent 本地日期累计到 `traffic_daily`，月度流量 = 当前计费周期 `[重置日, 今天]` 的日增量之和。在后台修改流量重置日只是换求和区间，当期流量不再清零，改回去也能原样找回（Agent 的 `--traffic-reset-day` 参数已移除，旧服务需重跑安装命令更新服务单元；系统级安装也不再创建 `state` 目录）；Ping 快照按落库间隔全量落库（含丢包/超时事件即时落库），原始历史默认保留 168 小时，30 分钟 rollup 默认保留 2160 小时；容器磁盘直接按 statfs 上报（移除目录扫描 / 配额换算 / root 收集器）；超过 24h 的 GPU 历史自动并入小时桶 `gpu_rollup` 节省存储。
 - **安全基线**：Go 1.26.11（GO-2026-6809、GO-2026-6859）、undici 7.30.1、sharp 0.35.5 overrides。
-- **数据库**：迁移清单由 `1_schema.sql` 至 `7_history_partition_and_usage_optimization.sql` 组成；Ping 快照按日分区、rollup 按周分区，records/GPU 历史同样按日分区，过期完整分区会直接移除。历史容量统计读取分区树大小，行数与行宽按 10% 块采样估算并缓存 10 分钟；小于 32MB 的分区仍精确计数，避免批量删除后容量熔断滞后。
+- **数据库**：迁移清单由 `1_schema.sql` 至 `8_rollup_fk_and_capacity_guard.sql` 组成；Ping 快照按日分区、rollup 按周分区，records/GPU 历史同样按日分区，过期完整分区会直接移除。历史容量统计使用 `reltuples` 与平均列宽等目录信息估算并缓存 10 分钟，仅对小于 8MB 的分区精确计数；容量检查不再扫描大表，也不会因一次测量阻塞其他请求。
 - **流量统计的节奏与口径**：月度总量约每 2 分钟（与 ping record 同节奏）精确落库一次；两次落库之间，Worker 在内存里用「上次落库的合计 + 当前读数相对上次落库读数的增量」估算，随每份上报一起刷新（规则与数据库换算一致，不额外写库），落库后由数据库的精确值接管。读数是累计的，所以某次落库失败只是少一次更新，下一次的差值会把空档补上；仅当失败期间节点恰好重启，才会丢失「最后一次落库到重启」之间的流量。新装的 Agent 从第一次读到网卡计数器开始累计（与 vnstat 一致），不再把「开机以来」的累计回填到开机当天。`traffic_daily` / `traffic_counter_state` 与 `records` 一样属于运行数据，不进入配置备份，随节点删除级联清理，日增量保留约 400 天。
 - **流量统计升级顺序**：先部署 Worker 并重新执行一次 `/db-init`（新增两张表和 `cfm_traffic_apply_samples` / `cfm_traffic_import` 两个 RPC，均为幂等），再升级 Agent。旧版 Agent 本地保存的按天历史会在升级后随第一批上报一次性导入，服务端确认入库后旧的 `traffic-state.json` 才会被改名为 `*.imported`，所以当月已有流量不会丢，升级瞬间的那一小段流量也会接上。Agent 先于 Worker 升级时，面板会暂时显示「开机以来」的原始累计，旧状态文件不会被动，待服务端就绪后自动恢复。尚未升级的旧 Agent 仍按原方式上报当期累计，面板照常展示。
 
@@ -44,7 +44,7 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 | `frontend/` | React + Vite + Radix UI（已移除 Tailwind，主题样式内聚在 `index.css`），构建产物由 Workers Static Assets 托管 |
 | `worker/` | Hono Worker、Durable Objects、Cron Triggers、Supabase HTTP RPC 数据层 |
 | `agent/` | Go Agent，支持 WebSocket/HTTP 上报和 Unix/Windows 安装脚本 |
-| `supabase/migrations/` | `1_schema.sql` 至 `7_history_partition_and_usage_optimization.sql`（历史表分区、周 rollup、采样容量统计）；迁移清单由 `/db-init` 执行 |
+| `supabase/migrations/` | `1_schema.sql` 至 `8_rollup_fk_and_capacity_guard.sql`（历史表分区、周 rollup、容量统计与 rollup 外键竞态修复）；迁移清单由 `/db-init` 执行 |
 | `scripts/` | 部署和迁移清单生成脚本 |
 
 ## 运行时配置

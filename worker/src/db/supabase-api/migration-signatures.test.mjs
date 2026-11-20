@@ -4,7 +4,7 @@ import { BUNDLED_SUPABASE_MIGRATIONS } from '../../generated/supabase-migrations
 
 const migrationsUrl = new URL('../../../../supabase/migrations/', import.meta.url);
 const migrationFiles = (await readdir(migrationsUrl)).filter((name) => name.endsWith('.sql')).sort();
-const expectedMigrations = ['1_schema', '2_functions', '3_ping_rollup', '4_ping_time_partitions', '5_ping_partition_safety', '6_ping_and_history_cleanup', '7_history_partition_and_usage_optimization'];
+const expectedMigrations = ['1_schema', '2_functions', '3_ping_rollup', '4_ping_time_partitions', '5_ping_partition_safety', '6_ping_and_history_cleanup', '7_history_partition_and_usage_optimization', '8_rollup_fk_and_capacity_guard'];
 assert.deepEqual(migrationFiles, expectedMigrations.map((name) => `${name}.sql`));
 assert.deepEqual(BUNDLED_SUPABASE_MIGRATIONS.map(({ version }) => version), expectedMigrations);
 
@@ -26,6 +26,16 @@ assert.match(pingReadDefinitions.at(-1)[0], /from ping_snapshots/i,
   'the legacy-named read RPC serves partitioned snapshots, not the obsolete ping_records heap');
 assert.doesNotMatch(allMigrationSql, /insert\s+into\s+(public\.)?ping_records/i,
   'no application migration writes new data to the obsolete ping_records heap');
+
+const rollupBuildDefinitions = [...allMigrationSql.matchAll(/create or replace function public\.cfm_build_ping_rollup\([\s\S]*?\$\$;/gi)];
+assert.ok(rollupBuildDefinitions.length >= 2, 'rollup builder should be versioned through later migrations');
+assert.match(rollupBuildDefinitions.at(-1)[0], /for key share of t\s*,\s*c/i,
+  'rollup builds must lock referenced Ping task and client keys so concurrent deletes cannot fail the FK check');
+const usageDefinitions = [...allMigrationSql.matchAll(/create or replace function public\.cfm_history_storage_usage\(\)[\s\S]*?\$\$;/gi)];
+assert.ok(usageDefinitions.length > 0);
+assert.doesNotMatch(usageDefinitions.at(-1)[0], /pg_advisory_xact_lock/i,
+  'capacity measurement must never serialize every caller behind one slow scan');
+assert.match(usageDefinitions.at(-1)[0], /cached-live-row-estimate/i);
 
 assert.doesNotMatch(allMigrationSql, /^\+/m);
 assert.doesNotMatch(allMigrationSql, /set token\s*=\s*null/i);

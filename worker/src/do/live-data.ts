@@ -13,7 +13,7 @@ import * as db from '../db/queries';
 import { getDatabase, type DatabaseProviderEnv } from '../db/provider';
 import { MAX_PING_RESULTS_PER_REPORT, MAX_PING_VALUE_MS, PING_LOSS_VALUE, validatePingResults } from '../utils/ping-result';
 import {
-  RECORD_RETENTION_MAX_HOURS,
+  PING_RAW_RETENTION_DEFAULT_HOURS,
   buildAdminSettings,
   isRecordPersistenceEnabled as normalizeRecordPersistenceEnabled,
 } from '../settings/schema';
@@ -57,8 +57,8 @@ const PING_RECORD_PERSIST_INTERVAL_MS = 120_000;
 const MIN_RECORD_PERSIST_INTERVAL_MS = 3_000;
 const MAX_RECORD_PERSIST_INTERVAL_MS = 3_600_000;
 const MIN_PING_RECORD_PERSIST_INTERVAL_MS = 60_000;
-// 积压的 Ping 结果最多允许比收到时间早多久；与历史最长保留期一致（RECORD_RETENTION_MAX_HOURS）。
-const PING_OBSERVED_MAX_AGE_MS = RECORD_RETENTION_MAX_HOURS * 60 * 60 * 1000;
+// 保留一整天的安全余量，避免迟到样本命中已被清理的最老分区。
+const PING_OBSERVED_MAX_AGE_MS = (PING_RAW_RETENTION_DEFAULT_HOURS - 24) * 60 * 60 * 1000;
 const MAX_PING_RECORD_PERSIST_INTERVAL_MS = 3_600_000;
 const RECORD_SETTING_CACHE_MS = 30_000;
 const LIVE_VIEWER_WS_PROTOCOL = 'cf-monitor-viewer';

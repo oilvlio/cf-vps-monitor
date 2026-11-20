@@ -4,7 +4,7 @@ import { BUNDLED_SUPABASE_MIGRATIONS } from '../../generated/supabase-migrations
 
 const migrationsUrl = new URL('../../../../supabase/migrations/', import.meta.url);
 const migrationFiles = (await readdir(migrationsUrl)).filter((name) => name.endsWith('.sql')).sort();
-const expectedMigrations = ['1_schema', '2_functions', '3_ping_rollup', '4_ping_time_partitions'];
+const expectedMigrations = ['1_schema', '2_functions', '3_ping_rollup', '4_ping_time_partitions', '5_ping_partition_safety'];
 assert.deepEqual(migrationFiles, expectedMigrations.map((name) => `${name}.sql`));
 assert.deepEqual(BUNDLED_SUPABASE_MIGRATIONS.map(({ version }) => version), expectedMigrations);
 

@@ -45,6 +45,7 @@ test('Ping snapshots and rollups use daily partitions and prune expired partitio
     });
     assert.ok(pruned.ping_snapshot_partitions >= 1);
     assert.ok(pruned.ping_rollup_partitions >= 1);
+    assert.equal(pruned.has_more, false);
     const names = partition_day.replaceAll('-', '');
     const removed = await database.query(`
       select to_regclass('public.ping_snapshots_p' || $1) is null snapshots_removed,
@@ -62,14 +63,33 @@ test('Ping snapshots and rollups use daily partitions and prune expired partitio
       insert into ping_rollup(client,task_id,bucket_start,sample_count,success_count,loss_count,sum_latency,sumsq_latency)
       values ('partition-node',7,$1::timestamptz,1,1,0,13,169)
     `, [clearDay]);
+    await database.exec('set role service_role');
     const cleared = await rpc(database, 'cfm_clear_all_records');
+    await database.exec('reset role');
     assert.equal(cleared.deleted.ping_snapshots, 1);
     assert.equal(cleared.deleted.ping_rollup, 1);
     assert.equal((await database.query('select count(*)::integer count from ping_snapshots')).rows[0].count, 0);
     assert.equal((await database.query('select count(*)::integer count from ping_rollup')).rows[0].count, 0);
 
+    const legacy = (await database.query(`
+      select c.relname from pg_inherits i join pg_class c on c.oid=i.inhrelid
+      where i.inhparent='public.ping_snapshots'::regclass and c.relname ~ '^ping_snapshots_legacy_[0-9]{8}$'
+      limit 1
+    `)).rows[0]?.relname;
+    if (legacy) await database.exec(`drop table public.${legacy}`);
+    const beforeOldInsert = (await database.query('select count(*)::integer count from ping_snapshots')).rows[0].count;
+    await rpc(database, 'cfm_insert_ping_snapshot', {
+      input_client: 'partition-node',
+      input_time: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString(),
+      input_results: [{ taskId: 7, value: 12 }],
+    });
+    assert.equal((await database.query('select count(*)::integer count from ping_snapshots')).rows[0].count, beforeOldInsert,
+      'too-old samples are ignored rather than failing with no partition found');
+
     const migration = await readFile(new URL('../../../supabase/migrations/4_ping_time_partitions.sql', import.meta.url), 'utf8');
     await database.exec(`begin;\n${migration}\ncommit;`);
+    const safetyMigration = await readFile(new URL('../../../supabase/migrations/5_ping_partition_safety.sql', import.meta.url), 'utf8');
+    await database.exec(`begin;\n${safetyMigration}\ncommit;`);
   } finally {
     await database.close();
   }

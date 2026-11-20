@@ -54,7 +54,7 @@ assert.equal(rows.defaultValue, '3000000');
 assert.ok(Number(rows.defaultValue) <= rows.max);
 const live = readFileSync(new URL('../do/live-data.ts', import.meta.url), 'utf8');
 assert.match(live, /RECORD_HIGH_WATERMARK_DEFAULT_ROWS = 3_000_000;/, 'DO 的回退默认值要与 schema 一致');
-assert.match(live, /PING_OBSERVED_MAX_AGE_MS = RECORD_RETENTION_MAX_HOURS \* 60 \* 60 \* 1000;/, 'Ping 积压的最大年龄要跟随保留上限');
+assert.match(live, /PING_OBSERVED_MAX_AGE_MS = \(PING_RAW_RETENTION_DEFAULT_HOURS - 24\) \* 60 \* 60 \* 1000;/, 'Ping 积压最大年龄应比原始保留期至少短一天');
 
 // 清理任务与手动清理都不能再把保留时间夹回 168 小时。
 for (const file of ['../index.ts', '../routes/admin.ts']) {

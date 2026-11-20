@@ -24,7 +24,7 @@ import { AuthConfigurationError, verifyAdminToken, type AdminJwtPayload } from '
 import { isMfaStepUpProtectedRequest } from './auth/mfa-policy';
 import { verifyMfaToken } from './auth/mfa-token';
 import { getAdminSessionToken, getMfaStepUpToken, verifyAdminCsrfToken } from './auth/session';
-import { RECORD_RETENTION_DEFAULT_HOURS, RECORD_RETENTION_MAX_HOURS, buildAdminSettings } from './settings/schema';
+import { PING_RAW_RETENTION_DEFAULT_HOURS, PING_RAW_RETENTION_MAX_HOURS, PING_ROLLUP_RETENTION_DEFAULT_HOURS, PING_ROLLUP_RETENTION_MAX_HOURS, RECORD_RETENTION_DEFAULT_HOURS, RECORD_RETENTION_MAX_HOURS, buildAdminSettings } from './settings/schema';
 import { bestEffortRecordHealthEvent, errorDetail, type StoredHealthComponent } from './utils/observability';
 import { NOTIFICATION_DISPATCH_SETTING_KEYS, deliverNotification, dispatchNotification } from './utils/notification-dispatch';
 import { currentScheduledBudget, rotateScheduledItems, scheduledItems, ScheduledBudget, ScheduledBudgetExceeded, withScheduledBudget, type ScheduledCursorContext } from './utils/scheduled-budget';
@@ -440,6 +440,7 @@ const SCHEDULED_SETTING_KEYS = [
   ...NOTIFICATION_DISPATCH_SETTING_KEYS,
   'record_preserve_time',
   'ping_record_preserve_time',
+  'ping_rollup_preserve_time',
   'audit_log_preserve_time',
   'offline_notify_never_reported',
   'offline_confirm_rounds',
@@ -567,18 +568,20 @@ async function runRecordCleanup(context: ScheduledRunContext, now: Date): Promis
     return;
   }
   const recordHours = Math.min(RECORD_RETENTION_MAX_HOURS, Math.max(1, Number(settings['record_preserve_time'] || RECORD_RETENTION_DEFAULT_HOURS)));
-  const pingHours = Math.min(RECORD_RETENTION_MAX_HOURS, Math.max(1, Number(settings['ping_record_preserve_time'] || recordHours)));
+  const pingHours = Math.min(PING_RAW_RETENTION_MAX_HOURS, Math.max(1, Number(settings['ping_record_preserve_time'] || PING_RAW_RETENTION_DEFAULT_HOURS)));
+  const pingRollupHours = Math.min(PING_ROLLUP_RETENTION_MAX_HOURS, Math.max(24, Number(settings['ping_rollup_preserve_time'] || PING_ROLLUP_RETENTION_DEFAULT_HOURS)));
   const auditHours = Math.max(24, Number(settings['audit_log_preserve_time'] || 2160));
 
   const recordBefore = new Date(now.getTime() - recordHours * 60 * 60 * 1000).toISOString();
   const pingBefore = new Date(now.getTime() - pingHours * 60 * 60 * 1000).toISOString();
+  const pingRollupBefore = new Date(now.getTime() - pingRollupHours * 60 * 60 * 1000).toISOString();
   const auditBefore = new Date(now.getTime() - auditHours * 60 * 60 * 1000).toISOString();
 
   const rolledUp = await db.buildHistoryRollup(context.database, new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString());
   const recordDeleted = await db.deleteOldRecords(context.database, recordBefore);
   const pingDeleted = await db.deleteOldPingRecords(context.database, pingBefore);
   const auditDeleted = await db.deleteOldAuditLogs(context.database, auditBefore);
-  const pingRollupDeleted = await db.deleteOldPingRollup(context.database, pingBefore);
+  const pingRollupDeleted = await db.deleteOldPingRollup(context.database, pingRollupBefore);
   const deliveryDeleted = await db.cleanupNotificationDeliveryState(context.database, now.toISOString(), {
     batchSize: 1000, maxBatches: 1,
   });
@@ -606,6 +609,7 @@ async function runRecordCleanup(context: ScheduledRunContext, now: Date): Promis
     before: {
       records: recordBefore,
       ping_records: pingBefore,
+      ping_rollup: pingRollupBefore,
       audit_logs: auditBefore,
     },
     rolled_up: rolledUp,

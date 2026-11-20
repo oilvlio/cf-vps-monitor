@@ -13,7 +13,7 @@ import { buildTotpUri, generateTotpSecret, verifyTotpCode } from '../auth/totp';
 import { invalidateAdminSessionCache } from '../auth/admin-session';
 import { hashPassword, validateAdminPasswordStrength, verifyPassword } from '../auth/password';
 import { clearMfaStepUpCookie, setAdminSessionCookie, setMfaStepUpCookie } from '../auth/session';
-import { RECORD_RETENTION_DEFAULT_HOURS, RECORD_RETENTION_MAX_HOURS, SETTING_SCHEMA, buildAdminSettings, sanitizeSettingsForStorage } from '../settings/schema';
+import { PING_RAW_RETENTION_DEFAULT_HOURS, PING_RAW_RETENTION_MAX_HOURS, PING_ROLLUP_RETENTION_DEFAULT_HOURS, PING_ROLLUP_RETENTION_MAX_HOURS, RECORD_RETENTION_DEFAULT_HOURS, RECORD_RETENTION_MAX_HOURS, SETTING_SCHEMA, buildAdminSettings, sanitizeSettingsForStorage } from '../settings/schema';
 import {
   BACKUP_ENCRYPTION_ALGORITHM,
   ENCRYPTED_BACKUP_SCHEMA_ID,
@@ -110,6 +110,7 @@ const SETTINGS_SCOPE_KEYS = {
     'record_enabled',
     'record_preserve_time',
     'ping_record_preserve_time',
+    'ping_rollup_preserve_time',
     'live_poll_active_interval_sec',
     'live_poll_idle_interval_sec',
     'live_poll_active_max_duration_sec',
@@ -149,6 +150,7 @@ const SETTINGS_SCOPE_KEYS = {
 const MAINTENANCE_CLEANUP_SETTING_KEYS = [
   'record_preserve_time',
   'ping_record_preserve_time',
+  'ping_rollup_preserve_time',
   'audit_log_preserve_time',
 ];
 const AGENT_TOKEN_ROTATION_WARNING_MS = 180 * 24 * 60 * 60 * 1000;
@@ -902,11 +904,13 @@ function parseUniqueStringList(value: unknown, maxItems = 100): { ok: true; valu
 async function runMaintenanceCleanup(database: db.QueryDatabase, username: string, now = new Date()) {
   const settings = buildAdminSettings(await db.getSettingsByKeys(database, MAINTENANCE_CLEANUP_SETTING_KEYS));
   const recordHours = Math.min(RECORD_RETENTION_MAX_HOURS, Math.max(1, Number(settings.record_preserve_time || RECORD_RETENTION_DEFAULT_HOURS)));
-  const pingHours = Math.min(RECORD_RETENTION_MAX_HOURS, Math.max(1, Number(settings.ping_record_preserve_time || recordHours)));
+  const pingHours = Math.min(PING_RAW_RETENTION_MAX_HOURS, Math.max(1, Number(settings.ping_record_preserve_time || PING_RAW_RETENTION_DEFAULT_HOURS)));
+  const pingRollupHours = Math.min(PING_ROLLUP_RETENTION_MAX_HOURS, Math.max(24, Number(settings.ping_rollup_preserve_time || PING_ROLLUP_RETENTION_DEFAULT_HOURS)));
   const auditHours = Math.max(24, Number(settings.audit_log_preserve_time || 2160));
   const before = {
     records: new Date(now.getTime() - recordHours * 60 * 60 * 1000).toISOString(),
     ping_records: new Date(now.getTime() - pingHours * 60 * 60 * 1000).toISOString(),
+    ping_rollup: new Date(now.getTime() - pingRollupHours * 60 * 60 * 1000).toISOString(),
     audit_logs: new Date(now.getTime() - auditHours * 60 * 60 * 1000).toISOString(),
   };
   const rolledUp = await db.buildHistoryRollup(database, new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString());
@@ -924,7 +928,7 @@ async function runMaintenanceCleanup(database: db.QueryDatabase, username: strin
   };
   const { has_more: recordsMore, ...recordDeleted } = await db.deleteOldRecords(database, before.records, cleanupOptions);
   const { has_more: pingMore, ...pingDeleted } = await db.deleteOldPingRecords(database, before.ping_records, cleanupOptions);
-  const { has_more: pingRollupMore, ...pingRollupDeleted } = await db.deleteOldPingRollup(database, before.ping_records, cleanupOptions);
+  const { has_more: pingRollupMore, ...pingRollupDeleted } = await db.deleteOldPingRollup(database, before.ping_rollup, cleanupOptions);
   const { has_more: auditMore, ...auditDeleted } = await db.deleteOldAuditLogs(database, before.audit_logs, cleanupOptions);
   const hasMore = recordsMore || pingMore || pingRollupMore || auditMore;
   const deleted = { ...recordDeleted, ...pingDeleted, ...pingRollupDeleted, ...auditDeleted };

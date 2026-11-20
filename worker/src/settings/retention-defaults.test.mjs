@@ -6,22 +6,30 @@ const {
   SETTING_SCHEMA,
   RECORD_RETENTION_DEFAULT_HOURS,
   RECORD_RETENTION_MAX_HOURS,
+  PING_RAW_RETENTION_DEFAULT_HOURS,
+  PING_RAW_RETENTION_MAX_HOURS,
+  PING_ROLLUP_RETENTION_DEFAULT_HOURS,
+  PING_ROLLUP_RETENTION_MAX_HOURS,
   normalizeSettingValue,
 } = await import('./schema.ts');
 const { MONITOR_HISTORY_DAYS, MONITOR_MAX_HOURS } = createWorkerLoader().load('worker/src/monitor/contract.ts');
 
-// ── 历史保留时间：默认 30 天（与 monitor-hub 一致） ──
+// General history remains 30 days; raw Ping is seven days and rollups default to 90 days.
 assert.equal(RECORD_RETENTION_DEFAULT_HOURS, 720);
 assert.equal(RECORD_RETENTION_MAX_HOURS, 720);
 
-for (const key of ['record_preserve_time', 'ping_record_preserve_time']) {
-  const entry = SETTING_SCHEMA[key];
-  assert.equal(entry.defaultValue, '720', `${key} 默认 720 小时`);
-  assert.equal(entry.max, 720, `${key} 上限 720 小时`);
-  assert.deepEqual(normalizeSettingValue(key, '720'), { ok: true, value: '720' });
-  assert.equal(normalizeSettingValue(key, '721').ok, false, `${key} 不接受超过上限的值`);
-  assert.deepEqual(normalizeSettingValue(key, '168'), { ok: true, value: '168' }, '存量部署已存的 168 仍然合法');
-}
+assert.equal(SETTING_SCHEMA.record_preserve_time.defaultValue, '720');
+assert.equal(SETTING_SCHEMA.record_preserve_time.max, RECORD_RETENTION_MAX_HOURS);
+assert.equal(PING_RAW_RETENTION_DEFAULT_HOURS, 168);
+assert.equal(PING_RAW_RETENTION_MAX_HOURS, 720);
+assert.equal(SETTING_SCHEMA.ping_record_preserve_time.defaultValue, '168');
+assert.equal(SETTING_SCHEMA.ping_record_preserve_time.max, PING_RAW_RETENTION_MAX_HOURS);
+assert.deepEqual(normalizeSettingValue('ping_record_preserve_time', '168'), { ok: true, value: '168' });
+assert.equal(normalizeSettingValue('ping_record_preserve_time', '721').ok, false);
+assert.equal(PING_ROLLUP_RETENTION_DEFAULT_HOURS, 2160);
+assert.equal(PING_ROLLUP_RETENTION_MAX_HOURS, 8760);
+assert.equal(SETTING_SCHEMA.ping_rollup_preserve_time.defaultValue, '2160');
+assert.equal(SETTING_SCHEMA.ping_rollup_preserve_time.max, PING_ROLLUP_RETENTION_MAX_HOURS);
 
 // monitor 兼容层的 history_days / hours 上限必须跟随保留上限，否则会提供查不到数据的档位。
 assert.equal(MONITOR_MAX_HOURS, RECORD_RETENTION_MAX_HOURS);
@@ -30,11 +38,15 @@ assert.equal(MONITOR_HISTORY_DAYS * 24, RECORD_RETENTION_MAX_HOURS);
 // seed 必须与 schema 默认值一致：seed 写的是真实行，buildAdminSettings 取 stored ?? default，
 // 两者不一致时改 schema 毫无效果（见 schema.ts 里 record_persist_interval_sec 的注释）。
 const schemaSql = readFileSync(new URL('../../../supabase/migrations/1_schema.sql', import.meta.url), 'utf8');
-for (const key of ['record_preserve_time', 'ping_record_preserve_time', 'record_high_watermark_rows']) {
+for (const key of ['record_preserve_time', 'record_high_watermark_rows']) {
   const match = schemaSql.match(new RegExp(`\\('${key}', '([^']*)'\\)`));
   assert.ok(match, `1_schema.sql 必须 seed ${key}`);
   assert.equal(match[1], SETTING_SCHEMA[key].defaultValue, `${key} 的 seed 与 schema 默认值必须一致`);
 }
+const rollupMigration = readFileSync(new URL('../../../supabase/migrations/3_ping_rollup.sql', import.meta.url), 'utf8');
+assert.match(schemaSql, /\('ping_record_preserve_time', '720'\)/, '旧 schema seed 继续保持可重放');
+assert.match(rollupMigration, /update settings set value='168' where key='ping_record_preserve_time' and value='720'/);
+assert.match(rollupMigration, /ping_rollup_preserve_time','2160'/);
 
 // 行数熔断线按保留期同比放宽（7 天 → 30 天约 4.3 倍），且仍在允许范围内。
 const rows = SETTING_SCHEMA.record_high_watermark_rows;

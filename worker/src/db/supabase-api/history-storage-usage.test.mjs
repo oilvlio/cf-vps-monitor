@@ -7,6 +7,9 @@ test('AUD-13 deleted rows release the live-data budget even while allocated file
   try {
     await database.exec(`
       insert into clients(uuid) values ('synthetic-node');
+      insert into ping_tasks(id,name,target,clients) values (987654,'synthetic','example.com','["synthetic-node"]');
+      insert into ping_rollup(client,task_id,bucket_start,sample_count,success_count,loss_count,sum_latency,sumsq_latency)
+        values ('synthetic-node',987654,'2026-09-01T00:00:00Z',1,1,0,10,100);
       insert into records(client,time) select 'synthetic-node', '2026-09-01'::timestamptz + n * interval '1 second'
         from generate_series(1,36000) n;
     `);
@@ -14,7 +17,8 @@ test('AUD-13 deleted rows release the live-data budget even while allocated file
     const before = await readUsage();
     await database.exec('delete from records where id > 1;');
     const after = await readUsage();
-    assert.equal(after.live_rows, 1);
+    assert.equal(after.live_rows, 2, 'Ping rollups count toward the live-data budget');
+    assert.equal(after.tables.ping_rollup.live_rows, 1);
     assert.ok(after.allocated_bytes >= before.allocated_bytes * 0.9, 'fixture retains PostgreSQL allocation after DELETE');
     assert.ok(after.estimated_live_storage_bytes < before.estimated_live_storage_bytes / 10,
       'capacity control must observe live data reduction rather than retained physical allocation');

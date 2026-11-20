@@ -33,7 +33,7 @@ import { readJsonWithLimit } from '../utils/request-body';
 import { liveDataStub } from '../utils/live-data-object';
 import { RATE_LIMIT_OBJECT_NAMES, rateLimitStub } from '../utils/rate-limit-object';
 import { base64ToBytes } from '../utils/theme-package';
-import { historyBucketSec } from '../utils/history-bucket';
+import { historyBucketSec, resolvePingHistoryPlan } from '../utils/history-bucket';
 import { buildMonitorMe } from '../monitor/contract';
 
 const publicRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -48,6 +48,7 @@ const MAX_MFA_CHALLENGE_LENGTH = 4096;
 const MAX_MFA_CODE_LENGTH = 128;
 const MAX_PUBLIC_JSON_BYTES = 8 * 1024;
 const MAX_PUBLIC_RECORD_RANGE_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_PUBLIC_PING_RANGE_MS = 30 * 24 * 60 * 60 * 1000;
 const PUBLIC_RECORD_RANGE_SLOP_MS = 60 * 1000;
 const PUBLIC_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const PUBLIC_METADATA_RATE_LIMIT_MAX = 120;
@@ -468,7 +469,7 @@ function readPingTaskHistorySpecs(value: string | undefined, maxItems: number): 
     seen.add(taskId);
     specs.push({
       taskId,
-      limit: readIntParam(rawLimit, 120, 1000),
+      limit: readIntParam(rawLimit, 120, 1500),
       intervalSec: readIntParam(rawInterval, 60, 86_400),
     });
     if (specs.length >= maxItems) break;
@@ -490,7 +491,7 @@ function emptyPagedResult<T>(page: number, limit: number) {
   };
 }
 
-function validatePublicTimeRange(start: string, end: string): string | null {
+function validatePublicTimeRange(start: string, end: string, maxRangeMs = MAX_PUBLIC_RECORD_RANGE_MS): string | null {
   const startMs = Date.parse(start);
   const endMs = Date.parse(end);
   if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
@@ -499,8 +500,8 @@ function validatePublicTimeRange(start: string, end: string): string | null {
   if (endMs < startMs) {
     return '结束时间不能早于开始时间';
   }
-  if (endMs - startMs > MAX_PUBLIC_RECORD_RANGE_MS + PUBLIC_RECORD_RANGE_SLOP_MS) {
-    return '公开历史查询最多支持 7 天时间范围';
+  if (endMs - startMs > maxRangeMs + PUBLIC_RECORD_RANGE_SLOP_MS) {
+    return `公开历史查询最多支持 ${maxRangeMs === MAX_PUBLIC_PING_RANGE_MS ? '30' : '7'} 天时间范围`;
   }
   return null;
 }
@@ -1639,13 +1640,13 @@ publicRoutes.get('/records/ping', async (c) => {
   const taskId = parseInt(c.req.query('task_id') || '0');
   const start = c.req.query('start');
   const end = c.req.query('end');
-  const limit = readIntParam(c.req.query('limit'), 120, 1000);
+  const limit = readIntParam(c.req.query('limit'), 120, 1500);
 
   if (!uuid || !taskId) {
     return c.json({ error: '缺少参数' }, 400);
   }
   if (start && end) {
-    const rangeError = validatePublicTimeRange(start, end);
+    const rangeError = validatePublicTimeRange(start, end, MAX_PUBLIC_PING_RANGE_MS);
     if (rangeError) return c.json({ error: rangeError }, 400);
   }
 
@@ -1674,10 +1675,12 @@ publicRoutes.get('/records/ping', async (c) => {
 
   if (start || end) {
     const rangeMs = start && end ? Date.parse(end) - Date.parse(start) : 0;
-    const bucketSec = historyBucketSec(rangeMs);
-    const result = bucketSec
-      ? await db.getPingRecordsForTasksRangeBucketed(database, uuid, [taskId], start, end, bucketSec, limit)
-      : await db.getPingRecordsForTasksRange(database, uuid, [taskId], start, end, limit);
+    const plan = resolvePingHistoryPlan(rangeMs, historyBucketSec(rangeMs) ?? 0);
+    const result = plan.source === 'rollup'
+      ? await db.getPingRollupRange(database, uuid, [taskId], start, end, plan.stepSec, limit)
+      : plan.stepSec > 0
+        ? await db.getPingRecordsForTasksRangeBucketed(database, uuid, [taskId], start, end, plan.stepSec, limit)
+        : await db.getPingRecordsForTasksRange(database, uuid, [taskId], start, end, limit);
     return publicHistoryResult(c, prepared, result[String(taskId)] || []);
   }
   const records = await db.getPingRecords(database, uuid, taskId, limit);
@@ -1693,7 +1696,7 @@ publicRoutes.get('/records/ping/batch', async (c) => {
   const taskIds = taskSpecs.length > 0
     ? taskSpecs.map(task => task.taskId)
     : readIntListParam(c.req.query('task_ids'), 16);
-  const limit = readIntParam(c.req.query('limit'), 120, 1000);
+  const limit = readIntParam(c.req.query('limit'), 120, 1500);
   const baseIntervalSec = readIntParam(c.req.query('base_interval'), 60, 86_400);
   const cursorParam = readTimeCursorParam(c.req.query('cursor'));
   if (cursorParam.error) return c.json({ error: cursorParam.error }, 400);
@@ -1702,7 +1705,7 @@ publicRoutes.get('/records/ping/batch', async (c) => {
     return c.json({ error: '缺少参数' }, 400);
   }
   if (start && end) {
-    const rangeError = validatePublicTimeRange(start, end);
+    const rangeError = validatePublicTimeRange(start, end, MAX_PUBLIC_PING_RANGE_MS);
     if (rangeError) return c.json({ error: rangeError }, 400);
   }
 
@@ -1714,10 +1717,13 @@ publicRoutes.get('/records/ping/batch', async (c) => {
   const records = start || end
     ? await (async () => {
       const rangeMs = start && end ? Date.parse(end) - Date.parse(start) : 0;
-      const bucketSec = historyBucketSec(rangeMs);
-      if (bucketSec) {
+      const plan = resolvePingHistoryPlan(rangeMs, historyBucketSec(rangeMs) ?? 0);
+      if (plan.source === 'rollup') {
+        return db.getPingRollupRange(database, uuid, taskIds, start, end, plan.stepSec, limit);
+      }
+      if (plan.stepSec > 0) {
         return db.getPingRecordsForTasksRangeBucketed(
-          database, uuid, taskIds, start, end, bucketSec, limit,
+          database, uuid, taskIds, start, end, plan.stepSec, limit,
         );
       }
       return db.getPingRecordsForTasksRange(database, uuid, taskIds, start, end, limit);
@@ -1743,7 +1749,9 @@ publicRoutes.get('/records/ping/stats', async (c) => {
   if (!uuid || !start || !end || taskIds.length === 0) {
     return c.json({ error: '缺少参数' }, 400);
   }
-  const rangeError = validatePublicTimeRange(start, end);
+  // Statistics intentionally keep scanning raw samples (not rollups), but
+  // allow the same 30-day chart window as the Ping history endpoint.
+  const rangeError = validatePublicTimeRange(start, end, MAX_PUBLIC_PING_RANGE_MS);
   if (rangeError) return c.json({ error: rangeError }, 400);
 
   const database = getDatabase(c.env);

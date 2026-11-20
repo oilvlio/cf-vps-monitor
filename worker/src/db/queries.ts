@@ -562,6 +562,26 @@ export async function getPingRecordsForTasksRangeBucketed(
   );
 }
 
+export async function getPingRollupRange(
+  database: QueryDatabase,
+  client: string,
+  taskIds: number[],
+  start: string | undefined,
+  end: string | undefined,
+  stepSec: number,
+  limit = 1500,
+): Promise<Record<string, t.PingHistoryRecord[]>> {
+  return sba.getSupabasePingRollupRange(database.env, client, taskIds, start, end, stepSec, limit);
+}
+
+export async function buildPingRollup(database: QueryDatabase, before: string, maxBuckets = 48): Promise<Record<string, unknown>> {
+  return sba.buildSupabasePingRollup(database.env, before, maxBuckets);
+}
+
+export async function deleteOldPingRollup(database: QueryDatabase, before: string): Promise<{ ping_rollup: number; has_more: boolean }> {
+  return sba.deleteSupabaseOldPingRollup(database.env, before);
+}
+
 export async function getPingStatsForTasksRange(
   database: QueryDatabase,
   client: string,

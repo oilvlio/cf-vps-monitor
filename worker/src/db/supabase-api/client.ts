@@ -827,6 +827,33 @@ export function getSupabasePingRecordsForTasksRangeBucketed(
   });
 }
 
+export function getSupabasePingRollupRange(
+  env: SupabaseApiEnv,
+  client: string,
+  taskIds: number[],
+  start: string | undefined,
+  end: string | undefined,
+  stepSec: number,
+  limit = 1500,
+): Promise<Record<string, PingHistoryRecord[]>> {
+  return callSupabaseRpc(env, 'cfm_ping_rollup_range', {
+    input_client: client,
+    input_task_ids: taskIds,
+    input_start: start,
+    input_end: end,
+    input_step_sec: stepSec,
+    input_limit: limit,
+  });
+}
+
+export function buildSupabasePingRollup(env: SupabaseApiEnv, before: string, maxBuckets = 48): Promise<Record<string, unknown>> {
+  return callSupabaseRpc(env, 'cfm_build_ping_rollup', { input_before: before, input_max_buckets: maxBuckets });
+}
+
+export function deleteSupabaseOldPingRollup(env: SupabaseApiEnv, before: string): Promise<{ ping_rollup: number; has_more: boolean }> {
+  return callSupabaseRpc(env, 'cfm_delete_old_ping_rollup', { input_before: before });
+}
+
 export function getSupabasePingStatsForTasksRange(
   env: SupabaseApiEnv,
   client: string,

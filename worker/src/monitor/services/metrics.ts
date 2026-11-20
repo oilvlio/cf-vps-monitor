@@ -14,6 +14,7 @@ import {
   type MonitorMetricsRow,
   type MonitorPingRow,
 } from '../contract';
+import { resolvePingHistoryPlan } from '../../utils/history-bucket';
 import { TtlCache } from '../cache/ttl-cache';
 
 /** 契约里的 id 是整数哈希：按同一套映射把路径参数还原成节点。 */
@@ -89,7 +90,7 @@ async function cachedRecordSampleSeconds(
 }
 
 const HISTORY_BUCKET_LIMIT = 1500;
-const PING_BUCKET_LIMIT = 1200;
+const PING_BUCKET_LIMIT = 1500;
 
 export type LoadMetricsArgs = {
   start: string;
@@ -125,6 +126,8 @@ export async function loadMonitorMetrics(
   const sampleSec = sampleResult.value;
 
   const queryAt = performance.now();
+  const rangeMs = Date.parse(end) - Date.parse(start);
+  const pingPlan = resolvePingHistoryPlan(rangeMs, step);
   const [records, byTask] = await Promise.all([
     series === 'ping'
       ? Promise.resolve([])
@@ -133,7 +136,9 @@ export async function loadMonitorMetrics(
       ).catch(() => []),
     series === 'metrics' || taskIds.length === 0
       ? Promise.resolve({})
-      : db.getPingRecordsForTasksRangeBucketed(database, uuid, taskIds, start, end, step, PING_BUCKET_LIMIT)
+      : pingPlan.source === 'rollup'
+        ? db.getPingRollupRange(database, uuid, taskIds, start, end, pingPlan.stepSec, PING_BUCKET_LIMIT)
+        : db.getPingRecordsForTasksRangeBucketed(database, uuid, taskIds, start, end, pingPlan.stepSec, PING_BUCKET_LIMIT)
         .catch(() => ({} as Record<string, never[]>)),
   ]);
   const queryMs = performance.now() - queryAt;

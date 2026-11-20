@@ -59,7 +59,7 @@ function formatIpSupport(supported?: boolean, sourceValue?: string) {
   return supported || Boolean(sourceValue) ? '支持' : '不支持';
 }
 
-type TimeRange = '4h' | '12h' | '24h' | '3d' | '7d';
+type TimeRange = '4h' | '12h' | '24h' | '3d' | '7d' | '30d';
 type ViewTab = 'load' | 'ping';
 
 const timeRangeMs: Record<TimeRange, number> = {
@@ -68,6 +68,7 @@ const timeRangeMs: Record<TimeRange, number> = {
   '24h': 86400000,
   '3d': 259200000,
   '7d': 604800000,
+  '30d': 2592000000,
 };
 
 const timeRangeHours: Record<TimeRange, number> = {
@@ -76,6 +77,7 @@ const timeRangeHours: Record<TimeRange, number> = {
   '24h': 24,
   '3d': 72,
   '7d': 168,
+  '30d': 720,
 };
 
 const timeRangePointLimit: Record<TimeRange, number> = {
@@ -84,6 +86,7 @@ const timeRangePointLimit: Record<TimeRange, number> = {
   '24h': 720,
   '3d': 1000,
   '7d': 400,
+  '30d': 1500,
 };
 
 const pingChartMargin = { top: 14, right: 20, bottom: 4, left: 4 };
@@ -96,7 +99,7 @@ const lpYAxis = { ...lpYAxisBase, width: 44 };
 const lpYAxisWide = { ...lpYAxisBase, width: 62 };
 
 const timeRangeLabel: Record<TimeRange, string> = {
-  '4h': '4 小时', '12h': '12 小时', '24h': '1 天', '3d': '3 天', '7d': '7 天',
+  '4h': '4 小时', '12h': '12 小时', '24h': '1 天', '3d': '3 天', '7d': '7 天', '30d': '30 天',
 };
 
 
@@ -578,11 +581,11 @@ export default function Instance() {
         {/* 负载 | Ping 切换 + 时间档位 */}
         <div className="lp-controls">
           <div className="lp-seg" role="group" aria-label="图表类型">
-            <button type="button" data-active={viewTab === 'load'} aria-pressed={viewTab === 'load'} onClick={() => setViewTab('load')}>负载</button>
-            <button type="button" data-active={viewTab === 'ping'} aria-pressed={viewTab === 'ping'} onClick={() => setViewTab('ping')}>Ping</button>
+          <button type="button" data-active={viewTab === 'load'} aria-pressed={viewTab === 'load'} onClick={() => { setViewTab('load'); if (timeRange === '30d') setTimeRange('7d'); }}>负载</button>
+          <button type="button" data-active={viewTab === 'ping'} aria-pressed={viewTab === 'ping'} onClick={() => setViewTab('ping')}>Ping</button>
           </div>
           <div className="lp-seg is-scroll" role="group" aria-label="时间范围">
-            {(Object.keys(timeRangeLabel) as TimeRange[]).map((range) => (
+            {(Object.keys(timeRangeLabel) as TimeRange[]).filter(range => viewTab === 'ping' || range !== '30d').map((range) => (
               <button key={range} type="button" data-active={timeRange === range} aria-pressed={timeRange === range} onClick={() => handleTimeRangeChange(range)}>
                 {timeRangeLabel[range]}
               </button>

@@ -41,10 +41,12 @@ test('AUD-06/R-D05: restoring a configuration backup refreshes agent policies af
 test('AUD-07: manual maintenance preserves unfinished batches from every history cleanup', async () => {
   const db = {
     getSettingsByKeys: async () => ({}),
-    getExpiredRowCounts: async () => ({ records: 25000, gpu_records: 0, gpu_snapshots: 0, ping_records: 0, ping_snapshots: 0, audit_logs: 0 }),
+    getExpiredRowCounts: async () => ({ records: 25000, gpu_records: 0, gpu_snapshots: 0, ping_records: 0, ping_snapshots: 0, ping_rollup: 0, audit_logs: 0 }),
     buildHistoryRollup: async () => ({}),
+    buildPingRollup: async () => ({}),
     deleteOldRecords: async () => ({ records: 100, gpu_records: 0, gpu_snapshots: 0, has_more: true }),
     deleteOldPingRecords: async () => ({ ping_records: 0, ping_snapshots: 0, has_more: false }),
+    deleteOldPingRollup: async () => ({ ping_rollup: 0, has_more: false }),
     deleteOldAuditLogs: async () => ({ audit_logs: 0, has_more: false }),
     cleanupOrphanClientData: async () => ({}), insertAuditLog: async () => {},
   };

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createWorkerLoader } from '../../test-support/worker-module.mjs';
 
 const { historyBucketSec } = createWorkerLoader().load('worker/src/routes/public.ts');
+const { resolvePingHistoryPlan } = createWorkerLoader().load('worker/src/utils/history-bucket.ts');
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
 
@@ -19,6 +20,7 @@ assert.equal(historyBucketSec(3 * DAY), 360);
 assert.equal(historyBucketSec(3.5 * DAY), 360);
 assert.equal(historyBucketSec(3.5 * DAY + 1), 840);
 assert.equal(historyBucketSec(7 * DAY), 840);
+assert.equal(historyBucketSec(30 * DAY), 1800);
 
 for (const [rangeMs, points] of [[DAY, 240], [3 * DAY, 720], [7 * DAY, 720]]) {
   const step = historyBucketSec(rangeMs);
@@ -26,3 +28,6 @@ for (const [rangeMs, points] of [[DAY, 240], [3 * DAY, 720], [7 * DAY, 720]]) {
   assert.equal(Math.ceil(rangeMs / 1000 / step), points);
   assert.ok(points <= 1000, '桶数不超过单次返回上限');
 }
+assert.equal(JSON.stringify(resolvePingHistoryPlan(7 * DAY, 420)), JSON.stringify({ source: 'raw', stepSec: 420 }));
+assert.equal(JSON.stringify(resolvePingHistoryPlan(8 * DAY, 3600)), JSON.stringify({ source: 'rollup', stepSec: 3600 }));
+assert.equal(JSON.stringify(resolvePingHistoryPlan(30 * DAY, 10080)), JSON.stringify({ source: 'rollup', stepSec: 10800 }));

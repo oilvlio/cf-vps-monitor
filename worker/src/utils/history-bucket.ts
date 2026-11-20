@@ -7,6 +7,18 @@
 // 前端的区间是 start/end 两次独立取 Date 得到的，会比名义区间多出几毫秒，
 // 所以边界留 10 分钟余量，免得 12h 档被偶然判成分桶请求。
 export const RAW_HISTORY_MAX_RANGE_MS = 12 * 60 * 60 * 1000 + 10 * 60 * 1000;
+export const PING_ROLLUP_BUCKET_SEC = 30 * 60;
+export const PING_ROLLUP_RANGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+export type PingHistoryPlan = { source: 'raw' | 'rollup'; stepSec: number };
+
+/** Keep the raw/rollup boundary shared by the built-in API and Monitor adapter. */
+export function resolvePingHistoryPlan(rangeMs: number, requestedStepSec = PING_ROLLUP_BUCKET_SEC): PingHistoryPlan {
+  if (rangeMs <= PING_ROLLUP_RANGE_MS) return { source: 'raw', stepSec: requestedStepSec };
+  const stepSec = Math.max(PING_ROLLUP_BUCKET_SEC,
+    Math.ceil(requestedStepSec / PING_ROLLUP_BUCKET_SEC) * PING_ROLLUP_BUCKET_SEC);
+  return { source: 'rollup', stepSec };
+}
 
 /**
  * <=12h 读原始（12h × 60s = 720 点）；更长的窗口分桶，目标约 720 点/档（1600px 宽约 2px 一个点）：
@@ -19,6 +31,7 @@ export const RAW_HISTORY_MAX_RANGE_MS = 12 * 60 * 60 * 1000 + 10 * 60 * 1000;
 export function historyBucketSec(rangeMs: number): number | null {
   const hour = 60 * 60 * 1000;
   const day = 24 * hour;
+  if (rangeMs > PING_ROLLUP_RANGE_MS) return PING_ROLLUP_BUCKET_SEC;
   if (rangeMs > 3.5 * day) return 840;
   if (rangeMs > RAW_HISTORY_MAX_RANGE_MS) return 360;
   return null;

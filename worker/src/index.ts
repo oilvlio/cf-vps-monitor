@@ -578,16 +578,18 @@ async function runRecordCleanup(context: ScheduledRunContext, now: Date): Promis
   const recordDeleted = await db.deleteOldRecords(context.database, recordBefore);
   const pingDeleted = await db.deleteOldPingRecords(context.database, pingBefore);
   const auditDeleted = await db.deleteOldAuditLogs(context.database, auditBefore);
+  const pingRollupDeleted = await db.deleteOldPingRollup(context.database, pingBefore);
   const deliveryDeleted = await db.cleanupNotificationDeliveryState(context.database, now.toISOString(), {
     batchSize: 1000, maxBatches: 1,
   });
-  const hasMore = recordDeleted.has_more || pingDeleted.has_more || auditDeleted.has_more || deliveryDeleted.has_more;
+  const hasMore = recordDeleted.has_more || pingDeleted.has_more || pingRollupDeleted.has_more || auditDeleted.has_more || deliveryDeleted.has_more;
   const deleted = {
     records: recordDeleted.records,
     gpu_records: recordDeleted.gpu_records,
     gpu_snapshots: recordDeleted.gpu_snapshots,
     ping_records: pingDeleted.ping_records,
     ping_snapshots: pingDeleted.ping_snapshots,
+    ping_rollup: pingRollupDeleted.ping_rollup,
     audit_logs: auditDeleted.audit_logs,
     notification_delivery_state: deliveryDeleted.notification_delivery_state,
   };
@@ -952,6 +954,9 @@ async function runScheduled(env: Bindings): Promise<void> {
     const now = new Date();
     const context = createScheduledRunContext(env);
     const steps = [
+      ['cron_ping_rollup', 'cron_ping_rollup_error', 'Ping 历史分桶', async () => {
+        await db.buildPingRollup(context.database, new Date(now.getTime() - 2 * 60 * 1000).toISOString(), 48);
+      }],
       ['cron_cleanup', 'cron_cleanup_error', '记录清理', () => runRecordCleanup(context, now)],
       ['cron_load', 'cron_load_error', '负载告警检查', () => runLoadCheck(context, now)],
       ['cron_offline', 'cron_offline_error', '离线告警检查', () => runOfflineCheck(context, now)],

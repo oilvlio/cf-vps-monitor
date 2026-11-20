@@ -140,6 +140,7 @@ export type HistoryDeleteCounts = {
   gpu_snapshots: number;
   ping_records: number;
   ping_snapshots: number;
+  ping_rollup?: number;
 };
 
 export type ClearAllRecordsResult = {
@@ -396,6 +397,7 @@ export interface TableRowCounts {
   gpu_snapshots: number;
   ping_records: number;
   ping_snapshots: number;
+  ping_rollup: number;
   audit_logs: number;
 }
 

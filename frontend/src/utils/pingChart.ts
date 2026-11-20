@@ -623,9 +623,9 @@ export async function fetchPingTaskSeries(
   const requestLimitForTask = (task: NormalizedPingTask) => {
     if (rangeHours && rangeHours > 0) {
       const rangeLimit = Math.ceil((rangeHours * 3600) / task.intervalSec) + 4;
-      return Math.min(1000, Math.max(8, rangeLimit));
+      return Math.min(1500, Math.max(8, rangeLimit));
     }
-    return Math.min(1000, Math.max(1, limit));
+    return Math.min(1500, Math.max(1, limit));
   };
 
   // 同时支持 start/end 和 cursor：显式 start/end 优先，否则按 cursor + rangeHours 推导。
@@ -643,7 +643,7 @@ export async function fetchPingTaskSeries(
     return response.json();
   };
 
-  // 按窗口分流：>12h 走服务端分桶，单次 batch 必然拿齐（24h=240 / 3d=720 / 7d=720 桶 < 1000），无需回填；
+  // 按窗口分流：>12h 走服务端分桶；30d 档读取半小时 rollup（最多 1440 点）；
   // <=12h 读原始，60s 间隔下单页包圆（12h=720 行），极小间隔任务靠下方逐任务分页兜底。
   // 边界与 worker 的 RAW_HISTORY_MAX_RANGE_MS 一致：start/end 是两次独立取时间得到的，
   // 会比名义区间多几毫秒，留 10 分钟余量，免得 12h 档被偶然判成长窗口。
@@ -659,10 +659,10 @@ export async function fetchPingTaskSeries(
 
   if (isLongRange && rangeStart) {
     if (tasks.length === 0) return [];
-    const longTaskSpecs = tasks.map((task) => `${task.id}:1000:${task.intervalSec}`).join(',');
+    const longTaskSpecs = tasks.map((task) => `${task.id}:1500:${task.intervalSec}`).join(',');
     try {
       const recordsResponse = await fetch(
-        `/api/records/ping/batch?uuid=${encodeURIComponent(uuid)}&task_specs=${encodeURIComponent(longTaskSpecs)}&base_interval=${Math.min(...tasks.map((task) => task.intervalSec))}&limit=1000&start=${encodeURIComponent(rangeStart)}&end=${encodeURIComponent(effectiveEnd)}${hiddenQuery}`,
+        `/api/records/ping/batch?uuid=${encodeURIComponent(uuid)}&task_specs=${encodeURIComponent(longTaskSpecs)}&base_interval=${Math.min(...tasks.map((task) => task.intervalSec))}&limit=1500&start=${encodeURIComponent(rangeStart)}&end=${encodeURIComponent(effectiveEnd)}${hiddenQuery}`,
         { signal },
       );
       if (recordsResponse.ok) {

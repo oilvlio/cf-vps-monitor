@@ -16,6 +16,7 @@ async function cleanupHarness(database) {
       buildHistoryRollup: async () => ({}),
       deleteOldRecords: deletes('cfm_delete_old_records'),
       deleteOldPingRecords: deletes('cfm_delete_old_ping_records'),
+      deleteOldPingRollup: async () => ({ ping_rollup: 0, has_more: false }),
       deleteOldAuditLogs: deletes('cfm_delete_old_audit_logs'),
       cleanupNotificationDeliveryState: (_connection, now, options = {}) => rpc(database, 'cfm_cleanup_notification_delivery_state', {
         input_now: now, input_batch_size: options.batchSize, input_max_batches: options.maxBatches,
@@ -96,6 +97,7 @@ test('AUD-07 small delete budgets report remaining work for every history family
       insert into ping_snapshots (client,time) select 'node-a','2026-01-01' from generate_series(1,101);
       insert into audit_logs (time) select '2026-01-01' from generate_series(1,101);
     `);
+    await rpc(database, 'cfm_build_ping_rollup', { input_before: '2026-09-01', input_max_buckets: 48 });
     for (const name of ['cfm_delete_old_ping_records', 'cfm_delete_old_audit_logs']) {
       const input = { input_before_time: '2026-09-01', input_max_batches: 1 };
       assert.equal((await rpc(database, name, input)).has_more, true, `${name} reports bounded backlog`);

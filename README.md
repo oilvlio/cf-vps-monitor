@@ -10,7 +10,7 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 - **服务器监控**：在线状态、CPU、GPU、内存、Swap、磁盘、负载（1/5/15 分钟）、温度、网络速率、月度流量、账单、到期时间、系统信息、IPv4/IPv6、进程数、TCP/UDP 连接数。
 - **实时看板**：首页、节点详情页和后台首页通过 WebSocket 获取实时数据。
 - **Ping 监控**：支持 ICMP、TCP、HTTP Ping 任务，可分配到全部节点或指定节点，并展示延迟历史。任务可以先不分配任何节点就创建（暂不运行），之后在“服务器视图”里按节点勾选要运行的任务；全局任务跟随所有节点，需先在任务里关闭“所有服务器”才能逐台调整。
-  - 详情页 Ping 图表：12 小时内画原始点；更长窗口由服务端分桶（1 天/3 天为 6 分钟，7 天为 14 分钟，约 720 点），桶内取不取整中位数。任务卡片的均值/最小/最大/P75/丢包/抖动（延迟标准差）由服务端对整个窗口的原始样本计算。历史数据在页面内缓存 5 分钟。
+  - 详情页 Ping 图表最多查询 30 天：12 小时内画原始点；较短窗口按 6 分钟或 14 分钟分桶；超过 7 天使用持久化的 30 分钟 rollup，并按图表步长合并（30 天最多约 1440 点）。长窗口跨桶合并的 P50/P75 是近似值；计数、丢包率、均值、最小值和最大值可合并。任务卡片统计仍扫描原始样本，不使用 rollup。历史数据在页面内缓存 5 分钟。
 - **首页延迟色块**：在后台编辑服务器时，可为节点勾选一个“首页探测点”（需先在 Ping 任务里应用到该节点），首页节点卡片会显示该探测任务最新的 24 次原始采样色块（不聚合，右端为最新）。
 - **后台管理**：节点增删改、批量隐藏/删除、拖拽排序、记录清理、Agent Token 轮换、安装命令生成、系统设置、审计日志、健康检查、备份恢复、账号改名和改密、双重身份验证。
 - **通知**：支持 Telegram、SMTP Email 和 Webhook，可配置离线、到期、负载和 IP 变更通知。
@@ -25,11 +25,11 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 - **移除**：网站监控（页面、API、定时探测、通知与数据库对象全部下线）；后台「一键同步更新 / 版本更新」入口。
 - **新增**：首页探测点（`/api/ping/home` + 首页色块）；Agent `--allow-host-load`（默认开启，`--no-host-load` 关闭）/ `--host-cpu-cores`（容器上报宿主负载并按核数折算）；`--enable-gpu`（GPU 探测默认关闭）；`--log-level debug|info|warn|error`（默认 info，每次上报 / ack 属于 debug，debug/info 走 stdout，warn/error 走 stderr）；Load5/Load15 三元组上报。
 - **Monitor 主题兼容**：公开兼容节点、指标、Ping 历史及主题配置 API，并通过 `/api/ws` 提供实时数据；指标历史按落库间隔聚合，流量总量由服务端批量补齐。第三方主题资源经 Worker 托管，后台保存配置后会立即刷新主题设置。
-- **Ping 历史**：节点详情历史查询支持按任务筛选并稳定排序；Monitor 兼容接口按主题契约输出聚合后的指标与 Ping 历史，并使用短时进程内缓存减少重复数据库查询。
+- **Ping 历史**：节点详情和 Monitor 兼容接口最多查询 30 天；超过 7 天的 Ping 图表使用 30 分钟持久化 rollup，Monitor 输出仍遵循 hub 1.4.2 的小时倍数步长契约。rollup 按水位增量构建，清理原始快照前会确认数据已越过 rollup 水位；统计卡片仍使用原始样本。
 - **Agent TCP Ping 日志**：失败日志包含 DNS 解析错误或 TCP 连接错误详情；若连接成功但重测仍超过阈值，也会标明持续高延迟或疑似 SYN 重传。
-- **行为调整**：月度流量改为 vnstat 式按天存增量，并且全部放在服务端：Agent 只上报各网卡的内核累计读数（不再有 `traffic-state.json` 等任何本地流量状态），Supabase 换算增量、按 Agent 本地日期累计到 `traffic_daily`，月度流量 = 当前计费周期 `[重置日, 今天]` 的日增量之和。在后台修改流量重置日只是换求和区间，当期流量不再清零，改回去也能原样找回（Agent 的 `--traffic-reset-day` 参数已移除，旧服务需重跑安装命令更新服务单元；系统级安装也不再创建 `state` 目录）；Ping 快照按落库间隔全量落库（含丢包/超时事件即时落库）；容器磁盘直接按 statfs 上报（移除目录扫描 / 配额换算 / root 收集器）；记录与 Ping 历史保留上限 168h（默认 168h）；超过 24h 的 GPU 历史自动并入小时桶 `gpu_rollup` 节省存储。
+- **行为调整**：月度流量改为 vnstat 式按天存增量，并且全部放在服务端：Agent 只上报各网卡的内核累计读数（不再有 `traffic-state.json` 等任何本地流量状态），Supabase 换算增量、按 Agent 本地日期累计到 `traffic_daily`，月度流量 = 当前计费周期 `[重置日, 今天]` 的日增量之和。在后台修改流量重置日只是换求和区间，当期流量不再清零，改回去也能原样找回（Agent 的 `--traffic-reset-day` 参数已移除，旧服务需重跑安装命令更新服务单元；系统级安装也不再创建 `state` 目录）；Ping 快照按落库间隔全量落库（含丢包/超时事件即时落库），原始历史默认及最大保留 720 小时，Ping 另有同保留期的 30 分钟 rollup；容器磁盘直接按 statfs 上报（移除目录扫描 / 配额换算 / root 收集器）；超过 24h 的 GPU 历史自动并入小时桶 `gpu_rollup` 节省存储。
 - **安全基线**：Go 1.26.11（GO-2026-6809、GO-2026-6859）、undici 7.30.1、sharp 0.35.5 overrides。
-- **数据库**：迁移收敛为 2 个「全新安装终态」文件，不含旧版本存量数据迁移。
+- **数据库**：迁移清单由 3 个 SQL 文件组成：`1_schema.sql`、`2_functions.sql` 和 `3_ping_rollup.sql`；用于全新安装终态，不包含旧版本存量数据迁移。
 - **流量统计的节奏与口径**：月度总量约每 2 分钟（与 ping record 同节奏）精确落库一次；两次落库之间，Worker 在内存里用「上次落库的合计 + 当前读数相对上次落库读数的增量」估算，随每份上报一起刷新（规则与数据库换算一致，不额外写库），落库后由数据库的精确值接管。读数是累计的，所以某次落库失败只是少一次更新，下一次的差值会把空档补上；仅当失败期间节点恰好重启，才会丢失「最后一次落库到重启」之间的流量。新装的 Agent 从第一次读到网卡计数器开始累计（与 vnstat 一致），不再把「开机以来」的累计回填到开机当天。`traffic_daily` / `traffic_counter_state` 与 `records` 一样属于运行数据，不进入配置备份，随节点删除级联清理，日增量保留约 400 天。
 - **流量统计升级顺序**：先部署 Worker 并重新执行一次 `/db-init`（新增两张表和 `cfm_traffic_apply_samples` / `cfm_traffic_import` 两个 RPC，均为幂等），再升级 Agent。旧版 Agent 本地保存的按天历史会在升级后随第一批上报一次性导入，服务端确认入库后旧的 `traffic-state.json` 才会被改名为 `*.imported`，所以当月已有流量不会丢，升级瞬间的那一小段流量也会接上。Agent 先于 Worker 升级时，面板会暂时显示「开机以来」的原始累计，旧状态文件不会被动，待服务端就绪后自动恢复。尚未升级的旧 Agent 仍按原方式上报当期累计，面板照常展示。
 
@@ -44,7 +44,7 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 | `frontend/` | React + Vite + Radix UI（已移除 Tailwind，主题样式内聚在 `index.css`），构建产物由 Workers Static Assets 托管 |
 | `worker/` | Hono Worker、Durable Objects、Cron Triggers、Supabase HTTP RPC 数据层 |
 | `agent/` | Go Agent，支持 WebSocket/HTTP 上报和 Unix/Windows 安装脚本 |
-| `supabase/migrations/` | `1_schema.sql`（表、列、约束、索引、RLS 与授权、默认数据）与 `2_functions.sql`（全部 RPC 及其 EXECUTE 授权），均为全新安装终态 |
+| `supabase/migrations/` | `1_schema.sql`、`2_functions.sql` 与 `3_ping_rollup.sql`（Ping 30 分钟 rollup 与相关 RPC）；迁移清单用于全新安装终态 |
 | `scripts/` | 部署和迁移清单生成脚本 |
 
 ## 运行时配置

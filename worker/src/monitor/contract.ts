@@ -27,7 +27,7 @@ import { trafficPeriodStart } from '../utils/traffic-samples';
 // 后台把保留时间调低时 history_days 仍报这个值（与保留上限对齐，不随设置动态变化）。
 export const MONITOR_HISTORY_DAYS = RECORD_RETENTION_MAX_HOURS / 24;
 export const MONITOR_MAX_HOURS = MONITOR_HISTORY_DAYS * 24;
-// hub 的 DETAIL_DAYS：窗口超过它就改读小时级数据，步长取整小时（见 monitorStep）。
+// hub 的 DETAIL_DAYS：窗口超过它使用 30 分钟 rollup；再按整小时倍数合并，保持 monitorStep 的契约。
 export const MONITOR_DETAIL_DAYS = 7;
 export const MONITOR_POINTS_MIN = 60;
 export const MONITOR_POINTS_MAX = 1440;
@@ -97,8 +97,8 @@ export function monitorHours(raw: unknown): number {
  * 与 hub 的 span()（api.rs）一致：
  *   budget = min(max(points || 1440, 60), 1440)
  *   hours <= 7d：unit = 60s，step = 60 * max(1, ceil(hours*3600 / 60 / budget))
- *   hours >  7d：unit = 3600s（读小时级数据），step = 3600 * max(1, ceil(hours / budget))
- * 小时级窗口的步长取整小时，保证一个小时的汇总桶不会跨两个点。
+ *   hours >  7d：unit = 3600s（读 30 分钟 rollup 后合并），step = 3600 * max(1, ceil(hours / budget))
+ * 长窗口步长取整小时，保证 rollup 桶合并后不会跨两个输出点。
  */
 export function monitorStep(hoursInput: number, pointsInput?: unknown): number {
   const hours = monitorHours(hoursInput);

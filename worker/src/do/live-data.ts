@@ -109,8 +109,8 @@ const VIEWER_DEFAULT_TTL_MS = 120 * 1000;
 const VIEWER_MAX_TOTAL_SESSIONS = 128;
 const VIEWER_MAX_SESSIONS_PER_IP = 8;
 const PING_RESULT_STORAGE_PREFIX = 'ping-result:';
-// Ping 快照不做「值没变就不落库」的压缩：24h 内按落库间隔全量保存，
-// 详情页 12h 内直接画原始点、更长的窗口按 6/14 分钟分桶（见 routes/public.ts historyBucketSec），
+// Ping 快照不做「值没变就不落库」的压缩：保留期内按落库间隔全量保存，
+// 详情页 12h 内画原始点，12h~7d 按 6/14 分钟分桶，超过 7d 读 30 分钟 Ping rollup（见 history-bucket.ts），
 // 首页探测点的最新 24 格（utils/home-ping.ts）按落库间隔读取。
 const GPU_SNAPSHOT_META_PREFIX = 'gpu-snapshot-meta:';
 const GPU_SNAPSHOT_UNCHANGED_HEARTBEAT_MS = 30 * 60_000;

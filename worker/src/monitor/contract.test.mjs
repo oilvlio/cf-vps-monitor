@@ -35,7 +35,8 @@ const {
 // --- step: 预算公式与 hub 的 span()（api.rs）一致 ---
 // budget = clamp(points || 1440, 60, 1440)
 // hours <= 7d: step = 60 * max(1, ceil(hours*3600/60/budget))
-// hours >  7d: 读小时级数据，step = 3600 * max(1, ceil(hours/budget))
+// hours >  7d: 读 30 分钟 rollup，输出步长仍按 hub 契约取整小时
+//             step = 3600 * max(1, ceil(hours/budget))
 assert.equal(monitorStep(6), 60);            // 默认 points=1440
 assert.equal(monitorStep(6, 1440), 60);
 assert.equal(monitorStep(24, 1440), 60);
@@ -58,8 +59,8 @@ assert.equal(MONITOR_HISTORY_DAYS, 30, 'history_days 与 hub 默认保留期一�
 assert.equal(monitorHours(720), 30 * 24);      // 30 天档位在保留期内，原样返回
 assert.equal(monitorHours(99999), MONITOR_HISTORY_DAYS * 24);  // 超出保留期被收到上限
 
-// 每个请求的 step 都是 60s 的整数倍；超过 7d 的窗口是整小时倍数（一个小时的汇总桶
-// 不跨两个点），且不超过 SQL 桶宽上限（一天）。
+// 每个请求的 step 都是 60s 的整数倍；超过 7d 的窗口是整小时倍数，30 分钟 rollup 桶
+// 可以按整倍数重组，且 step 不超过 SQL 桶宽上限（一天）。
 for (const hours of [1, 6, 24, 72, 168, 169, 336, 720, 99999]) {
   for (const points of [60, 120, 360, 720, 1440]) {
     const step = monitorStep(hours, points);

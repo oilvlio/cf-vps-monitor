@@ -21,6 +21,10 @@ import type { SettingsLayoutOutletContext } from './SettingsLayout';
 // 默认值与允许范围需与 worker/src/settings/schema.ts 保持一致。
 const DEFAULT_RETENTION_HOURS = 720;
 const MAX_RETENTION_HOURS = 720;
+const DEFAULT_PING_RAW_RETENTION_HOURS = 168;
+const MAX_PING_RAW_RETENTION_HOURS = 720;
+const DEFAULT_PING_ROLLUP_RETENTION_HOURS = 2160;
+const MAX_PING_ROLLUP_RETENTION_HOURS = 8760;
 const DEFAULT_ACTIVE_SAMPLE_SEC = 3;
 const DEFAULT_IDLE_UPLOAD_SEC = 120;
 const MIN_IDLE_UPLOAD_SEC = 60;
@@ -59,16 +63,11 @@ function normalizeGeneralSettings(settings: SettingsMap): SettingsMap {
 
 /** 保存前把需要夹取范围的字段归一化；其余字段原样提交，由 worker 的 schema 校验。 */
 function buildSavePayload(settings: SettingsMap): SettingsMap {
-  const retentionHours = clampInteger(
-    settings.record_preserve_time || settings.ping_record_preserve_time,
-    DEFAULT_RETENTION_HOURS,
-    1,
-    MAX_RETENTION_HOURS,
-  );
   return {
     ...settings,
-    record_preserve_time: String(retentionHours),
-    ping_record_preserve_time: String(retentionHours),
+    record_preserve_time: String(clampInteger(settings.record_preserve_time, DEFAULT_RETENTION_HOURS, 1, MAX_RETENTION_HOURS)),
+    ping_record_preserve_time: String(clampInteger(settings.ping_record_preserve_time, DEFAULT_PING_RAW_RETENTION_HOURS, 1, MAX_PING_RAW_RETENTION_HOURS)),
+    ping_rollup_preserve_time: String(clampInteger(settings.ping_rollup_preserve_time, DEFAULT_PING_ROLLUP_RETENTION_HOURS, 24, MAX_PING_ROLLUP_RETENTION_HOURS)),
     live_poll_active_interval_sec: String(clampInteger(settings.live_poll_active_interval_sec, DEFAULT_ACTIVE_SAMPLE_SEC, 3, 300)),
     live_poll_idle_interval_sec: String(clampInteger(settings.live_poll_idle_interval_sec, DEFAULT_IDLE_UPLOAD_SEC, MIN_IDLE_UPLOAD_SEC, 3600)),
     live_poll_active_max_duration_sec: String(clampInteger(settings.live_poll_active_max_duration_sec, DEFAULT_VIEWER_TTL_SEC, 60, 3600)),
@@ -111,15 +110,6 @@ export default function SettingsGeneral() {
 
   const updateSetting = (key: string, value: string) => {
     setSettings((prev) => ({ ...prev, [key]: value }));
-  };
-
-  // 监控历史与 Ping 历史共用同一个保留时长。
-  const updateRetentionHours = (value: string) => {
-    setSettings((prev) => ({
-      ...prev,
-      record_preserve_time: value,
-      ping_record_preserve_time: value,
-    }));
   };
 
   const field = (key: string, fallback: number | string) => getSettingValue(settings, key, String(fallback));
@@ -221,9 +211,27 @@ export default function SettingsGeneral() {
             type="number"
             suffix="小时"
             placeholder={String(DEFAULT_RETENTION_HOURS)}
-            value={getSettingValue(settings, 'record_preserve_time', getSettingValue(settings, 'ping_record_preserve_time', String(DEFAULT_RETENTION_HOURS)))}
-            onChange={updateRetentionHours}
-            hint="超过这个时长的历史自动删除，最多 720 小时（30 天），监控与 Ping 历史通用。最近 1 天保留原始精度，更早的合并为每小时一个点。保留越久占用的数据库空间越大（约与天数成正比），超过熔断线会暂停历史写入。"
+            value={field('record_preserve_time', DEFAULT_RETENTION_HOURS)}
+            onChange={(value) => updateSetting('record_preserve_time', value)}
+            hint="超过这个时长的监控历史自动删除，最多 720 小时（30 天）。保留越久占用的数据库空间越大，超过熔断线会暂停历史写入。"
+          />
+          <Field
+            label="Ping 原始数据保留时长（小时）"
+            type="number"
+            suffix="小时"
+            placeholder={String(DEFAULT_PING_RAW_RETENTION_HOURS)}
+            value={field('ping_record_preserve_time', DEFAULT_PING_RAW_RETENTION_HOURS)}
+            onChange={(value) => updateSetting('ping_record_preserve_time', value)}
+            hint="原始 Ping 快照默认保留 168 小时（7 天）；更早的历史由 30 分钟 rollup 提供。最多 720 小时。"
+          />
+          <Field
+            label="Ping rollup 保留时长（小时）"
+            type="number"
+            suffix="小时"
+            placeholder={String(DEFAULT_PING_ROLLUP_RETENTION_HOURS)}
+            value={field('ping_rollup_preserve_time', DEFAULT_PING_ROLLUP_RETENTION_HOURS)}
+            onChange={(value) => updateSetting('ping_rollup_preserve_time', value)}
+            hint="30 分钟聚合数据默认保留 2160 小时（90 天），最多 8760 小时（一年）。"
           />
         </Rows>
       </Card>

@@ -2,6 +2,18 @@
 -- long-range chart reads and can be rebuilt idempotently from retained samples.
 set local search_path = public;
 
+-- Ping raw history defaults to seven days; retained rollups default to 90 days.
+-- Upgrade installs that still carry the former default (30 days) follow the new
+-- raw default once; subsequent migration replays do not reset operator changes.
+do $$ begin
+  if not exists (select 1 from settings where key='ping_retention_policy_v1_migrated') then
+    update settings set value='168' where key='ping_record_preserve_time' and value='720';
+    insert into settings(key,value) values ('ping_retention_policy_v1_migrated','true') on conflict (key) do nothing;
+  end if;
+end $$;
+insert into settings(key,value) values ('ping_rollup_preserve_time','2160')
+on conflict (key) do nothing;
+
 create table if not exists public.ping_rollup (
   client text not null references public.clients(uuid) on delete cascade,
   task_id integer not null references public.ping_tasks(id) on delete cascade,
@@ -433,14 +445,20 @@ begin
     from args,raw_counts);
 end $$;
 
-create or replace function public.cfm_expired_row_counts(input_records_before text,input_ping_records_before text,input_audit_logs_before text)
+drop function if exists public.cfm_expired_row_counts(text,text,text);
+create or replace function public.cfm_expired_row_counts(
+  input_records_before text,
+  input_ping_records_before text,
+  input_audit_logs_before text,
+  input_ping_rollup_before text
+)
 returns jsonb language sql stable set search_path = public as $$
   select jsonb_build_object('records',(select count(*) from records where time<input_records_before::timestamptz),
     'gpu_records',(select count(*) from gpu_records where time<input_records_before::timestamptz),
     'gpu_snapshots',(select count(*) from gpu_snapshots where time<input_records_before::timestamptz),
     'ping_records',(select count(*) from ping_records where time<input_ping_records_before::timestamptz),
     'ping_snapshots',(select count(*) from ping_snapshots where time<input_ping_records_before::timestamptz),
-    'ping_rollup',(select count(*) from ping_rollup where bucket_start<input_ping_records_before::timestamptz),
+    'ping_rollup',(select count(*) from ping_rollup where bucket_start<input_ping_rollup_before::timestamptz),
     'audit_logs',(select count(*) from audit_logs where time<input_audit_logs_before::timestamptz));
 $$;
 
@@ -452,5 +470,7 @@ revoke all on function public.cfm_ping_stats_from_rollup(text,jsonb,text,text) f
 grant execute on function public.cfm_ping_stats_from_rollup(text,jsonb,text,text) to cf_monitor_app, service_role;
 revoke all on function public.cfm_delete_old_ping_rollup(text,integer) from public, anon, authenticated;
 grant execute on function public.cfm_delete_old_ping_rollup(text,integer) to cf_monitor_app, service_role;
+revoke all on function public.cfm_expired_row_counts(text,text,text,text) from public, anon, authenticated;
+grant execute on function public.cfm_expired_row_counts(text,text,text,text) to service_role;
 
 notify pgrst, 'reload schema';

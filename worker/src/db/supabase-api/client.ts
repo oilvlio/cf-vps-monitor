@@ -323,7 +323,7 @@ export function deleteSupabaseOldRecords(
   env: SupabaseApiEnv,
   beforeTime: string,
   options: DeleteOldRowsOptions = {},
-): Promise<{ records: number; gpu_records: number; gpu_snapshots: number; has_more: boolean }> {
+): Promise<{ records: number; gpu_records: number; gpu_snapshots: number; partitions_dropped?: number; has_more: boolean }> {
   return callSupabaseRpc(env, 'cfm_delete_old_records', {
     input_before_time: beforeTime,
     input_max_batches: options.maxBatches,
@@ -334,7 +334,7 @@ export function deleteSupabaseOldPingRecords(
   env: SupabaseApiEnv,
   beforeTime: string,
   options: DeleteOldRowsOptions = {},
-): Promise<{ ping_records: number; ping_snapshots: number; has_more: boolean }> {
+): Promise<{ ping_records: number; ping_snapshots: number; ping_snapshot_partitions?: number; has_more: boolean }> {
   return callSupabaseRpc(env, 'cfm_delete_old_ping_records', {
     input_before_time: beforeTime,
     input_max_batches: options.maxBatches,
@@ -850,7 +850,7 @@ export function buildSupabasePingRollup(env: SupabaseApiEnv, before: string, max
   return callSupabaseRpc(env, 'cfm_build_ping_rollup', { input_before: before, input_max_buckets: maxBuckets });
 }
 
-export function deleteSupabaseOldPingRollup(env: SupabaseApiEnv, before: string, maxBatches = 200): Promise<{ ping_rollup: number; has_more: boolean }> {
+export function deleteSupabaseOldPingRollup(env: SupabaseApiEnv, before: string, maxBatches = 200): Promise<{ ping_rollup: number; ping_rollup_partitions?: number; has_more: boolean }> {
   return callSupabaseRpc(env, 'cfm_delete_old_ping_rollup', { input_before: before, input_max_batches: maxBatches });
 }
 

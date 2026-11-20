@@ -13,9 +13,11 @@ test('AUD-13 deleted rows release the live-data budget even while allocated file
       insert into records(client,time) select 'synthetic-node', '2026-09-01'::timestamptz + n * interval '1 second'
         from generate_series(1,36000) n;
     `);
+    await database.exec('analyze records; analyze ping_rollup;');
     const readUsage = async () => rpc(database, 'cfm_history_storage_usage');
     const before = await readUsage();
     await database.exec('delete from records where id > 1;');
+    await database.exec('analyze records; delete from history_storage_usage_cache;');
     const after = await readUsage();
     assert.equal(after.live_rows, 2, 'Ping rollups count toward the live-data budget');
     assert.equal(after.tables.ping_rollup.live_rows, 1);
@@ -23,7 +25,8 @@ test('AUD-13 deleted rows release the live-data budget even while allocated file
     assert.ok(after.estimated_live_storage_bytes < before.estimated_live_storage_bytes / 10,
       'capacity control must observe live data reduction rather than retained physical allocation');
     assert.equal(after.reusable_bytes, null, 'free space was not measured and must not be invented');
-    assert.equal(after.measurement, 'live-row-bytes-plus-index-estimate');
+    assert.equal(after.measurement, 'cached-system-sample-estimate');
+    assert.equal(after.cache_ttl_seconds, 600);
     assert.ok(after.live_row_bytes > 0);
     assert.ok(after.estimated_live_storage_bytes > after.live_row_bytes, 'index/page allowance is separate from measured tuples');
 

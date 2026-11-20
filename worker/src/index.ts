@@ -596,13 +596,19 @@ async function runRecordCleanup(context: ScheduledRunContext, now: Date): Promis
     audit_logs: auditDeleted.audit_logs,
     notification_delivery_state: deliveryDeleted.notification_delivery_state,
   };
+  const droppedPartitions = {
+    records: recordDeleted.partitions_dropped || 0,
+    ping_snapshots: pingDeleted.ping_snapshot_partitions || 0,
+    ping_rollup: pingRollupDeleted.ping_rollup_partitions || 0,
+  };
+  const droppedPartitionCount = Object.values(droppedPartitions).reduce((sum, value) => sum + value, 0);
   // A capped batch is progress, not completion. Keep the old timestamp so the
   // next two-minute Cron continues draining instead of skipping another day.
   if (!hasMore) {
     await db.setSetting(context.database, RECORD_CLEANUP_LAST_RUN_KEY, now.toISOString());
   }
   const deletedRows = Object.values(deleted).reduce((sum, value) => sum + Number(value || 0), 0);
-  if (deletedRows === 0) {
+  if (deletedRows === 0 && droppedPartitionCount === 0) {
     return;
   }
   await db.insertAuditLog(context.database, 'system', 'cron_cleanup', `分批清理${hasMore ? '待续' : '完成'}: ${JSON.stringify({
@@ -614,6 +620,7 @@ async function runRecordCleanup(context: ScheduledRunContext, now: Date): Promis
     },
     rolled_up: rolledUp,
     deleted,
+    dropped_partitions: droppedPartitions,
     has_more: hasMore,
   })}`);
 }

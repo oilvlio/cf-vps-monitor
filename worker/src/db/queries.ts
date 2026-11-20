@@ -480,7 +480,7 @@ export async function deleteOldRecords(
   database: QueryDatabase,
   beforeTime: string,
   options: t.DeleteOldRowsOptions = {},
-): Promise<{ records: number; gpu_records: number; gpu_snapshots: number; has_more: boolean }> {
+): Promise<{ records: number; gpu_records: number; gpu_snapshots: number; partitions_dropped?: number; has_more: boolean }> {
   return sba.deleteSupabaseOldRecords(database.env, beforeTime, options);
 }
 
@@ -488,7 +488,7 @@ export async function deleteOldPingRecords(
   database: QueryDatabase,
   beforeTime: string,
   options: t.DeleteOldRowsOptions = {},
-): Promise<{ ping_records: number; ping_snapshots: number; has_more: boolean }> {
+): Promise<{ ping_records: number; ping_snapshots: number; ping_snapshot_partitions?: number; has_more: boolean }> {
   return sba.deleteSupabaseOldPingRecords(database.env, beforeTime, options);
 }
 
@@ -582,7 +582,7 @@ export async function deleteOldPingRollup(
   database: QueryDatabase,
   before: string,
   options: t.DeleteOldRowsOptions = {},
-): Promise<{ ping_rollup: number; has_more: boolean }> {
+): Promise<{ ping_rollup: number; ping_rollup_partitions?: number; has_more: boolean }> {
   return sba.deleteSupabaseOldPingRollup(database.env, before, options.maxBatches);
 }
 

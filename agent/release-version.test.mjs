@@ -10,6 +10,8 @@ const posix = path => path.replaceAll('\\', '/');
 const bash = process.platform === 'win32'
   ? join(dirname(dirname(spawnSync('where.exe', ['git'], { encoding: 'utf8', windowsHide: true }).stdout.trim().split(/\r?\n/)[0])), 'bin', 'bash.exe')
   : 'bash';
+const hasPwsh = spawnSync('pwsh', ['-NoProfile', '-Command', 'exit 0'],
+  { stdio: 'ignore', windowsHide: true }).error?.code !== 'ENOENT';
 
 function validationCommands() {
   const workflow = readFileSync(join(repo, '.github', 'workflows', 'release-agent.yml'), 'utf8');
@@ -81,7 +83,7 @@ test('R-A09 every publishable version resolves through all three real installers
       'v1.2.3+foo+bar', 'v1.2.3+', 'v1.2.3-alpha..1', 'v1.2.3-rc_1+build', 'v1.2.3;echo',
       ' ', 'v1.2.3\n', 'v1.2.3\nv1.2.4', 'v1.2.3\r'].map(tag => ({ tag, publish: false, pin: false })),
   ];
-  for (const vector of vectors) await t.test(JSON.stringify(vector.tag), () => {
+  for (const vector of vectors) await t.test(JSON.stringify(vector.tag), async t => {
     const commandLog = join(root, 'commands.log');
     const env = { ...process.env, REAUDIT_RELEASE_TAG: vector.tag, AGENT_VERSION: vector.tag,
       GITHUB_SHA: 'a'.repeat(40), GITHUB_REPOSITORY: 'synthetic/repository', GITHUB_ENV: posix(join(root, 'github-env')),
@@ -94,11 +96,8 @@ test('R-A09 every publishable version resolves through all three real installers
     if (!vector.publish && released.status !== 0 && existsSync(commandLog) && readFileSync(commandLog, 'utf8').trim()) {
       failures.push('invalid release must be rejected before git/gh lookups');
     }
-    for (const name of ['install.sh', 'install-linux.sh', 'install-windows.ps1']) {
-      const result = name === 'install-windows.ps1'
-        ? spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', paths[name], '-DryRun'],
-          { env, encoding: 'utf8', timeout: 15_000, windowsHide: true })
-        : spawnSync(name === 'install.sh' ? 'sh' : bash, [posix(paths[name])],
+    for (const name of ['install.sh', 'install-linux.sh']) {
+      const result = spawnSync(name === 'install.sh' ? 'sh' : bash, [posix(paths[name])],
           { env, encoding: 'utf8', timeout: 15_000, windowsHide: true });
       assert.ifError(result.error);
       if ((result.status === 0) !== vector.pin) failures.push(`${name}: expected ${vector.pin ? 'accept' : 'reject'}, exit=${result.status}, ${result.stdout}${result.stderr}`);
@@ -108,6 +107,17 @@ test('R-A09 every publishable version resolves through all three real installers
         if (result.stdout.trim() !== expected) failures.push(`${name}: decoded/encoded repository+tag path is not equivalent: ${result.stdout}`);
       }
     }
+    await t.test('install-windows.ps1 release URL', { skip: !hasPwsh ? 'pwsh is not installed' : false }, () => {
+      const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', paths['install-windows.ps1'], '-DryRun'],
+        { env, encoding: 'utf8', timeout: 15_000, windowsHide: true });
+      assert.ifError(result.error);
+      assert.equal((result.status === 0), vector.pin, `expected ${vector.pin ? 'accept' : 'reject'}, exit=${result.status}, ${result.stdout}${result.stderr}`);
+      if (vector.pin) {
+        const expected = vector.tag ? `https://github.com/oilvlio/cf-vps-monitor/releases/download/${encodeURIComponent(vector.tag)}`
+          : 'https://github.com/oilvlio/cf-vps-monitor/releases/latest/download';
+        assert.equal(result.stdout.trim(), expected);
+      }
+    });
     assert.deepEqual(failures, [], failures.join('\n'));
   });
 });

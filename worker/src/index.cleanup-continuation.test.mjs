@@ -100,11 +100,14 @@ test('AUD-07 small delete budgets report remaining work for every history family
       insert into audit_logs (time) select '2026-01-01' from generate_series(1,101);
     `);
     await rpc(database, 'cfm_build_ping_rollup', { input_before: '2026-09-01', input_max_buckets: 48 });
-    for (const name of ['cfm_delete_old_ping_records', 'cfm_delete_old_audit_logs']) {
-      const input = { input_before_time: '2026-09-01', input_max_batches: 1 };
-      assert.equal((await rpc(database, name, input)).has_more, true, `${name} reports bounded backlog`);
-      assert.equal((await rpc(database, name, input)).has_more, false, `${name} reports drained backlog`);
-    }
+    const pingCleanup = { input_before_time: '2026-09-01', input_max_batches: 1 };
+    assert.equal((await rpc(database, 'cfm_delete_old_ping_records', pingCleanup)).has_more, false,
+      'old snapshot rows remain until the whole daily partition is eligible for DROP');
+    assert.equal((await database.query('select count(*)::integer count from ping_snapshots')).rows[0].count, 101);
+    const auditCleanup = { input_before_time: '2026-09-01', input_max_batches: 1 };
+    assert.equal((await rpc(database, 'cfm_delete_old_audit_logs', auditCleanup)).has_more, true,
+      'heap history still reports bounded row-delete backlog');
+    assert.equal((await rpc(database, 'cfm_delete_old_audit_logs', auditCleanup)).has_more, false);
   } finally {
     await database.close();
   }

@@ -54,7 +54,8 @@ assert.equal(rows.defaultValue, '3000000');
 assert.ok(Number(rows.defaultValue) <= rows.max);
 const live = readFileSync(new URL('../do/live-data.ts', import.meta.url), 'utf8');
 assert.match(live, /RECORD_HIGH_WATERMARK_DEFAULT_ROWS = 3_000_000;/, 'DO 的回退默认值要与 schema 一致');
-assert.match(live, /PING_OBSERVED_MAX_AGE_MS = \(PING_RAW_RETENTION_DEFAULT_HOURS - 24\) \* 60 \* 60 \* 1000;/, 'Ping 积压最大年龄应比原始保留期至少短一天');
+assert.match(live, /'ping_record_preserve_time'/, 'DO must load the configured raw Ping retention');
+assert.match(live, /this\.pingObservedMaxAgeMs = Math\.max\(0, boundedPingRetentionHours - 24\) \* 60 \* 60 \* 1000;/, 'Ping backlog age follows configured retention with a one-day safety margin');
 
 // 清理任务与手动清理都不能再把保留时间夹回 168 小时。
 for (const file of ['../index.ts', '../routes/admin.ts']) {

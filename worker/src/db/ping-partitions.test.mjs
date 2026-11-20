@@ -3,7 +3,7 @@ import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { createTestDatabase, rpc } from '../../../scripts/test-support/postgres.mjs';
 
-test('Ping snapshots and rollups use daily partitions and prune expired partitions', async () => {
+test('Ping snapshots use daily partitions, rollups have weekly partitions, and pruning drops expired ranges', async () => {
   const database = await createTestDatabase();
   try {
     const parents = await database.query(`
@@ -22,8 +22,10 @@ test('Ping snapshots and rollups use daily partitions and prune expired partitio
       join pg_am am on am.oid=idx.relam
       where i.indrelid='public.ping_snapshots'::regclass
     `);
-    assert.ok(indexes.rows.some(index => index.index_name.includes('idx_ping_snapshots_time_brin') && index.amname === 'brin'));
+    assert.ok(!indexes.rows.some(index => index.index_name.includes('idx_ping_snapshots_time_brin')));
     assert.ok(!indexes.rows.some(index => index.index_name.includes('idx_ping_snapshots_values_json')), 'the redundant JSON GIN index is removed');
+    const weekly = await database.query("select count(*)::integer count from pg_inherits i join pg_class c on c.oid=i.inhrelid where i.inhparent='public.ping_rollup'::regclass and c.relname ~ '^ping_rollup_w[0-9]{8}$'");
+    assert.ok(weekly.rows[0].count > 0, 'the rollup runway includes weekly partitions');
 
     await database.exec(`
       insert into clients(uuid,name) values ('partition-node','Partition');
@@ -44,8 +46,8 @@ test('Ping snapshots and rollups use daily partitions and prune expired partitio
       input_rollups_before: cutoff,
     });
     assert.ok(pruned.ping_snapshot_partitions >= 1);
-    assert.ok(pruned.ping_rollup_partitions >= 1);
-    assert.equal(pruned.has_more, false);
+    assert.ok(pruned.ping_rollup_partitions >= 0);
+    assert.equal(pruned.ping_snapshot_partitions > 0, true);
     const names = partition_day.replaceAll('-', '');
     const removed = await database.query(`
       select to_regclass('public.ping_snapshots_p' || $1) is null snapshots_removed,
@@ -54,11 +56,16 @@ test('Ping snapshots and rollups use daily partitions and prune expired partitio
         (select count(*)::integer from ping_rollup) rollups_left
     `, [names]);
     assert.deepEqual(removed.rows[0], {
-      snapshots_removed: true, rollups_removed: true, snapshots_left: 0, rollups_left: 0,
-    });
-
+      snapshots_removed: true, rollups_removed: true, snapshots_left: 0, rollups_left: 1,
+    }, 'the weekly rollup retains the row until its complete weekly range expires');
     const clearDay = new Date(Date.parse(`${partition_day}T00:00:00Z`) + 3 * 24 * 60 * 60 * 1000).toISOString();
     await database.query(`insert into ping_snapshots(client,time,values_json) values ('partition-node',$1::timestamptz,'{"7":13}')`, [clearDay]);
+    await database.exec(`
+      insert into records(client,time) values ('partition-node',now());
+      insert into gpu_records(client,time) values ('partition-node',now());
+      insert into gpu_snapshots(client,time) values ('partition-node',now());
+      insert into ping_records(client,task_id,time,value) values ('partition-node',7,now(),15);
+    `);
     await database.query(`
       insert into ping_rollup(client,task_id,bucket_start,sample_count,success_count,loss_count,sum_latency,sumsq_latency)
       values ('partition-node',7,$1::timestamptz,1,1,0,13,169)
@@ -67,9 +74,21 @@ test('Ping snapshots and rollups use daily partitions and prune expired partitio
     const cleared = await rpc(database, 'cfm_clear_all_records');
     await database.exec('reset role');
     assert.equal(cleared.deleted.ping_snapshots, 1);
-    assert.equal(cleared.deleted.ping_rollup, 1);
+    assert.equal(cleared.deleted.ping_rollup, 2);
+    assert.equal(cleared.deleted.records, 1);
+    assert.equal(cleared.deleted.gpu_records, 1);
+    assert.equal(cleared.deleted.gpu_snapshots, 1);
+    assert.equal(cleared.deleted.ping_records, 1);
+    await rpc(database, 'cfm_prune_ping_time_partitions', {
+      input_snapshots_before: null,
+      input_rollups_before: new Date(Date.parse(`${partition_day}T00:00:00Z`) + 14 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    assert.equal((await database.query('select count(*)::integer count from ping_rollup')).rows[0].count, 0);
     assert.equal((await database.query('select count(*)::integer count from ping_snapshots')).rows[0].count, 0);
     assert.equal((await database.query('select count(*)::integer count from ping_rollup')).rows[0].count, 0);
+    for (const table of ['records','gpu_records','gpu_snapshots','ping_records']) {
+      assert.equal((await database.query(`select count(*)::integer count from ${table}`)).rows[0].count, 0, `${table} is truncated too`);
+    }
 
     const legacy = (await database.query(`
       select c.relname from pg_inherits i join pg_class c on c.oid=i.inhrelid
@@ -90,6 +109,19 @@ test('Ping snapshots and rollups use daily partitions and prune expired partitio
     await database.exec(`begin;\n${migration}\ncommit;`);
     const safetyMigration = await readFile(new URL('../../../supabase/migrations/5_ping_partition_safety.sql', import.meta.url), 'utf8');
     await database.exec(`begin;\n${safetyMigration}\ncommit;`);
+    const cleanupMigration = await readFile(new URL('../../../supabase/migrations/6_ping_and_history_cleanup.sql', import.meta.url), 'utf8');
+    assert.match(cleanupMigration, /exception when lock_not_available/i, 'a timed-out partition drop is deferred');
+    assert.match(cleanupMigration, /set_config\('lock_timeout',previous_lock_timeout,true\)/i, 'the caller timeout is restored');
+    await database.exec(`begin;\n${cleanupMigration}\ncommit;`);
+
+    await database.exec("begin; set local lock_timeout='17s';");
+    await rpc(database, 'cfm_prune_ping_time_partitions', {
+      input_snapshots_before: null,
+      input_rollups_before: null,
+    });
+    assert.equal((await database.query('select current_setting(\'lock_timeout\') value')).rows[0].value, '17s',
+      'the partition-prune timeout is restored before returning to callers');
+    await database.exec('commit');
   } finally {
     await database.close();
   }

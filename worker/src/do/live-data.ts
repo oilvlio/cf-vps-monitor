@@ -14,6 +14,7 @@ import { getDatabase, type DatabaseProviderEnv } from '../db/provider';
 import { MAX_PING_RESULTS_PER_REPORT, MAX_PING_VALUE_MS, PING_LOSS_VALUE, validatePingResults } from '../utils/ping-result';
 import {
   PING_RAW_RETENTION_DEFAULT_HOURS,
+  PING_RAW_RETENTION_MAX_HOURS,
   buildAdminSettings,
   isRecordPersistenceEnabled as normalizeRecordPersistenceEnabled,
 } from '../settings/schema';
@@ -57,8 +58,8 @@ const PING_RECORD_PERSIST_INTERVAL_MS = 120_000;
 const MIN_RECORD_PERSIST_INTERVAL_MS = 3_000;
 const MAX_RECORD_PERSIST_INTERVAL_MS = 3_600_000;
 const MIN_PING_RECORD_PERSIST_INTERVAL_MS = 60_000;
-// 保留一整天的安全余量，避免迟到样本命中已被清理的最老分区。
-const PING_OBSERVED_MAX_AGE_MS = (PING_RAW_RETENTION_DEFAULT_HOURS - 24) * 60 * 60 * 1000;
+// 按用户配置的原始 Ping 保留期留一整天安全余量，避免迟到样本命中已删除分区。
+const DEFAULT_PING_OBSERVED_MAX_AGE_MS = (PING_RAW_RETENTION_DEFAULT_HOURS - 24) * 60 * 60 * 1000;
 const MAX_PING_RECORD_PERSIST_INTERVAL_MS = 3_600_000;
 const RECORD_SETTING_CACHE_MS = 30_000;
 const LIVE_VIEWER_WS_PROTOCOL = 'cf-monitor-viewer';
@@ -89,6 +90,7 @@ const RECORD_PERSISTENCE_SETTING_KEYS = [
   'record_enabled',
   'record_persist_interval_sec',
   'ping_record_persist_interval_sec',
+  'ping_record_preserve_time',
   'record_high_watermark_rows',
   'record_high_watermark_bytes',
 ];
@@ -437,6 +439,7 @@ export class LiveDataDO {
   private recordPersistenceEnabled: boolean = true;
   private recordPersistIntervalMs: number = RECORD_PERSIST_INTERVAL_MS;
   private pingRecordPersistIntervalMs: number = PING_RECORD_PERSIST_INTERVAL_MS;
+  private pingObservedMaxAgeMs: number = DEFAULT_PING_OBSERVED_MAX_AGE_MS;
   private recordPersistenceCheckedAt: number = 0;
   private recordHighWatermarkRows: number = RECORD_HIGH_WATERMARK_DEFAULT_ROWS;
   private recordHighWatermarkBytes: number = RECORD_HIGH_WATERMARK_DEFAULT_BYTES;
@@ -2777,6 +2780,11 @@ export class LiveDataDO {
         Math.max(boundedPingIntervalSec * 1000, MIN_PING_RECORD_PERSIST_INTERVAL_MS),
         MAX_PING_RECORD_PERSIST_INTERVAL_MS,
       );
+      const pingRetentionHours = Number(settings.ping_record_preserve_time);
+      const boundedPingRetentionHours = Number.isFinite(pingRetentionHours)
+        ? Math.min(Math.max(Math.floor(pingRetentionHours), 1), PING_RAW_RETENTION_MAX_HOURS)
+        : PING_RAW_RETENTION_DEFAULT_HOURS;
+      this.pingObservedMaxAgeMs = Math.max(0, boundedPingRetentionHours - 24) * 60 * 60 * 1000;
       const highWatermarkRows = Number(settings.record_high_watermark_rows);
       this.recordHighWatermarkRows = Number.isFinite(highWatermarkRows)
         ? Math.min(
@@ -3297,7 +3305,7 @@ export class LiveDataDO {
    * （写进去也会马上被清理）。老版本 Agent 不带时间，保持原样。
    */
   private normalizePingObservedAt(results: PingPersistenceResult[], nowMs: number): PingPersistenceResult[] {
-    const oldestMs = nowMs - PING_OBSERVED_MAX_AGE_MS;
+    const oldestMs = nowMs - this.pingObservedMaxAgeMs;
     const normalized: PingPersistenceResult[] = [];
     for (const result of results) {
       if (result.observedAtMs === undefined) {

@@ -4,7 +4,7 @@ import { BUNDLED_SUPABASE_MIGRATIONS } from '../../generated/supabase-migrations
 
 const migrationsUrl = new URL('../../../../supabase/migrations/', import.meta.url);
 const migrationFiles = (await readdir(migrationsUrl)).filter((name) => name.endsWith('.sql')).sort();
-const expectedMigrations = ['1_schema', '2_functions', '3_ping_rollup', '4_ping_time_partitions', '5_ping_partition_safety'];
+const expectedMigrations = ['1_schema', '2_functions', '3_ping_rollup', '4_ping_time_partitions', '5_ping_partition_safety', '6_ping_and_history_cleanup', '7_history_partition_and_usage_optimization'];
 assert.deepEqual(migrationFiles, expectedMigrations.map((name) => `${name}.sql`));
 assert.deepEqual(BUNDLED_SUPABASE_MIGRATIONS.map(({ version }) => version), expectedMigrations);
 
@@ -15,6 +15,17 @@ const runtimeDefaultsSql = featureSchemaSql;
 const generatedSql = await readFile(new URL('../../generated/supabase-migrations.ts', import.meta.url), 'utf8');
 const agentRoutesSql = await readFile(new URL('../../routes/client.ts', import.meta.url), 'utf8');
 const allMigrationSql = await Promise.all(migrationFiles.map((name) => readFile(new URL(name, migrationsUrl), 'utf8'))).then((sources) => sources.join('\n'));
+
+const pingCleanupDefinitions = [...allMigrationSql.matchAll(/create or replace function public\.cfm_delete_old_ping_records\([\s\S]*?\$\$;/gi)];
+assert.ok(pingCleanupDefinitions.length >= 2, 'Ping cleanup RPC should be versioned through later migrations');
+assert.match(pingCleanupDefinitions.at(-1)[0], /cfm_prune_ping_time_partitions/i,
+  'the final cfm_delete_old_ping_records definition must include the partition-prune implementation');
+const pingReadDefinitions = [...allMigrationSql.matchAll(/create or replace function public\.cfm_ping_records\([\s\S]*?\$\$;/gi)];
+assert.ok(pingReadDefinitions.length > 0, 'legacy-named Ping read RPC should remain defined');
+assert.match(pingReadDefinitions.at(-1)[0], /from ping_snapshots/i,
+  'the legacy-named read RPC serves partitioned snapshots, not the obsolete ping_records heap');
+assert.doesNotMatch(allMigrationSql, /insert\s+into\s+(public\.)?ping_records/i,
+  'no application migration writes new data to the obsolete ping_records heap');
 
 assert.doesNotMatch(allMigrationSql, /^\+/m);
 assert.doesNotMatch(allMigrationSql, /set token\s*=\s*null/i);

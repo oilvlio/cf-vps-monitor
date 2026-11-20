@@ -25,11 +25,11 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 - **移除**：网站监控（页面、API、定时探测、通知与数据库对象全部下线）；后台「一键同步更新 / 版本更新」入口。
 - **新增**：首页探测点（`/api/ping/home` + 首页色块）；Agent `--allow-host-load`（默认开启，`--no-host-load` 关闭）/ `--host-cpu-cores`（容器上报宿主负载并按核数折算）；`--enable-gpu`（GPU 探测默认关闭）；`--log-level debug|info|warn|error`（默认 info，每次上报 / ack 属于 debug，debug/info 走 stdout，warn/error 走 stderr）；Load5/Load15 三元组上报。
 - **Monitor 主题兼容**：公开兼容节点、指标、Ping 历史及主题配置 API，并通过 `/api/ws` 提供实时数据；指标历史按落库间隔聚合，流量总量由服务端批量补齐。第三方主题资源经 Worker 托管，后台保存配置后会立即刷新主题设置。
-- **Ping 历史**：节点详情和 Monitor 兼容接口最多查询 30 天；超过 7 天的 Ping 图表使用 30 分钟持久化 rollup，Monitor 输出仍遵循 hub 1.4.2 的小时倍数步长契约。原始 Ping 默认保留 7 天，rollup 默认保留 90 天，可在后台分别配置；rollup 按水位增量构建，清理原始快照前会确认数据已越过安全水位。
+- **Ping 历史**：节点详情和 Monitor 兼容接口最多查询 30 天；超过 7 天的 Ping 图表使用 30 分钟持久化 rollup，Monitor 输出仍遵循 hub 1.4.2 的小时倍数步长契约。原始 Ping 默认保留 7 天，rollup 默认保留 90 天，可在后台分别配置；原始快照按日分区、rollup 按周分区，都只整段回收，实际保留最多比设置值多一个分区周期（原始不到一天，rollup 不到七天）。rollup 按水位增量构建，清理原始快照前会确认数据已越过安全水位。
 - **Agent TCP Ping 日志**：失败日志包含 DNS 解析错误或 TCP 连接错误详情；若连接成功但重测仍超过阈值，也会标明持续高延迟或疑似 SYN 重传。
 - **行为调整**：月度流量改为 vnstat 式按天存增量，并且全部放在服务端：Agent 只上报各网卡的内核累计读数（不再有 `traffic-state.json` 等任何本地流量状态），Supabase 换算增量、按 Agent 本地日期累计到 `traffic_daily`，月度流量 = 当前计费周期 `[重置日, 今天]` 的日增量之和。在后台修改流量重置日只是换求和区间，当期流量不再清零，改回去也能原样找回（Agent 的 `--traffic-reset-day` 参数已移除，旧服务需重跑安装命令更新服务单元；系统级安装也不再创建 `state` 目录）；Ping 快照按落库间隔全量落库（含丢包/超时事件即时落库），原始历史默认保留 168 小时，30 分钟 rollup 默认保留 2160 小时；容器磁盘直接按 statfs 上报（移除目录扫描 / 配额换算 / root 收集器）；超过 24h 的 GPU 历史自动并入小时桶 `gpu_rollup` 节省存储。
 - **安全基线**：Go 1.26.11（GO-2026-6809、GO-2026-6859）、undici 7.30.1、sharp 0.35.5 overrides。
-- **数据库**：迁移清单由 `1_schema.sql` 至 `5_ping_partition_safety.sql` 组成；Ping 快照和 rollup 使用按日分区，过期完整分区会直接移除。
+- **数据库**：迁移清单由 `1_schema.sql` 至 `7_history_partition_and_usage_optimization.sql` 组成；Ping 快照按日分区、rollup 按周分区，records/GPU 历史同样按日分区，过期完整分区会直接移除。历史容量统计读取分区树大小，行数与行宽按 10% 块采样估算并缓存 10 分钟；小于 32MB 的分区仍精确计数，避免批量删除后容量熔断滞后。
 - **流量统计的节奏与口径**：月度总量约每 2 分钟（与 ping record 同节奏）精确落库一次；两次落库之间，Worker 在内存里用「上次落库的合计 + 当前读数相对上次落库读数的增量」估算，随每份上报一起刷新（规则与数据库换算一致，不额外写库），落库后由数据库的精确值接管。读数是累计的，所以某次落库失败只是少一次更新，下一次的差值会把空档补上；仅当失败期间节点恰好重启，才会丢失「最后一次落库到重启」之间的流量。新装的 Agent 从第一次读到网卡计数器开始累计（与 vnstat 一致），不再把「开机以来」的累计回填到开机当天。`traffic_daily` / `traffic_counter_state` 与 `records` 一样属于运行数据，不进入配置备份，随节点删除级联清理，日增量保留约 400 天。
 - **流量统计升级顺序**：先部署 Worker 并重新执行一次 `/db-init`（新增两张表和 `cfm_traffic_apply_samples` / `cfm_traffic_import` 两个 RPC，均为幂等），再升级 Agent。旧版 Agent 本地保存的按天历史会在升级后随第一批上报一次性导入，服务端确认入库后旧的 `traffic-state.json` 才会被改名为 `*.imported`，所以当月已有流量不会丢，升级瞬间的那一小段流量也会接上。Agent 先于 Worker 升级时，面板会暂时显示「开机以来」的原始累计，旧状态文件不会被动，待服务端就绪后自动恢复。尚未升级的旧 Agent 仍按原方式上报当期累计，面板照常展示。
 
@@ -44,7 +44,7 @@ CF VPS Monitor 是一个轻量 VPS 探针面板，使用 Cloudflare Workers 承�
 | `frontend/` | React + Vite + Radix UI（已移除 Tailwind，主题样式内聚在 `index.css`），构建产物由 Workers Static Assets 托管 |
 | `worker/` | Hono Worker、Durable Objects、Cron Triggers、Supabase HTTP RPC 数据层 |
 | `agent/` | Go Agent，支持 WebSocket/HTTP 上报和 Unix/Windows 安装脚本 |
-| `supabase/migrations/` | `1_schema.sql` 至 `5_ping_partition_safety.sql`（Ping rollup、按日分区与分区安全修复）；迁移清单由 `/db-init` 执行 |
+| `supabase/migrations/` | `1_schema.sql` 至 `7_history_partition_and_usage_optimization.sql`（历史表分区、周 rollup、采样容量统计）；迁移清单由 `/db-init` 执行 |
 | `scripts/` | 部署和迁移清单生成脚本 |
 
 ## 运行时配置

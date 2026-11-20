@@ -128,6 +128,15 @@ begin
     made := made + 1;
   end loop;
 
+  -- Once the later weekly-rollup migration has run, replaying this migration
+  -- must not attempt daily rollup children that would overlap the weeklies.
+  if exists (
+    select 1 from pg_inherits i join pg_class c on c.oid=i.inhrelid
+    where i.inhparent='public.ping_rollup'::regclass and c.relname ~ '^ping_rollup_w[0-9]{8}$'
+  ) then
+    return jsonb_build_object('partitions_created',made,'through',target_day);
+  end if;
+
   select max(to_date(substr(c.relname, length('ping_rollup_p') + 1, 8), 'YYYYMMDD'))
     into next_rollup_day
   from pg_inherits i join pg_class c on c.oid=i.inhrelid join pg_class p on p.oid=i.inhparent

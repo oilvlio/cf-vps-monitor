@@ -35,14 +35,6 @@ test('30-minute Ping rollup matches raw buckets and merges exact additive statis
     });
     assert.deepEqual(rolledHalfHours['1'], rawHalfHours['1']);
 
-    const expired = await rpc(database, 'cfm_expired_row_counts', {
-      input_records_before: '2026-09-01T00:00:00Z',
-      input_ping_records_before: '2026-09-01T00:00:00Z',
-      input_audit_logs_before: '2026-09-01T00:00:00Z',
-      input_ping_rollup_before: '2026-09-01T00:30:00Z',
-    });
-    assert.equal(expired.ping_rollup, 1, 'rollup expiration uses its independent cutoff');
-
     const merged = await rpc(database, 'cfm_ping_rollup_range', {
       input_client: 'rollup-node', input_task_ids: [1], input_start: '2026-09-01T00:00:00Z',
       input_end: '2026-09-01T01:00:00Z', input_step_sec: 3600, input_limit: 1500,

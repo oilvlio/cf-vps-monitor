@@ -710,7 +710,7 @@ export async function getHistoryStorageUsage(database: QueryDatabase): Promise<t
 
 export async function getExpiredRowCounts(
   database: QueryDatabase,
-  beforeTimes: { records: string; ping_records: string; ping_rollup: string; audit_logs: string },
+  beforeTimes: { records: string; ping_records: string; audit_logs: string },
 ): Promise<t.TableRowCounts> {
   return sba.getSupabaseExpiredRowCounts(database.env, beforeTimes);
 }

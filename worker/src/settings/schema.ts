@@ -8,10 +8,6 @@ import { validateWebhookUrl } from '../utils/webhook.ts';
  */
 export const RECORD_RETENTION_DEFAULT_HOURS = 720;
 export const RECORD_RETENTION_MAX_HOURS = 720;
-export const PING_RAW_RETENTION_DEFAULT_HOURS = 168;
-export const PING_RAW_RETENTION_MAX_HOURS = 720;
-export const PING_ROLLUP_RETENTION_DEFAULT_HOURS = 2160;
-export const PING_ROLLUP_RETENTION_MAX_HOURS = 8760;
 
 type SettingType = 'string' | 'boolean' | 'integer' | 'enum';
 
@@ -106,17 +102,10 @@ export const SETTING_SCHEMA = {
   },
   ping_record_preserve_time: {
     type: 'integer',
-    defaultValue: String(PING_RAW_RETENTION_DEFAULT_HOURS),
+    defaultValue: String(RECORD_RETENTION_DEFAULT_HOURS),
     public: false,
     min: 1,
-    max: PING_RAW_RETENTION_MAX_HOURS,
-  },
-  ping_rollup_preserve_time: {
-    type: 'integer',
-    defaultValue: String(PING_ROLLUP_RETENTION_DEFAULT_HOURS),
-    public: false,
-    min: 24,
-    max: PING_ROLLUP_RETENTION_MAX_HOURS,
+    max: RECORD_RETENTION_MAX_HOURS,
   },
   record_persist_interval_sec: {
     type: 'integer',

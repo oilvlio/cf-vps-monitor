@@ -1006,13 +1006,12 @@ export function getSupabaseBoundedStorageRowCounts(env: SupabaseApiEnv, limit: n
 
 export function getSupabaseExpiredRowCounts(
   env: SupabaseApiEnv,
-  beforeTimes: { records: string; ping_records: string; ping_rollup: string; audit_logs: string },
+  beforeTimes: { records: string; ping_records: string; audit_logs: string },
 ): Promise<TableRowCounts> {
   return callSupabaseRpc<TableRowCounts>(env, 'cfm_expired_row_counts', {
     input_records_before: beforeTimes.records,
     input_ping_records_before: beforeTimes.ping_records,
     input_audit_logs_before: beforeTimes.audit_logs,
-    input_ping_rollup_before: beforeTimes.ping_rollup,
   });
 }
 

@@ -39,27 +39,22 @@ test('AUD-06/R-D05: restoring a configuration backup refreshes agent policies af
 });
 
 test('AUD-07: manual maintenance preserves unfinished batches from every history cleanup', async () => {
-  let rawPingBefore;
-  let pingRollupBefore;
   const db = {
-    getSettingsByKeys: async () => ({ ping_record_preserve_time: '168', ping_rollup_preserve_time: '4320' }),
+    getSettingsByKeys: async () => ({}),
     getExpiredRowCounts: async () => ({ records: 25000, gpu_records: 0, gpu_snapshots: 0, ping_records: 0, ping_snapshots: 0, ping_rollup: 0, audit_logs: 0 }),
     buildHistoryRollup: async () => ({}),
     buildPingRollup: async () => ({}),
     deleteOldRecords: async () => ({ records: 100, gpu_records: 0, gpu_snapshots: 0, has_more: true }),
-    deleteOldPingRecords: async (_database, before) => { rawPingBefore = before; return { ping_records: 0, ping_snapshots: 0, has_more: false }; },
-    deleteOldPingRollup: async (_database, before) => { pingRollupBefore = before; return { ping_rollup: 0, has_more: false }; },
+    deleteOldPingRecords: async () => ({ ping_records: 0, ping_snapshots: 0, has_more: false }),
+    deleteOldPingRollup: async () => ({ ping_rollup: 0, has_more: false }),
     deleteOldAuditLogs: async () => ({ audit_logs: 0, has_more: false }),
     cleanupOrphanClientData: async () => ({}), insertAuditLog: async () => {},
   };
   const { runMaintenanceCleanup } = createWorkerLoader({ db, expose: {
     'worker/src/routes/admin.ts': ['runMaintenanceCleanup'],
   } }).load('worker/src/routes/admin.ts');
-  const now = new Date('2026-09-06T12:00:00.000Z');
-  const result = await runMaintenanceCleanup({}, 'synthetic-admin', now);
+  const result = await runMaintenanceCleanup({}, 'synthetic-admin');
   assert.equal(result.has_more, true);
   assert.ok(Object.values(result.deleted).every(value => typeof value === 'number'));
   assert.equal(result.deleted.records, 100);
-  assert.equal(rawPingBefore, new Date(now.getTime() - 168 * 60 * 60 * 1000).toISOString());
-  assert.equal(pingRollupBefore, new Date(now.getTime() - 4320 * 60 * 60 * 1000).toISOString());
 });

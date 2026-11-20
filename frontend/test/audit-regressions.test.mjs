@@ -861,25 +861,6 @@ test('AUD-47 legal stored intervals survive opening and unrelated saving', () =>
   assert.deepEqual(getChangedSettings({ ...opened, record_preserve_time: '48' }, stored), { record_preserve_time: '48' });
 });
 
-test('Ping retention settings save raw snapshots and rollups independently', () => {
-  const save = productionDeclaration('src/pages/admin/SettingsGeneral.tsx', 'buildSavePayload', {
-    clampInteger: productionDeclaration('src/pages/admin/SettingsGeneral.tsx', 'clampInteger'),
-    DEFAULT_RETENTION_HOURS: 720, MAX_RETENTION_HOURS: 720,
-    DEFAULT_PING_RAW_RETENTION_HOURS: 168, MAX_PING_RAW_RETENTION_HOURS: 720,
-    DEFAULT_PING_ROLLUP_RETENTION_HOURS: 2160, MAX_PING_ROLLUP_RETENTION_HOURS: 8760,
-    DEFAULT_ACTIVE_SAMPLE_SEC: 3, DEFAULT_IDLE_UPLOAD_SEC: 120, MIN_IDLE_UPLOAD_SEC: 60,
-    DEFAULT_VIEWER_TTL_SEC: 120, DEFAULT_RECORD_PERSIST_SEC: 120,
-    DEFAULT_PING_RECORD_PERSIST_SEC: 120, DEFAULT_RECORD_HIGH_WATERMARK_ROWS: 700_000,
-  });
-  const payload = save({ record_preserve_time: '720', ping_record_preserve_time: '168', ping_rollup_preserve_time: '2160' });
-  assert.equal(payload.record_preserve_time, '720');
-  assert.equal(payload.ping_record_preserve_time, '168');
-  assert.equal(payload.ping_rollup_preserve_time, '2160');
-  const clamped = save({ record_preserve_time: '720', ping_record_preserve_time: '9999', ping_rollup_preserve_time: '99999' });
-  assert.equal(clamped.ping_record_preserve_time, '720');
-  assert.equal(clamped.ping_rollup_preserve_time, '8760');
-});
-
 test('AUD-48 Telegram test pins Telegram independently of global channel', async () => {
   for (const method of ['none', 'email', 'webhook', 'telegram']) {
     let body;

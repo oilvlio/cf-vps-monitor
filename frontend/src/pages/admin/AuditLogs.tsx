@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ScrollText, Search, Shield, Clock3, User, FileText } from 'lucide-react';
 import Loading from '../../components/Loading';
 import { useApi } from '../../contexts/AuthContext';
-import { getAuditLogDetailSearchText, getAuditLogDetailText, getAuditLogRawDetailText } from '../../utils/audit-log';
+import { getAuditLogDetailText, getAuditLogRawDetailText } from '../../utils/audit-log';
 import { AuditLogEntry, normalizeAuditLogsPage } from '../../utils/audit-log-response';
 import {
   Badge,
@@ -74,25 +74,54 @@ export default function AdminAuditLogs() {
   const [logs, setLogs] = useState<AuditLogEntry[]>([]);
   const [total, setTotal] = useState(0);
   const [hasMore, setHasMore] = useState(false);
+  const [knownActions, setKnownActions] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  // 首次加载前整页显示 Loading；之后的翻页 / 筛选只让表格变淡，
+  // 不能再卸载整页，否则正在输入的搜索框会失去焦点。
+  const [initialLoaded, setInitialLoaded] = useState(false);
   const [filter, setFilter] = useState('all');
+  // searchInput 是输入框里的即时内容；search 是防抖后真正发给后端的关键词。
+  const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState('50');
   const [selectedLog, setSelectedLog] = useState<AuditLogEntry | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+  }, []);
+
+  const handleSearchChange = (value: string) => {
+    setSearchInput(value);
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    searchTimer.current = setTimeout(() => {
+      setPage(1);
+      setSearch(value.trim());
+    }, 300);
+  };
+
+  const handleFilterChange = (value: string) => {
+    setPage(1);
+    setFilter(value);
+  };
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    apiFetch(`/admin/logs?limit=${pageSize}&page=${page}`)
+    const params = new URLSearchParams({ limit: pageSize, page: String(page) });
+    if (filter !== 'all') params.set('action', filter);
+    if (search) params.set('search', search);
+    apiFetch(`/admin/logs?${params.toString()}`)
       .then(data => {
         if (cancelled) return;
         const pageData = normalizeAuditLogsPage(data);
         setLogs(pageData.logs);
         setTotal(pageData.total);
         setHasMore(pageData.hasMore);
+        setKnownActions(pageData.actions);
       })
       .catch((loadError: unknown) => {
         if (cancelled) return;
@@ -102,34 +131,28 @@ export default function AdminAuditLogs() {
         setError(loadError instanceof Error ? loadError.message : '审计日志加载失败');
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (cancelled) return;
+        setLoading(false);
+        setInitialLoaded(true);
       });
     return () => {
       cancelled = true;
     };
-  }, [apiFetch, page, pageSize]);
+  }, [apiFetch, page, pageSize, filter, search]);
 
-  const filteredLogs = useMemo(() => {
-    return logs.filter(log => {
-      if (filter !== 'all' && log.action !== filter) return false;
-      if (search) {
-        const q = search.toLowerCase();
-        return (
-          log.action?.toLowerCase().includes(q) ||
-          getAuditLogDetailSearchText(log.detail).toLowerCase().includes(q) ||
-          log.user?.toLowerCase().includes(q) ||
-          String(log.id).includes(q)
-        );
-      }
-      return true;
-    });
-  }, [logs, filter, search]);
+  // 下拉框候选项来自后端的全表动作列表；当前选中的动作即使暂时不在列表里也要保留，避免下拉框显示空白。
+  const actionOptions = useMemo(() => {
+    const set = new Set(knownActions);
+    if (filter !== 'all') set.add(filter);
+    return Array.from(set).sort((a, b) => actionInfo(a).label.localeCompare(actionInfo(b).label, 'zh-CN'));
+  }, [knownActions, filter]);
 
-  const uniqueActions = Array.from(new Set(logs.map(l => l.action).filter((action): action is string => Boolean(action))));
+  const isFiltering = filter !== 'all' || search !== '';
   const knownPages = Math.max(page, Math.ceil(total / Number(pageSize || 50)));
   const pageLabel = hasMore ? `第 ${page} 页，至少 ${total} 条` : `第 ${page} / ${knownPages} 页，共 ${total} 条`;
+  const resultLabel = hasMore ? `匹配 至少 ${total} 条` : `匹配 ${total} 条`;
 
-  if (loading) return <Loading />;
+  if (!initialLoaded && loading) return <Loading />;
 
   return (
     <div className="sa-scope sa-page">
@@ -157,18 +180,18 @@ export default function AdminAuditLogs() {
                 className="sa-input"
                 placeholder="搜索 ID、用户、动作、详情..."
                 aria-label="搜索日志"
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
+                value={searchInput}
+                onChange={(event) => handleSearchChange(event.target.value)}
               />
             </div>
             <select
               className="sa-input sa-select"
               aria-label="操作类型筛选"
               value={filter}
-              onChange={(event) => setFilter(event.target.value)}
+              onChange={(event) => handleFilterChange(event.target.value)}
             >
               <option value="all">全部操作</option>
-              {uniqueActions.map(action => (
+              {actionOptions.map(action => (
                 <option key={action} value={action}>{actionInfo(action).label}</option>
               ))}
             </select>
@@ -184,11 +207,11 @@ export default function AdminAuditLogs() {
             </select>
           </div>
           <div className="sa-toolbar-group">
-            <Badge variant="info">本页筛选结果 {filteredLogs.length}</Badge>
+            {isFiltering && <Badge variant="info">{resultLabel}</Badge>}
           </div>
         </div>
 
-        <div className="sa-table-scroll">
+        <div className="sa-table-scroll" aria-busy={loading} style={loading ? { opacity: 0.55, transition: 'opacity 120ms' } : undefined}>
           <table className="sa-table">
             <thead>
               <tr>
@@ -200,14 +223,14 @@ export default function AdminAuditLogs() {
               </tr>
             </thead>
             <tbody>
-              {filteredLogs.length === 0 ? (
+              {logs.length === 0 ? (
                 <tr>
                   <td colSpan={5} className="sa-empty">
-                    {search || filter !== 'all' ? '没有匹配的日志' : '暂无日志记录'}
+                    {isFiltering ? '没有匹配的日志' : '暂无日志记录'}
                   </td>
                 </tr>
               ) : (
-                filteredLogs.map(log => {
+                logs.map(log => {
                   const info = actionInfo(log.action);
                   return (
                     <tr className="sa-tr" key={log.id}>
@@ -240,10 +263,10 @@ export default function AdminAuditLogs() {
         <div className="sa-table-footer sa-table-footer-row">
           <span>{pageLabel}</span>
           <div className="sa-toolbar-group">
-            <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
+            <Button variant="outline" size="sm" disabled={page <= 1 || loading} onClick={() => setPage((value) => Math.max(1, value - 1))}>
               上一页
             </Button>
-            <Button variant="outline" size="sm" disabled={!hasMore} onClick={() => setPage((value) => value + 1)}>
+            <Button variant="outline" size="sm" disabled={!hasMore || loading} onClick={() => setPage((value) => value + 1)}>
               下一页
             </Button>
           </div>

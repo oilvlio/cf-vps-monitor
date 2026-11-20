@@ -11,6 +11,8 @@ export interface AuditLogsPage {
   logs: AuditLogEntry[];
   total: number;
   hasMore: boolean;
+  /** 全表出现过的动作类型，用于筛选下拉框；不随当前筛选条件变化。 */
+  actions: string[];
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -48,16 +50,20 @@ export function normalizeAuditLogEntry(value: unknown): AuditLogEntry | null {
 
 export function normalizeAuditLogsPage(payload: unknown): AuditLogsPage {
   const record = asRecord(payload);
-  if (!record) return { logs: [], total: 0, hasMore: false };
+  if (!record) return { logs: [], total: 0, hasMore: false, actions: [] };
 
   const logs = Array.isArray(record.data)
     ? record.data.map(normalizeAuditLogEntry).filter((entry): entry is AuditLogEntry => entry !== null)
     : [];
   const total = finiteNumber(record.total) ?? logs.length;
+  const actions = Array.isArray(record.actions)
+    ? record.actions.filter((action): action is string => typeof action === 'string' && action !== '')
+    : [];
 
   return {
     logs,
     total: Math.max(0, Math.trunc(total)),
     hasMore: record.has_more === true,
+    actions,
   };
 }

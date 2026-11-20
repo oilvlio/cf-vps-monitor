@@ -204,6 +204,15 @@ export interface AuditLogsPage {
   logs: AuditLogEntry[];
   total: number;
   has_more: boolean;
+  /** 全表出现过的动作类型（不受当前筛选影响），供前端下拉框使用。 */
+  actions?: string[];
+}
+
+export interface AuditLogsFilter {
+  /** 精确匹配动作；空值表示不过滤。 */
+  action?: string;
+  /** 在 ID / 用户 / 动作 / 详情中做不区分大小写的子串匹配；空值表示不过滤。 */
+  search?: string;
 }
 
 export interface Theme {

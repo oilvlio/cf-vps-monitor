@@ -1,4 +1,4 @@
-import type { AuditLogsPage, BoundedTableRowCounts, ClearAllRecordsResult, Client, ClientCapacityCounts, ClientIdentity, ClientReferenceCleanupResult, ClientTokenMeta, DeleteClientsResult, DeleteOldRowsOptions, ExpiryNotification, ExpiryNotificationUpdate, GPUHistoryRecord, GPUInfo, 
+import type { AuditLogsFilter, AuditLogsPage, BoundedTableRowCounts, ClearAllRecordsResult, Client, ClientCapacityCounts, ClientIdentity, ClientReferenceCleanupResult, ClientTokenMeta, DeleteClientsResult, DeleteOldRowsOptions, ExpiryNotification, ExpiryNotificationUpdate, GPUHistoryRecord, GPUInfo, 
   HistoryTableByteSizes, IpChangeNotification, LoadMetricWindowStats, LoadNotification, LoadNotificationInput, LoadNotificationMetric, LoginRateLimit, MonitorMetricsBucket, MonitorRecord, MonitorTrafficTotals, OfflineNotification, OfflineNotificationUpdate, OrphanClientDataCleanupResult, PingHistoryRecord, PingSnapshotInput, PingTask, PingTaskEstimateRow, PingTaskHistoryRequest, PingTaskStats, PublicClientRow, ScheduledClientRow, TableRowCounts, Theme, ThemeAsset, ThemeAssetUpsertInput, ThemeUpsertInput, User } from '../types.ts';
 import type { BackupData } from '../../utils/backup.ts';
 import type { BackupConfigurationSnapshot, HistoryStorageUsage, NotificationDeliveryClaim, NotificationDeliveryCleanupOptions, NotificationDeliveryCleanupResult } from '../types.ts';
@@ -485,10 +485,17 @@ export function deleteSupabaseLoadNotification(env: SupabaseApiEnv, id: number):
   return callSupabaseRpc<void>(env, 'cfm_delete_load_notification', { input_id: id });
 }
 
-export function listSupabaseAuditLogsPaged(env: SupabaseApiEnv, page: number, limit: number): Promise<AuditLogsPage> {
+export function listSupabaseAuditLogsPaged(
+  env: SupabaseApiEnv,
+  page: number,
+  limit: number,
+  filter: AuditLogsFilter = {},
+): Promise<AuditLogsPage> {
   return callSupabaseRpc<AuditLogsPage>(env, 'cfm_audit_logs_paged', {
     input_page: page,
     input_limit: limit,
+    input_action: filter.action || null,
+    input_search: filter.search || null,
   });
 }
 

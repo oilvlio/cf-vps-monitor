@@ -2400,12 +2400,16 @@ adminRoutes.post('/account/chpasswd', async (c) => {
 adminRoutes.get('/logs', async (c) => {
   const limit = parseInt(c.req.query('limit') || '100');
   const page = parseInt(c.req.query('page') || '1');
+  // 动作 / 关键词筛选在数据库里做：这样每一页都是「符合条件的记录」，而不是在已取回的一页里再过滤。
+  const action = (c.req.query('action') || '').trim().slice(0, 100);
+  const search = (c.req.query('search') || '').trim().slice(0, 200);
   const database = getDatabase(c.env);
-  const logs = await db.listAuditLogsPaged(database, page, Math.min(limit, 500));
+  const logs = await db.listAuditLogsPaged(database, page, Math.min(limit, 500), { action, search });
   return c.json({
     data: logs.logs,
     total: logs.total,
     has_more: logs.has_more,
+    actions: logs.actions ?? [],
     page: Math.max(1, page),
     limit: Math.min(limit, 500),
   });

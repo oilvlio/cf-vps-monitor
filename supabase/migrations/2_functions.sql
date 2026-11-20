@@ -1042,35 +1042,68 @@ begin
 end;
 $$;
 
-create or replace function public.cfm_audit_logs_paged(input_page integer default 1, input_limit integer default 50)
+-- 审计日志分页：筛选（动作 / 关键词）在这里做，而不是在前端对「当前页」过滤。
+-- 前端过滤只能看到已经取回的那一页，筛选后一页里只剩零星几条，翻页也毫无意义；
+-- 放到 SQL 里，每一页都是「符合条件的记录」填满。
+-- 总数沿用「多取一行判断是否还有下一页」的下界语义，不做 count(*)。
+-- 签名变了（新增两个参数）：旧的 (integer, integer) 版本必须先 drop，
+-- 否则 create or replace 只会新增重载，PostgREST 按命名参数调用时会因重载歧义报错。
+drop function if exists public.cfm_audit_logs_paged(integer, integer);
+
+create or replace function public.cfm_audit_logs_paged(
+  input_page integer default 1,
+  input_limit integer default 50,
+  input_action text default null,
+  input_search text default null
+)
 returns jsonb
 language plpgsql
 stable
 set search_path = public
 as $$
+declare
+  safe_page integer := greatest(coalesce(input_page, 1), 1);
+  safe_limit integer := least(greatest(coalesce(input_limit, 50), 1), 500);
+  action_filter text := nullif(trim(coalesce(input_action, '')), '');
+  search_text text := left(trim(coalesce(input_search, '')), 200);
+  search_pattern text := null;
 begin
+  -- 关键词当字面量匹配：转义 LIKE 通配符（反斜杠、% 和 _），否则搜 "_" 会命中所有行。
+  if search_text <> '' then
+    search_pattern := '%' || replace(replace(replace(search_text, '\', '\\'), '%', '\%'), '_', '\_') || '%';
+  end if;
+
   return (
-  with args as (
-    select
-      greatest(coalesce(input_page, 1), 1) as safe_page,
-      least(greatest(coalesce(input_limit, 50), 1), 500) as safe_limit
-  ),
-  rows as (
+  with rows as (
     select id, time, "user", action, detail, level
-    from audit_logs, args
-    order by time desc
-    limit (select safe_limit + 1 from args)
-    offset (select (safe_page - 1) * safe_limit from args)
+    from audit_logs
+    where (action_filter is null or action = action_filter)
+      and (
+        search_pattern is null
+        or id::text ilike search_pattern
+        or "user" ilike search_pattern
+        or action ilike search_pattern
+        or detail ilike search_pattern
+      )
+    order by time desc, id desc
+    limit safe_limit + 1
+    offset (safe_page - 1) * safe_limit
   ),
   limited as (
     select *
     from rows
-    limit (select safe_limit from args)
+    order by time desc, id desc
+    limit safe_limit
   )
   select jsonb_build_object(
-    'logs', coalesce((select jsonb_agg(to_jsonb(limited) order by time desc) from limited), '[]'::jsonb),
-    'total', (select (safe_page - 1) * safe_limit from args) + (select count(*) from limited) + case when (select count(*) from rows) > (select safe_limit from args) then 1 else 0 end,
-    'has_more', (select count(*) from rows) > (select safe_limit from args)
+    'logs', coalesce((select jsonb_agg(to_jsonb(limited) order by time desc, id desc) from limited), '[]'::jsonb),
+    'total', (safe_page - 1) * safe_limit + (select count(*) from limited) + case when (select count(*) from rows) > safe_limit then 1 else 0 end,
+    'has_more', (select count(*) from rows) > safe_limit,
+    -- 动作下拉框的候选项：必须来自全表，而不是当前页，否则筛选后下拉框只剩被选中的那一项。
+    'actions', coalesce((
+      select jsonb_agg(a.action order by a.action)
+      from (select distinct action from audit_logs where action <> '') a
+    ), '[]'::jsonb)
   )
   );
 end;
@@ -4074,8 +4107,8 @@ revoke all on function public.cfm_set_expiry_notifications(jsonb) from public, a
 grant execute on function public.cfm_set_expiry_notifications(jsonb) to service_role;
 revoke all on function public.cfm_mark_expiry_notification_sent(text, text, text) from public, anon, authenticated;
 grant execute on function public.cfm_mark_expiry_notification_sent(text, text, text) to service_role;
-revoke all on function public.cfm_audit_logs_paged(integer, integer) from public, anon, authenticated;
-grant execute on function public.cfm_audit_logs_paged(integer, integer) to service_role;
+revoke all on function public.cfm_audit_logs_paged(integer, integer, text, text) from public, anon, authenticated;
+grant execute on function public.cfm_audit_logs_paged(integer, integer, text, text) to service_role;
 revoke all on function public.cfm_themes() from public, anon, authenticated;
 grant execute on function public.cfm_themes() to service_role;
 revoke all on function public.cfm_theme(text) from public, anon, authenticated;

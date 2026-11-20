@@ -707,16 +707,18 @@ async function runOfflineCheck(context: ScheduledRunContext, now: Date): Promise
     if (event.type === 'offline' && (live?.streak ?? 0) < streakThreshold) continue;
 
     if (event.type === 'offline') {
+      // 通知文案和审计日志共用同一个分钟数，保证两处看到的离线时长一致。
+      const offlineMinutes = Math.floor(event.offlineMs / 60000);
       const sent = await sendNotification(context, buildOfflineNotification({
         nodeName: client.name || client.uuid,
-        offlineMinutes: Math.floor(event.offlineMs / 60000),
+        offlineMinutes,
         lastSeen: event.lastSeenLabel,
         createdAt: event.createdAt,
         eventTime: now,
       }), { key: `offline:${item.client}`, eventId: `offline:${lastTime || client.created_at || 'never'}` }, now,
       token => db.markOfflineNotificationSent(context.database, item.client, now.toISOString(), token));
       if (!sent) continue;
-      await db.insertAuditLog(context.database, 'system', 'offline_notify', `${sent ? '已发送' : '已记录'}离线告警: ${client.name || client.uuid}${event.neverReported ? ' (从未上报)' : ''}`);
+      await db.insertAuditLog(context.database, 'system', 'offline_notify', `${sent ? '已发送' : '已记录'}离线告警: ${client.name || client.uuid}，离线 ${offlineMinutes} 分钟${event.neverReported ? ' (从未上报)' : ''}`);
       continue;
     }
 

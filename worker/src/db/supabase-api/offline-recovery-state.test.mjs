@@ -12,8 +12,8 @@ for (const source of [migration, generated]) {
   assert.match(source, /last_notified\s*=\s*case\s+when\s+excluded\.enable\s*=\s*0\s+then\s+null/i);
   assert.match(source, /set\s+last_notified\s*=\s*nullif\(input_time,\s*''\)::timestamptz/i);
   // 迁移应保持 create or replace 的幂等重放，不靠 drop 重建既有函数。
-  // （唯一例外：返回类型变化时必须先 drop，例如 cfm_mark_client_token_used。）
-  assert.doesNotMatch(source, /drop function if exists public\.(?!cfm_mark_client_token_used\b)/i);
+  // （例外：返回类型变化或新增参数签名时必须先 drop，避免旧重载造成调用歧义。）
+  assert.doesNotMatch(source, /drop function if exists public\.(?!cfm_mark_client_token_used\b|cfm_audit_logs_paged\b)/i);
   assert.match(source, /revoke all on function public\.cfm_mark_offline_notification_sent\(text, text, text\) from public, anon, authenticated;/i);
   assert.match(source, /grant execute on function public\.cfm_mark_offline_notification_sent\(text, text, text\) to service_role/i);
 }

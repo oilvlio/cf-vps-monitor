@@ -769,8 +769,9 @@ export async function listAuditLogsPaged(
   database: QueryDatabase,
   page: number = 1,
   limit: number = 50,
+  filter: t.AuditLogsFilter = {},
 ): Promise<t.AuditLogsPage> {
-  return sba.listSupabaseAuditLogsPaged(database.env, page, limit);
+  return sba.listSupabaseAuditLogsPaged(database.env, page, limit, filter);
 }
 
 export async function restoreBackupData(database: QueryDatabase, backup: BackupData): Promise<void> {

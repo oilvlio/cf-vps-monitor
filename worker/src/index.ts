@@ -925,12 +925,15 @@ async function runScheduledStep(
   component: StoredHealthComponent,
   action: string,
   label: string,
-  step: () => Promise<void>,
+  step: () => Promise<unknown>,
 ): Promise<void> {
   try {
-    await step();
+    const result = await step();
     if (context.budget && !context.budget.canStart(4)) return;
-    await bestEffortRecordHealthEvent(context.database, component, 'ok', `${label} completed`, {
+    const detail = result && typeof result === 'object' && 'lag_seconds' in result
+      ? `${label} completed; watermark lag ${String(result.lag_seconds)} seconds`
+      : `${label} completed`;
+    await bestEffortRecordHealthEvent(context.database, component, 'ok', detail, {
       successThrottleMs: 60 * 60 * 1000,
     });
   } catch (error) {
@@ -955,7 +958,7 @@ async function runScheduled(env: Bindings): Promise<void> {
     const context = createScheduledRunContext(env);
     const steps = [
       ['cron_ping_rollup', 'cron_ping_rollup_error', 'Ping 历史分桶', async () => {
-        await db.buildPingRollup(context.database, new Date(now.getTime() - 2 * 60 * 1000).toISOString(), 48);
+        return db.buildPingRollup(context.database, new Date(now.getTime() - 2 * 60 * 1000).toISOString(), 48);
       }],
       ['cron_cleanup', 'cron_cleanup_error', '记录清理', () => runRecordCleanup(context, now)],
       ['cron_load', 'cron_load_error', '负载告警检查', () => runLoadCheck(context, now)],

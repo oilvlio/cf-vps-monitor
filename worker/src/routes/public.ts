@@ -1739,8 +1739,7 @@ publicRoutes.get('/records/ping/batch', async (c) => {
   return publicHistoryResult(c, prepared, records);
 });
 
-// 整个时间窗口的 Ping 统计（任务卡片）：服务端对原始样本一次算出均值/最小/最大/p50/p75/
-// 丢包/抖动（标准差），与图上画的点（分桶、截断）无关，所以各时间档下数字一致。
+// 整个时间窗口的 Ping 统计（任务卡片）：短窗口扫描原始样本；长窗口合并 rollup 的可合并统计量。
 publicRoutes.get('/records/ping/stats', async (c) => {
   const uuid = c.req.query('uuid');
   const start = c.req.query('start');
@@ -1749,8 +1748,6 @@ publicRoutes.get('/records/ping/stats', async (c) => {
   if (!uuid || !start || !end || taskIds.length === 0) {
     return c.json({ error: '缺少参数' }, 400);
   }
-  // Statistics intentionally keep scanning raw samples (not rollups), but
-  // allow the same 30-day chart window as the Ping history endpoint.
   const rangeError = validatePublicTimeRange(start, end, MAX_PUBLIC_PING_RANGE_MS);
   if (rangeError) return c.json({ error: rangeError }, 400);
 
@@ -1759,7 +1756,11 @@ publicRoutes.get('/records/ping/stats', async (c) => {
   if (prepared.response) return prepared.response;
   if (!prepared.visible) return publicHistoryResult(c, prepared, {});
 
-  const stats = await db.getPingStatsForTasksRange(database, uuid, taskIds, start, end);
+  const rangeMs = Date.parse(end) - Date.parse(start);
+  const plan = resolvePingHistoryPlan(rangeMs, historyBucketSec(rangeMs) ?? 0);
+  const stats = plan.source === 'rollup'
+    ? await db.getPingStatsFromRollupRange(database, uuid, taskIds, start, end)
+    : await db.getPingStatsForTasksRange(database, uuid, taskIds, start, end);
   return publicHistoryResult(c, prepared, stats);
 });
 

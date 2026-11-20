@@ -910,7 +910,7 @@ async function runMaintenanceCleanup(database: db.QueryDatabase, username: strin
     audit_logs: new Date(now.getTime() - auditHours * 60 * 60 * 1000).toISOString(),
   };
   const rolledUp = await db.buildHistoryRollup(database, new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString());
-  const pingRolledUp = await db.buildPingRollup(database, new Date(now.getTime() - 2 * 60 * 1000).toISOString(), 48);
+  const pingRolledUp = await db.buildPingRollup(database, new Date(now.getTime() - 2 * 60 * 1000).toISOString(), 96);
   const expiredBacklogBefore = await db.getExpiredRowCounts(database, before);
   const maxExpiredBacklog = Math.max(
     expiredBacklogBefore.records,
@@ -924,7 +924,7 @@ async function runMaintenanceCleanup(database: db.QueryDatabase, username: strin
   };
   const { has_more: recordsMore, ...recordDeleted } = await db.deleteOldRecords(database, before.records, cleanupOptions);
   const { has_more: pingMore, ...pingDeleted } = await db.deleteOldPingRecords(database, before.ping_records, cleanupOptions);
-  const { has_more: pingRollupMore, ...pingRollupDeleted } = await db.deleteOldPingRollup(database, before.ping_records);
+  const { has_more: pingRollupMore, ...pingRollupDeleted } = await db.deleteOldPingRollup(database, before.ping_records, cleanupOptions);
   const { has_more: auditMore, ...auditDeleted } = await db.deleteOldAuditLogs(database, before.audit_logs, cleanupOptions);
   const hasMore = recordsMore || pingMore || pingRollupMore || auditMore;
   const deleted = { ...recordDeleted, ...pingDeleted, ...pingRollupDeleted, ...auditDeleted };

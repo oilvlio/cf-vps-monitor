@@ -29,5 +29,8 @@ for (const [rangeMs, points] of [[DAY, 240], [3 * DAY, 720], [7 * DAY, 720]]) {
   assert.ok(points <= 1000, '桶数不超过单次返回上限');
 }
 assert.equal(JSON.stringify(resolvePingHistoryPlan(7 * DAY, 420)), JSON.stringify({ source: 'raw', stepSec: 420 }));
+assert.equal(JSON.stringify(resolvePingHistoryPlan(7 * DAY + 3, 840)), JSON.stringify({ source: 'raw', stepSec: 840 }));
+assert.equal(JSON.stringify(resolvePingHistoryPlan(7 * DAY + 10 * 60 * 1000, 840)), JSON.stringify({ source: 'raw', stepSec: 840 }));
+assert.equal(JSON.stringify(resolvePingHistoryPlan(7 * DAY + 10 * 60 * 1000 + 1, 840)), JSON.stringify({ source: 'rollup', stepSec: 1800 }));
 assert.equal(JSON.stringify(resolvePingHistoryPlan(8 * DAY, 3600)), JSON.stringify({ source: 'rollup', stepSec: 3600 }));
 assert.equal(JSON.stringify(resolvePingHistoryPlan(30 * DAY, 10080)), JSON.stringify({ source: 'rollup', stepSec: 10800 }));

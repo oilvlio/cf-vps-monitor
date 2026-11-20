@@ -8,7 +8,9 @@
 // 所以边界留 10 分钟余量，免得 12h 档被偶然判成分桶请求。
 export const RAW_HISTORY_MAX_RANGE_MS = 12 * 60 * 60 * 1000 + 10 * 60 * 1000;
 export const PING_ROLLUP_BUCKET_SEC = 30 * 60;
-export const PING_ROLLUP_RANGE_MS = 7 * 24 * 60 * 60 * 1000;
+// Match the UI's independently sampled start/end timestamps: the nominal 7d
+// window may be a few milliseconds wider, but should remain on raw 14-minute buckets.
+export const PING_ROLLUP_RANGE_MS = 7 * 24 * 60 * 60 * 1000 + 10 * 60 * 1000;
 
 export type PingHistoryPlan = { source: 'raw' | 'rollup'; stepSec: number };
 

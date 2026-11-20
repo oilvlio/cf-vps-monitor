@@ -18,8 +18,9 @@ create table if not exists public.ping_rollup (
   primary key (client, task_id, bucket_start)
 );
 
-create index if not exists idx_ping_rollup_client_bucket
-  on public.ping_rollup(client, bucket_start);
+drop index if exists public.idx_ping_rollup_client_bucket;
+create index if not exists idx_ping_rollup_bucket_start
+  on public.ping_rollup(bucket_start);
 
 alter table public.ping_rollup enable row level security;
 alter table public.ping_rollup force row level security;
@@ -53,6 +54,7 @@ declare
   before_ts timestamptz := coalesce(nullif(input_before, '')::timestamptz, now() - interval '2 minutes');
   from_ts timestamptz;
   work_from timestamptz;
+  work_to timestamptz;
   to_ts timestamptz;
   max_buckets integer := least(greatest(coalesce(input_max_buckets, 48), 1), 96);
   buckets integer := 0;
@@ -71,41 +73,66 @@ begin
 
   to_ts := least(date_bin(interval '30 minutes', before_ts, timestamptz '1970-01-01'),
     from_ts + max_buckets * interval '30 minutes');
+  work_to := greatest(from_ts, to_ts);
   if to_ts > from_ts then
     -- Revisit the last three buckets on every pass so delayed Agent retries
     -- replace their previous aggregate instead of being lost behind the cursor.
-    work_from := greatest(from_ts - interval '90 minutes',
-      coalesce((select date_bin(interval '30 minutes', min(time), timestamptz '1970-01-01') from ping_snapshots), from_ts));
+    work_from := from_ts - interval '2 hours';
+  else
+    -- Even when the half-hour cursor has not advanced, do not let a retrograde
+    -- input timestamp move it backward; the next advancing pass revisits this tail.
+    work_from := from_ts;
+  end if;
+
+  if work_to > work_from then
+    -- Parse only bounded integer values. Invalid JSON values are skipped rather
+    -- than poisoning the transaction and stalling the watermark indefinitely.
+    with expanded as (
+      select s.client, s.time, t.id task_id, item.value raw_value
+      from ping_snapshots s
+      cross join lateral jsonb_each_text(case when jsonb_typeof(s.values_json)='object' then s.values_json else '{}'::jsonb end) item
+      join ping_tasks t
+        on t.id = case when item.key ~ '^[0-9]{1,9}$' then item.key::integer end
+      join clients c on c.uuid = s.client
+      where s.time >= work_from and s.time < work_to
+    ), typed as (
+      select client, time,
+        task_id,
+        case when raw_value ~ '^-?[0-9]{1,10}$'
+          then case when raw_value::numeric between -2147483648 and 2147483647 then raw_value::integer end
+        end value
+      from expanded
+    )
     insert into ping_rollup(client, task_id, bucket_start, sample_count, success_count, loss_count,
       sum_latency, sumsq_latency, min_latency, max_latency, p50_latency, p75_latency)
-    select s.client, item.key::integer,
-      date_bin(interval '30 minutes', s.time, timestamptz '1970-01-01'),
+    select client, task_id,
+      date_bin(interval '30 minutes', time, timestamptz '1970-01-01'),
       count(*)::integer,
-      count(*) filter (where item.value::integer >= 0)::integer,
-      count(*) filter (where item.value::integer < 0)::integer,
-      coalesce(sum(item.value::integer) filter (where item.value::integer >= 0), 0),
-      coalesce(sum((item.value::integer)::double precision * (item.value::integer)::double precision)
-        filter (where item.value::integer >= 0), 0),
-      min(item.value::integer) filter (where item.value::integer >= 0),
-      max(item.value::integer) filter (where item.value::integer >= 0),
-      percentile_cont(0.5) within group (order by item.value::integer) filter (where item.value::integer >= 0),
-      percentile_cont(0.75) within group (order by item.value::integer) filter (where item.value::integer >= 0)
-    from ping_snapshots s
-    cross join lateral jsonb_each_text(case when jsonb_typeof(s.values_json)='object' then s.values_json else '{}'::jsonb end) item
-    where s.time >= work_from and s.time < to_ts
-      and item.key ~ '^[0-9]{1,9}$'
-    group by s.client, item.key::integer, date_bin(interval '30 minutes', s.time, timestamptz '1970-01-01')
+      count(*) filter (where value >= 0)::integer,
+      count(*) filter (where value < 0)::integer,
+      coalesce(sum(value) filter (where value >= 0), 0),
+      coalesce(sum(value::double precision * value::double precision) filter (where value >= 0), 0),
+      min(value) filter (where value >= 0),
+      max(value) filter (where value >= 0),
+      percentile_cont(0.5) within group (order by value) filter (where value >= 0),
+      percentile_cont(0.75) within group (order by value) filter (where value >= 0)
+    from typed
+    where task_id is not null and value is not null
+    group by client, task_id, date_bin(interval '30 minutes', time, timestamptz '1970-01-01')
     on conflict (client, task_id, bucket_start) do update set
       sample_count=excluded.sample_count, success_count=excluded.success_count, loss_count=excluded.loss_count,
       sum_latency=excluded.sum_latency, sumsq_latency=excluded.sumsq_latency,
       min_latency=excluded.min_latency, max_latency=excluded.max_latency,
       p50_latency=excluded.p50_latency, p75_latency=excluded.p75_latency;
 
-    buckets := floor(extract(epoch from (to_ts - work_from)) / 1800)::integer;
-    update ping_rollup_state set watermark = to_ts where id = 1;
+    buckets := floor(extract(epoch from (work_to - from_ts)) / 1800)::integer;
+    if work_to > from_ts then
+      update ping_rollup_state set watermark = work_to where id = 1;
+    end if;
   end if;
-  return jsonb_build_object('watermark', to_ts, 'buckets', buckets,
-    'has_more', to_ts < date_bin(interval '30 minutes', before_ts, timestamptz '1970-01-01'));
+  return jsonb_build_object('watermark', work_to, 'buckets', buckets,
+    'lag_seconds', greatest(0, floor(extract(epoch from (now() - work_to))))::integer,
+    'has_more', work_to < date_bin(interval '30 minutes', before_ts, timestamptz '1970-01-01'));
 end $$;
 
 -- Never delete source snapshots beyond the completed rollup watermark. If the
@@ -119,7 +146,7 @@ declare
   ping_records_deleted integer;
   ping_snapshots_deleted integer;
 begin
-  select least(requested_before, coalesce((select watermark from ping_rollup_state where id=1), '-infinity'::timestamptz))
+  select least(requested_before, coalesce((select watermark from ping_rollup_state where id=1), '-infinity'::timestamptz) - interval '2 hours')
     into safe_before;
   if safe_before = '-infinity'::timestamptz then
     return jsonb_build_object('ping_records',0,'ping_snapshots',0,'has_more',
@@ -145,13 +172,29 @@ create or replace function public.cfm_ping_rollup_range(
 ) returns jsonb language sql stable set search_path = public as $$
   with args as (
     select input_client client, input_start::timestamptz start_at, input_end::timestamptz end_at,
-      greatest(coalesce(input_step_sec,1800),1800) step_sec,
+      least(86400::numeric, ceil(greatest(coalesce(input_step_sec,1800),1800)::numeric / 1800) * 1800)::integer step_sec,
       least(greatest(coalesce(input_limit,1500),1),2000) lim,
       coalesce((select watermark from ping_rollup_state where id=1), '-infinity'::timestamptz) watermark
   ), ids as (
     select distinct value::integer task_id
     from jsonb_array_elements_text(case when jsonb_typeof(input_task_ids)='array' then input_task_ids else '[]'::jsonb end) x(value)
     where value ~ '^[0-9]{1,9}$' and value::integer > 0
+  ), raw_expanded as (
+    select s.client, s.time, item.key task_key, item.value raw_value
+    from ping_snapshots s
+    cross join lateral jsonb_each_text(case when jsonb_typeof(s.values_json)='object' then s.values_json else '{}'::jsonb end) item
+    cross join args a
+  where s.client=a.client and s.time >= a.start_at and s.time <= a.end_at
+    and (s.time >= a.watermark - interval '2 hours'
+      or date_bin(interval '30 minutes', s.time, timestamptz '1970-01-01') < a.start_at
+      or date_bin(interval '30 minutes', s.time, timestamptz '1970-01-01') + interval '30 minutes' > a.end_at)
+  ), raw_typed as (
+    select client, time,
+      case when task_key ~ '^[0-9]{1,9}$' then task_key::integer end task_id,
+      case when raw_value ~ '^-?[0-9]{1,10}$'
+        then case when raw_value::numeric between -2147483648 and 2147483647 then raw_value::integer end
+      end value
+    from raw_expanded
   ), base as (
     select r.task_id, r.bucket_start time, r.sample_count, r.success_count, r.loss_count,
       r.sum_latency, r.sumsq_latency, r.min_latency, r.max_latency, r.p50_latency, r.p75_latency
@@ -159,31 +202,41 @@ create or replace function public.cfm_ping_rollup_range(
     join ids i on i.task_id=r.task_id
     where r.client=a.client and r.bucket_start >= a.start_at
       and r.bucket_start + interval '30 minutes' <= a.end_at
-      and r.bucket_start + interval '30 minutes' <= a.watermark
+      and r.bucket_start + interval '30 minutes' <= a.watermark - interval '2 hours'
     union all
     select i.task_id, s.time, 1,
-      case when v.value::integer >= 0 then 1 else 0 end,
-      case when v.value::integer < 0 then 1 else 0 end,
-      case when v.value::integer >= 0 then v.value::integer else 0 end,
-      case when v.value::integer >= 0 then v.value::integer::double precision * v.value::integer::double precision else 0 end,
-      case when v.value::integer >= 0 then v.value::integer end,
-      case when v.value::integer >= 0 then v.value::integer end,
-      case when v.value::integer >= 0 then v.value::integer::double precision end,
-      case when v.value::integer >= 0 then v.value::integer::double precision end
-    from ping_snapshots s cross join args a
-    join ids i on true
-    cross join lateral (select s.values_json ->> i.task_id::text value) v
-    where s.client=a.client and v.value is not null
-      and s.time >= greatest(a.start_at, a.watermark) and s.time <= a.end_at
+      case when s.value >= 0 then 1 else 0 end,
+      case when s.value < 0 then 1 else 0 end,
+      case when s.value >= 0 then s.value else 0 end,
+      case when s.value >= 0 then s.value::double precision * s.value::double precision else 0 end,
+      case when s.value >= 0 then s.value end,
+      case when s.value >= 0 then s.value end,
+      case when s.value >= 0 then s.value::double precision end,
+      case when s.value >= 0 then s.value::double precision end
+    from raw_typed s
+    join ids i on i.task_id=s.task_id
+    cross join args a
+    where s.value is not null and (
+      date_bin(interval '30 minutes', s.time, timestamptz '1970-01-01') < a.start_at
+      or date_bin(interval '30 minutes', s.time, timestamptz '1970-01-01') + interval '30 minutes' > a.end_at
+      or s.time >= a.watermark - interval '2 hours'
+    )
   ), grouped as (
     select task_id,
       date_bin(make_interval(secs => a.step_sec), time, timestamptz '1970-01-01') bucket_start,
       sum(sample_count)::integer sample_count, sum(success_count)::integer success_count,
       sum(loss_count)::integer loss_count, sum(sum_latency) sum_latency, sum(sumsq_latency) sumsq_latency,
       min(min_latency) min_latency, max(max_latency) max_latency,
-      case when sum(success_count)>0 then sum(p50_latency * success_count) filter (where p50_latency is not null) / nullif(sum(success_count) filter (where p50_latency is not null),0) end p50_latency,
-      case when sum(success_count)>0 then sum(p75_latency * success_count) filter (where p75_latency is not null) / nullif(sum(success_count) filter (where p75_latency is not null),0) end p75_latency
-    from base cross join args a group by task_id, date_bin(make_interval(secs => a.step_sec), time, timestamptz '1970-01-01')
+      case when a.step_sec = 1800
+        then percentile_cont(0.5) within group (order by p50_latency) filter (where p50_latency is not null)
+        else sum(p50_latency * success_count) filter (where p50_latency is not null) / nullif(sum(success_count) filter (where p50_latency is not null),0)
+      end p50_latency,
+      case when a.step_sec = 1800
+        then percentile_cont(0.75) within group (order by p75_latency) filter (where p75_latency is not null)
+        else sum(p75_latency * success_count) filter (where p75_latency is not null) / nullif(sum(success_count) filter (where p75_latency is not null),0)
+      end p75_latency
+    from base cross join args a group by task_id, a.step_sec,
+      date_bin(make_interval(secs => a.step_sec), time, timestamptz '1970-01-01')
   ), ranked as (
     select *, row_number() over(partition by task_id order by bucket_start desc) rn from grouped
   )
@@ -196,6 +249,81 @@ create or replace function public.cfm_ping_rollup_range(
     ) order by bucket_start) rows
     from ranked cross join args where rn <= args.lim group by task_id
   ) result;
+$$;
+
+-- Whole-window statistics for long ranges. Counts, average, extrema and sample
+-- standard deviation (jitter) merge exactly from sufficient statistics;
+-- p50/p75 are weighted rollup approximations.
+create or replace function public.cfm_ping_stats_from_rollup(
+  input_client text, input_task_ids jsonb, input_start text, input_end text
+) returns jsonb language sql stable set search_path = public as $$
+  with args as (
+    select input_client client, input_start::timestamptz start_at, input_end::timestamptz end_at,
+      coalesce((select watermark from ping_rollup_state where id=1), '-infinity'::timestamptz) watermark
+  ), ids as (
+    select distinct value::integer task_id
+    from jsonb_array_elements_text(case when jsonb_typeof(input_task_ids)='array' then input_task_ids else '[]'::jsonb end) x(value)
+    where value ~ '^[0-9]{1,9}$' and value::integer > 0 limit 50
+  ), raw_expanded as (
+    select s.client, s.time, item.key task_key, item.value raw_value
+    from ping_snapshots s
+    cross join lateral jsonb_each_text(case when jsonb_typeof(s.values_json)='object' then s.values_json else '{}'::jsonb end) item
+    cross join args a
+    where s.client=a.client and s.time >= a.start_at and s.time <= a.end_at
+      and (s.time >= a.watermark - interval '2 hours'
+        or date_bin(interval '30 minutes', s.time, timestamptz '1970-01-01') < a.start_at
+        or date_bin(interval '30 minutes', s.time, timestamptz '1970-01-01') + interval '30 minutes' > a.end_at)
+  ), raw_typed as (
+    select client, time,
+      case when task_key ~ '^[0-9]{1,9}$' then task_key::integer end task_id,
+      case when raw_value ~ '^-?[0-9]{1,10}$'
+        then case when raw_value::numeric between -2147483648 and 2147483647 then raw_value::integer end
+      end value
+    from raw_expanded
+  ), base as (
+    select r.task_id, r.bucket_start time, r.sample_count, r.success_count, r.loss_count,
+      r.sum_latency, r.sumsq_latency, r.min_latency, r.max_latency, r.p50_latency, r.p75_latency
+    from ping_rollup r cross join args a
+    join ids i on i.task_id=r.task_id
+    where r.client=a.client and r.bucket_start >= a.start_at
+      and r.bucket_start + interval '30 minutes' <= a.end_at
+      and r.bucket_start + interval '30 minutes' <= a.watermark - interval '2 hours'
+    union all
+    select i.task_id, s.time, 1,
+      case when s.value >= 0 then 1 else 0 end,
+      case when s.value < 0 then 1 else 0 end,
+      case when s.value >= 0 then s.value else 0 end,
+      case when s.value >= 0 then s.value::double precision * s.value::double precision else 0 end,
+      case when s.value >= 0 then s.value end,
+      case when s.value >= 0 then s.value end,
+      case when s.value >= 0 then s.value::double precision end,
+      case when s.value >= 0 then s.value::double precision end
+    from raw_typed s
+    join ids i on i.task_id=s.task_id
+    cross join args a
+    where s.value is not null and (
+      date_bin(interval '30 minutes', s.time, timestamptz '1970-01-01') < a.start_at
+      or date_bin(interval '30 minutes', s.time, timestamptz '1970-01-01') + interval '30 minutes' > a.end_at
+      or s.time >= a.watermark - interval '2 hours'
+    )
+  ), agg as (
+    select task_id, sum(sample_count)::integer samples, sum(success_count)::integer success_count,
+      sum(loss_count)::integer loss_count, sum(sum_latency) sum_latency, sum(sumsq_latency) sumsq_latency,
+      min(min_latency) min_latency, max(max_latency) max_latency,
+      sum(p50_latency * success_count) filter (where p50_latency is not null)
+        / nullif(sum(success_count) filter (where p50_latency is not null),0) p50_latency,
+      sum(p75_latency * success_count) filter (where p75_latency is not null)
+        / nullif(sum(success_count) filter (where p75_latency is not null),0) p75_latency
+    from base group by task_id
+  )
+  select coalesce(jsonb_object_agg(task_id::text,jsonb_build_object(
+    'samples',samples,'success_count',success_count,'loss_count',loss_count,
+    'loss_rate',case when samples>0 then loss_count::double precision*100/samples end,
+    'avg_latency',sum_latency/nullif(success_count,0),'min_latency',min_latency,'max_latency',max_latency,
+    'p50_latency',p50_latency,'p75_latency',p75_latency,
+    'jitter',case when success_count>1 then sqrt(greatest(0,
+      (sumsq_latency - sum_latency*sum_latency/success_count)/(success_count-1))) end
+  )), '{}'::jsonb) from agg;
 $$;
 
 create or replace function public.cfm_delete_old_ping_rollup(input_before text, input_max_batches integer default 200)
@@ -320,6 +448,8 @@ revoke all on function public.cfm_build_ping_rollup(text,integer) from public, a
 grant execute on function public.cfm_build_ping_rollup(text,integer) to cf_monitor_app, service_role;
 revoke all on function public.cfm_ping_rollup_range(text,jsonb,text,text,integer,integer) from public, anon, authenticated;
 grant execute on function public.cfm_ping_rollup_range(text,jsonb,text,text,integer,integer) to cf_monitor_app, service_role;
+revoke all on function public.cfm_ping_stats_from_rollup(text,jsonb,text,text) from public, anon, authenticated;
+grant execute on function public.cfm_ping_stats_from_rollup(text,jsonb,text,text) to cf_monitor_app, service_role;
 revoke all on function public.cfm_delete_old_ping_rollup(text,integer) from public, anon, authenticated;
 grant execute on function public.cfm_delete_old_ping_rollup(text,integer) to cf_monitor_app, service_role;
 

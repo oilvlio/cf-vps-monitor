@@ -850,8 +850,8 @@ export function buildSupabasePingRollup(env: SupabaseApiEnv, before: string, max
   return callSupabaseRpc(env, 'cfm_build_ping_rollup', { input_before: before, input_max_buckets: maxBuckets });
 }
 
-export function deleteSupabaseOldPingRollup(env: SupabaseApiEnv, before: string): Promise<{ ping_rollup: number; has_more: boolean }> {
-  return callSupabaseRpc(env, 'cfm_delete_old_ping_rollup', { input_before: before });
+export function deleteSupabaseOldPingRollup(env: SupabaseApiEnv, before: string, maxBatches = 200): Promise<{ ping_rollup: number; has_more: boolean }> {
+  return callSupabaseRpc(env, 'cfm_delete_old_ping_rollup', { input_before: before, input_max_batches: maxBatches });
 }
 
 export function getSupabasePingStatsForTasksRange(
@@ -862,6 +862,21 @@ export function getSupabasePingStatsForTasksRange(
   end: string | undefined,
 ): Promise<Record<string, PingTaskStats>> {
   return callSupabaseRpc<Record<string, PingTaskStats>>(env, 'cfm_ping_stats_for_tasks_range', {
+    input_client: client,
+    input_task_ids: taskIds,
+    input_start: start,
+    input_end: end,
+  });
+}
+
+export function getSupabasePingStatsFromRollupRange(
+  env: SupabaseApiEnv,
+  client: string,
+  taskIds: number[],
+  start: string,
+  end: string,
+): Promise<Record<string, PingTaskStats>> {
+  return callSupabaseRpc<Record<string, PingTaskStats>>(env, 'cfm_ping_stats_from_rollup', {
     input_client: client,
     input_task_ids: taskIds,
     input_start: start,

@@ -138,6 +138,7 @@ export async function loadMonitorMetrics(
       ? Promise.resolve({})
       : pingPlan.source === 'rollup'
         ? db.getPingRollupRange(database, uuid, taskIds, start, end, pingPlan.stepSec, PING_BUCKET_LIMIT)
+          .catch(() => ({} as Record<string, never[]>))
         : db.getPingRecordsForTasksRangeBucketed(database, uuid, taskIds, start, end, pingPlan.stepSec, PING_BUCKET_LIMIT)
         .catch(() => ({} as Record<string, never[]>)),
   ]);

@@ -578,8 +578,12 @@ export async function buildPingRollup(database: QueryDatabase, before: string, m
   return sba.buildSupabasePingRollup(database.env, before, maxBuckets);
 }
 
-export async function deleteOldPingRollup(database: QueryDatabase, before: string): Promise<{ ping_rollup: number; has_more: boolean }> {
-  return sba.deleteSupabaseOldPingRollup(database.env, before);
+export async function deleteOldPingRollup(
+  database: QueryDatabase,
+  before: string,
+  options: t.DeleteOldRowsOptions = {},
+): Promise<{ ping_rollup: number; has_more: boolean }> {
+  return sba.deleteSupabaseOldPingRollup(database.env, before, options.maxBatches);
 }
 
 export async function getPingStatsForTasksRange(
@@ -590,6 +594,16 @@ export async function getPingStatsForTasksRange(
   end: string | undefined,
 ): Promise<Record<string, t.PingTaskStats>> {
   return sba.getSupabasePingStatsForTasksRange(database.env, client, taskIds, start, end);
+}
+
+export async function getPingStatsFromRollupRange(
+  database: QueryDatabase,
+  client: string,
+  taskIds: number[],
+  start: string,
+  end: string,
+): Promise<Record<string, t.PingTaskStats>> {
+  return sba.getSupabasePingStatsFromRollupRange(database.env, client, taskIds, start, end);
 }
 
 export async function getHomePingAssignments(database: QueryDatabase): Promise<Record<string, number>> {

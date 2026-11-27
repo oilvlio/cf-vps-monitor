@@ -116,6 +116,8 @@ const MONITOR_FRAME_MIN_INTERVAL_MS = 2_000;
 const MONITOR_WS_HEARTBEAT_MS = 15_000;
 const MONITOR_WS_HEARTBEAT_KEY = 'monitor:ws_heartbeat_at';
 const MONITOR_FRAME_PENDING_KEY = 'monitor:frame_pending_at';
+// 最后一个观看连接离开的时间。只在离开时写入，Agent 上报/DO 唤醒不会延长宽限期。
+const VIEWER_LAST_LEFT_AT_KEY = 'viewer:last_left_at';
 // monitor 静态投影与当日/累计流量的自刷新间隔。DO 不再依赖 Worker 推送，
 // 有订阅者时按这个节奏自行从元数据/数据库派生。
 const MONITOR_DATA_REFRESH_MS = 60_000;
@@ -146,7 +148,7 @@ interface LiveSnapshot {
 interface AgentPolicySettings {
   activeIntervalSec: number;
   idleIntervalSec: number;
-  viewerTtlSec: number;
+  viewerHoldSec: number;
   pingIntervalSec: number;
 }
 
@@ -389,7 +391,8 @@ interface SessionAttachment {
   hidden: boolean;
   includeHidden?: boolean;
   viewerIp?: string;
-  viewerExpiresAt?: number;
+  /** 防止同一连接的 close/error 回调重复开启宽限期，也用于休眠恢复。 */
+  viewerDisconnected?: boolean;
   sourceIp?: string;
   region?: string;
   lastReport?: MonitorReportPayload;
@@ -409,6 +412,7 @@ interface MonitorFrameContent {
   gzipBuffer?: ArrayBuffer;
 }
 
+/** 保留旧导出名；TTL 现在仅表示最后离开后的快速上报保持时长，不限制 WS 寿命。 */
 export function normalizeViewerTtlMs(value: unknown): number {
   const ttlMs = Number(value);
   if (!Number.isFinite(ttlMs) || ttlMs <= 0) return VIEWER_DEFAULT_TTL_MS;
@@ -420,7 +424,7 @@ export class LiveDataDO {
   private env: LiveDataEnv;
   private sessions: Map<string, WebSocket>; // WebSocket 连接
   private sessionRoles: Map<string, SessionRole>;
-  private viewerExpiresAt: Map<string, number>;
+  private lastViewerLeftAt = 0;
   private clients: Map<string, ClientState>; // 在线客户端状态
   private lastKnownClients = new Map<string, ClientState>();
   private clientReportWrites = new Map<string, Promise<unknown>>();
@@ -443,7 +447,7 @@ export class LiveDataDO {
   private policySettings: AgentPolicySettings = {
     activeIntervalSec: 3,
     idleIntervalSec: 120,
-    viewerTtlSec: 120,
+    viewerHoldSec: 120,
     pingIntervalSec: 120,
   };
   private policySettingsCheckedAt: number = 0;
@@ -495,13 +499,16 @@ export class LiveDataDO {
     this.env = env;
     this.sessions = new Map();
     this.sessionRoles = new Map();
-    this.viewerExpiresAt = new Map();
     this.clients = new Map();
     this.hydrateSessionsFromAcceptedWebSockets();
     this.httpClientsReady = this.hydrateHttpClients();
   }
 
   private async hydrateHttpClients(): Promise<void> {
+    const lastLeftAt = await this.state.storage.get<number>(VIEWER_LAST_LEFT_AT_KEY);
+    if (typeof lastLeftAt === 'number' && Number.isFinite(lastLeftAt) && lastLeftAt > 0) {
+      this.lastViewerLeftAt = lastLeftAt;
+    }
     await this.readAdminClientsSnapshot();
     const pendingAt = await this.state.storage.get<number>(MONITOR_FRAME_PENDING_KEY);
     if (typeof pendingAt === 'number' && Number.isFinite(pendingAt) && pendingAt > 0) {
@@ -559,7 +566,7 @@ export class LiveDataDO {
     for (let offset = 0; offset < obsolete.length; offset += 128) {
       await this.state.storage.delete(obsolete.slice(offset, offset + 128));
     }
-    if (stored.size || this.viewerExpiresAt.size) await this.scheduleExpiryAlarm(now);
+    if (stored.size || this.lastViewerLeftAt || this.hasOpenMonitorSubscriber()) await this.scheduleExpiryAlarm(now);
   }
 
   private async persistClientSnapshot(client: ClientState): Promise<void> {
@@ -613,9 +620,7 @@ export class LiveDataDO {
       viewerIp: typeof value.viewerIp === 'string' && value.viewerIp.trim() !== ''
         ? value.viewerIp
         : undefined,
-      viewerExpiresAt: typeof value.viewerExpiresAt === 'number' && Number.isFinite(value.viewerExpiresAt)
-        ? value.viewerExpiresAt
-        : undefined,
+      viewerDisconnected: value.viewerDisconnected === true,
       sourceIp: typeof value.sourceIp === 'string' && value.sourceIp.trim() !== ''
         ? value.sourceIp.trim()
         : undefined,
@@ -636,19 +641,11 @@ export class LiveDataDO {
   }
 
   private registerSession(ws: WebSocket, attachment: SessionAttachment): void {
-    // Older Monitor attachments have no deadline. Assign and persist one once,
-    // so a hibernation wake cannot keep extending their remaining lifetime.
-    if (attachment.role === 'monitor' && !attachment.viewerExpiresAt) {
-      attachment = { ...attachment, viewerExpiresAt: Date.now() + normalizeViewerTtlMs(this.policySettings.viewerTtlSec * 1000) };
-    }
+    // getSessionAttachment 不再读取旧 viewerExpiresAt，恢复旧连接时一并清除它。
+    // 正在观看的连接没有寿命上限；保持时长只从最后离开时开始计算。
     ws.serializeAttachment(attachment);
     this.sessions.set(attachment.clientId, ws);
     this.sessionRoles.set(attachment.clientId, attachment.role);
-    if ((attachment.role === 'viewer' || attachment.role === 'monitor') && attachment.viewerExpiresAt) {
-      this.viewerExpiresAt.set(attachment.clientId, attachment.viewerExpiresAt);
-    } else {
-      this.viewerExpiresAt.delete(attachment.clientId);
-    }
   }
 
   private hydrateSessionsFromAcceptedWebSockets(): void {
@@ -656,10 +653,7 @@ export class LiveDataDO {
     for (const ws of this.state.getWebSockets()) {
       const attachment = this.getSessionAttachment(ws);
       if (!attachment) continue;
-      if ((attachment.role === 'viewer' || attachment.role === 'monitor') && attachment.viewerExpiresAt && attachment.viewerExpiresAt <= now) {
-        this.expireViewer(attachment.clientId, ws, now);
-        continue;
-      }
+      if (attachment.viewerDisconnected) continue;
       this.registerSession(ws, attachment);
       if (
         attachment.role === 'agent' &&
@@ -804,10 +798,7 @@ export class LiveDataDO {
   private async sendViewerMessage(ws: WebSocket, payload: () => string): Promise<void> {
     const attachment = this.getSessionAttachment(ws);
     if (!attachment || ws.readyState !== WebSocket.READY_STATE_OPEN) return;
-    if (attachment.viewerExpiresAt && attachment.viewerExpiresAt <= Date.now()) {
-      this.expireViewer(attachment.clientId, ws, Date.now());
-      return;
-    }
+    if (this.sessions.get(attachment.clientId) !== ws) return;
     if (attachment.includeHidden && !await this.validatePrivateViewer(ws, attachment)) return;
     try { ws.send(payload()); } catch { /* Close/error handlers clean up. */ }
   }
@@ -820,17 +811,13 @@ export class LiveDataDO {
         throw new Error('Admin session expired');
       }
     } catch {
-      this.cleanupSession(ws, attachment);
+      await this.cleanupSession(ws, attachment);
       try { ws.close(1008, 'Admin session expired'); } catch { /* Best effort. */ }
       await this.scheduleExpiryAlarm(Date.now());
-      if (this.activeViewerCount(Date.now()) === 0) await this.broadcastAgentPolicy(Date.now(), false);
+      if (this.activeViewerCount() === 0) await this.broadcastAgentPolicy(Date.now(), false);
       return false;
     }
     if (ws.readyState !== WebSocket.READY_STATE_OPEN || this.sessions.get(attachment.clientId) !== ws) return false;
-    if (attachment.viewerExpiresAt && attachment.viewerExpiresAt <= Date.now()) {
-      this.expireViewer(attachment.clientId, ws, Date.now());
-      return false;
-    }
     return true;
   }
 
@@ -970,10 +957,7 @@ export class LiveDataDO {
   ): Promise<void> {
     if (ws.readyState !== WebSocket.READY_STATE_OPEN) return;
     const attachment = this.getSessionAttachment(ws);
-    if (attachment?.viewerExpiresAt && attachment.viewerExpiresAt <= Date.now()) {
-      this.expireViewer(attachment.clientId, ws, Date.now());
-      return;
-    }
+    if (!attachment || this.sessions.get(attachment.clientId) !== ws) return;
     if (attachment?.admin) {
       if (!await this.validatePrivateViewer(ws, attachment)) return;
     }
@@ -1332,7 +1316,7 @@ export class LiveDataDO {
       this.policySettings = {
         activeIntervalSec: this.boundIntegerSetting(settings.live_poll_active_interval_sec, 3, 2, 300),
         idleIntervalSec: this.boundIntegerSetting(settings.live_poll_idle_interval_sec, 120, 60, 3600),
-        viewerTtlSec: this.boundIntegerSetting(settings.live_poll_active_max_duration_sec, 120, 60, 3600),
+        viewerHoldSec: this.boundIntegerSetting(settings.live_poll_active_max_duration_sec, 120, 60, 3600),
         pingIntervalSec: this.boundIntegerSetting(settings.ping_record_persist_interval_sec, 120, 60, 3600),
       };
       this.policySettingsCheckedAt = now;
@@ -1393,7 +1377,7 @@ export class LiveDataDO {
     this.pingTasksPending = null;
   }
 
-  private activeViewerCount(now: number): number {
+  private activeViewerCount(): number {
     let count = 0;
     for (const [id, role] of this.sessionRoles) {
       // Monitor-compatible pages also represent active human viewers. They use
@@ -1401,13 +1385,17 @@ export class LiveDataDO {
       // sampling just like the built-in viewer sockets.
       if (role !== 'viewer' && role !== 'monitor') continue;
       const session = this.sessions.get(id);
-      const expiresAt = this.viewerExpiresAt.get(id);
-      if (expiresAt && expiresAt <= now) continue;
       if (session?.readyState === WebSocket.READY_STATE_OPEN) {
         count += 1;
       }
     }
     return count;
+  }
+
+  private viewerHoldDeadline(): number {
+    return this.lastViewerLeftAt > 0
+      ? this.lastViewerLeftAt + normalizeViewerTtlMs(this.policySettings.viewerHoldSec * 1000)
+      : 0;
   }
 
   // 流量统计：Agent 只上报各网卡的累计读数（traffic_sample），不保存任何本地状态。
@@ -1562,9 +1550,13 @@ export class LiveDataDO {
     clientId?: string,
   ): Promise<AgentPolicyMessage> {
     const settings = await this.getAgentPolicySettings(now, forceRefreshSettings);
-    const viewerCount = this.activeViewerCount(now);
-    const mode: AgentPolicyMode = viewerCount > 0 ? 'active' : 'idle';
     const pingTasks = this.pingTasksForClient(await this.getPingTasks(now), clientId);
+    const version = await pingPolicyVersion(pingTasks, settings.pingIntervalSec);
+    const trafficResetDay = await this.trafficResetDayFor(clientId);
+    // 外部查询可能跨过宽限期终点；下发时按当前观看状态决定模式。
+    now = Date.now();
+    const viewerCount = this.activeViewerCount();
+    const mode: AgentPolicyMode = viewerCount > 0 || now < this.viewerHoldDeadline() ? 'active' : 'idle';
     return {
       type: 'policy',
       mode,
@@ -1572,13 +1564,14 @@ export class LiveDataDO {
       report_interval_sec: mode === 'active' ? settings.activeIntervalSec : settings.idleIntervalSec,
       report_now: mode === 'active' && reportNow,
       viewer_count: viewerCount,
-      viewer_ttl_sec: settings.viewerTtlSec,
+      // 兼容 Agent 的原有字段名；语义为无人观看后的保持时长。
+      viewer_ttl_sec: settings.viewerHoldSec,
       ping_interval_sec: settings.pingIntervalSec,
-      ping_policy_version: await pingPolicyVersion(pingTasks, settings.pingIntervalSec),
+      ping_policy_version: version,
       ping_tasks: pingTasks,
       policy_ttl_sec: mode === 'active' ? 30 : 120,
       idle_policy_ttl_sec: 120,
-      traffic_reset_day: await this.trafficResetDayFor(clientId),
+      traffic_reset_day: trafficResetDay,
       timestamp: now,
     };
   }
@@ -1635,15 +1628,14 @@ export class LiveDataDO {
 
   private async scheduleExpiryAlarm(now: number) {
     try {
+      if (this.lastViewerLeftAt && this.activeViewerCount() === 0) {
+        await this.getAgentPolicySettings(now);
+      }
+      now = Date.now();
       const expiries: number[] = [];
       for (const client of this.clients.values()) {
         const expiresAt = client.expiresAt;
         if (typeof expiresAt === 'number' && Number.isFinite(expiresAt) && expiresAt > now) {
-          expiries.push(expiresAt);
-        }
-      }
-      for (const expiresAt of this.viewerExpiresAt.values()) {
-        if (Number.isFinite(expiresAt) && expiresAt > now) {
           expiries.push(expiresAt);
         }
       }
@@ -1663,6 +1655,8 @@ export class LiveDataDO {
         this.monitorFramePendingAt = 0;
         await this.state.storage.delete(MONITOR_FRAME_PENDING_KEY);
       }
+      const holdUntil = this.viewerHoldDeadline();
+      if (this.activeViewerCount() === 0 && holdUntil > now) expiries.push(holdUntil);
       const nextExpiry = expiries.sort((a, b) => a - b)[0];
 
       if (nextExpiry === undefined) {
@@ -1741,13 +1735,10 @@ export class LiveDataDO {
   private countViewers(viewerIp?: string): { total: number; sameIp: number } {
     let total = 0;
     let sameIp = 0;
-    const now = Date.now();
     for (const ws of this.sessions.values()) {
       const attachment = this.getSessionAttachment(ws);
       if (!attachment || (attachment.role !== 'viewer' && attachment.role !== 'monitor')) continue;
       if (ws.readyState !== WebSocket.READY_STATE_OPEN) continue;
-      const expiresAt = this.viewerExpiresAt.get(attachment.clientId) ?? attachment.viewerExpiresAt;
-      if (expiresAt && expiresAt <= now) continue;
       total += 1;
       if (viewerIp && attachment.viewerIp === viewerIp) {
         sameIp += 1;
@@ -1781,57 +1772,31 @@ export class LiveDataDO {
     return null;
   }
 
-  private expireViewer(id: string, session: WebSocket, now: number): void {
-    const monitor = this.getSessionAttachment(session)?.role === 'monitor';
-    this.viewerExpiresAt.delete(id);
-    if (this.sessions.get(id) === session) {
-      this.sessions.delete(id);
-      this.sessionRoles.delete(id);
-    }
-
-    if (session.readyState !== WebSocket.READY_STATE_OPEN) return;
-    try {
-      if (!monitor) session.send(JSON.stringify({
-        type: 'viewer_expired',
-        timestamp: now,
-      }));
-    } catch {
-      // Best effort only; closing below is the enforcement.
-    }
-    try {
-      session.close(1000, 'Viewer live window expired');
-    } catch {
-      // Best effort only.
-    }
-  }
-
-  private removeExpiredViewers(now: number): void {
-    for (const [id, expiresAt] of this.viewerExpiresAt) {
-      if (expiresAt > now) continue;
-      const session = this.sessions.get(id);
-      if (!session) {
-        this.viewerExpiresAt.delete(id);
-        this.sessionRoles.delete(id);
-        continue;
-      }
-      this.expireViewer(id, session, now);
-    }
-  }
-
-  private cleanupSession(ws: WebSocket, attachment: SessionAttachment): void {
-    if (this.sessions.get(attachment.clientId) !== ws) return;
+  private async cleanupSession(ws: WebSocket, attachment: SessionAttachment): Promise<boolean> {
+    const current = this.sessions.get(attachment.clientId);
+    if (current && current !== ws) return false;
+    if (attachment.role === 'agent' && current !== ws) return false;
+    if (this.getSessionAttachment(ws)?.viewerDisconnected) return false;
 
     const existing = this.clients.get(attachment.clientId);
     this.sessions.delete(attachment.clientId);
     this.sessionRoles.delete(attachment.clientId);
-    this.viewerExpiresAt.delete(attachment.clientId);
-
-    if (attachment.role !== 'agent') return;
+    if (attachment.role !== 'agent') {
+      // close 事件唤醒 DO 时，关闭的 socket 可能已不在 getWebSockets() 中。
+      // attachment 标记让这种最后离开仍被记录，重复 close/error 则不会重置时间。
+      ws.serializeAttachment({ ...attachment, viewerDisconnected: true });
+      if (this.activeViewerCount() === 0) {
+        this.lastViewerLeftAt = Date.now();
+        await this.state.storage.put(VIEWER_LAST_LEFT_AT_KEY, this.lastViewerLeftAt);
+      }
+      return true;
+    }
 
     this.clients.delete(attachment.clientId);
     if (existing) {
       this.broadcastOfflineClient(existing, Date.now());
     }
+    return true;
   }
 
   private async upsertAgentAuthSnapshot(request: Request): Promise<Response> {
@@ -2400,7 +2365,10 @@ export class LiveDataDO {
     }
 
     if (request.method === 'POST' && url.pathname === '/policy-refresh') {
-      await this.broadcastAgentPolicy(Date.now(), false, true);
+      // 即使当前没有 WS Agent，也要加载设置并更新宽限期 alarm，供 HTTP Agent 使用。
+      await this.getAgentPolicySettings(Date.now(), true);
+      await this.broadcastAgentPolicy(Date.now(), false);
+      await this.scheduleExpiryAlarm(Date.now());
       return Response.json({ success: true });
     }
 
@@ -2458,7 +2426,7 @@ export class LiveDataDO {
       const sourceIp = url.searchParams.get('source_ip') || undefined;
       const region = url.searchParams.get('region') || undefined;
       const now = Date.now();
-      const activeViewersBefore = this.activeViewerCount(now);
+      const activeViewersBefore = this.activeViewerCount();
 
       if (role === 'viewer' || role === 'monitor') {
         const limitResponse = this.enforceViewerConnectionLimit(viewerIp);
@@ -2487,21 +2455,12 @@ export class LiveDataDO {
         }
       }
 
-      // viewer 与 Monitor 的窗口由 DO 自己的设置决定（已缓存）。
-      // 显式传参仍然优先，便于覆盖与向后兼容；缺省时才回落到设置项，
-      // 从而消除"对外宣称 X 秒、实际执行写死的 120 秒"这一不一致。
-      const viewerTtlParam = url.searchParams.get('viewer_ttl_ms');
-      const viewerTtlMs = viewerTtlParam !== null
-        ? normalizeViewerTtlMs(viewerTtlParam)
-        : normalizeViewerTtlMs(this.policySettings.viewerTtlSec * 1000);
-
       const attachment: SessionAttachment = {
         role,
         clientId,
         clientName,
         hidden,
         ...((role === 'viewer' || role === 'monitor') && viewerIp ? { viewerIp } : {}),
-        ...((role === 'viewer' || role === 'monitor') ? { viewerExpiresAt: now + viewerTtlMs } : {}),
         ...(role === 'viewer' && (url.searchParams.get('include_hidden') === '1' || url.searchParams.get('include_hidden') === 'true') ? { includeHidden: true } : {}),
         ...(role === 'agent' && sourceIp && isPublicIpAddress(sourceIp) ? { sourceIp } : {}),
         ...(role === 'agent' && region && this.isUsefulRegion(region) ? { region } : {}),
@@ -2648,33 +2607,25 @@ export class LiveDataDO {
     await this.httpClientsReady;
     const attachment = this.getSessionAttachment(ws);
     if (attachment) {
-      this.cleanupSession(ws, attachment);
-      if (attachment.role === 'monitor') await this.scheduleExpiryAlarm(Date.now());
+      if (!await this.cleanupSession(ws, attachment)) return;
       if ((attachment.role === 'viewer' || attachment.role === 'monitor')
-        && this.activeViewerCount(Date.now()) === 0) {
+        && this.activeViewerCount() === 0) {
+        await this.scheduleExpiryAlarm(Date.now());
         await this.broadcastAgentPolicy(Date.now(), false);
+      } else if (attachment.role === 'monitor') {
+        await this.scheduleExpiryAlarm(Date.now());
       }
     }
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
-    await this.httpClientsReady;
-    const attachment = this.getSessionAttachment(ws);
-    if (attachment) {
-      this.cleanupSession(ws, attachment);
-      if (attachment.role === 'monitor') await this.scheduleExpiryAlarm(Date.now());
-      if ((attachment.role === 'viewer' || attachment.role === 'monitor')
-        && this.activeViewerCount(Date.now()) === 0) {
-        await this.broadcastAgentPolicy(Date.now(), false);
-      }
-    }
+    await this.webSocketClose(ws);
   }
 
   async alarm(): Promise<void> {
     await this.httpClientsReady;
     const now = Date.now();
     await this.removeExpiredClients(now);
-    this.removeExpiredViewers(now);
     const hasMonitorSubscribers = [...this.sessionRoles].some(([id, role]) =>
       role === 'monitor' && this.sessions.get(id)?.readyState === WebSocket.READY_STATE_OPEN,
     );

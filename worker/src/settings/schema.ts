@@ -177,6 +177,7 @@ export const SETTING_SCHEMA = {
   },
   live_poll_active_max_duration_sec: {
     type: 'integer',
+    // 最后一个观看连接离开后的快速上报宽限期，不是观看 WS 的最大连接时长。
     defaultValue: '120',
     public: true,
     min: 60,

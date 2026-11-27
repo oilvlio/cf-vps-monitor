@@ -48,13 +48,18 @@ test('AUD-31: a cold object loads the configured interval before its first persi
   assert.equal(due.writes.length, 1);
 });
 
-test('AUD-31: the first cold viewer receives the configured lifetime', async () => {
+test('AUD-31: a cold viewer loads the configured departure holding time without a connection deadline', async () => {
   const f = fixture({ settings: { live_poll_active_max_duration_sec: '600' } });
-  const before = Date.now();
   const response = await f.object.fetch(new Request('https://do/?role=viewer&id=fixture-viewer', { headers: { Upgrade: 'websocket' } }));
   assert.equal(response.status, 101);
   const attachment = f.state.sockets[0].deserializeAttachment();
-  assert.ok(attachment.viewerExpiresAt - before >= 599000, 'configured ten-minute viewer lifetime was replaced with the two-minute default');
+  assert.equal(attachment.viewerExpiresAt, undefined);
+  assert.equal((await f.object.buildAgentPolicy(Date.now(), false)).viewer_ttl_sec, 600);
+  const ws = f.state.sockets[0];
+  ws.close();
+  const before = Date.now();
+  await f.object.webSocketClose(ws);
+  assert.ok(f.object.viewerHoldDeadline() - before >= 599000, 'configured ten-minute holding time was replaced with the two-minute default');
   await f.state.drain();
 });
 

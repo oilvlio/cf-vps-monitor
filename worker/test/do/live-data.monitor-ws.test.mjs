@@ -95,6 +95,9 @@ function fixture({ storageEntries = [], listClients, overrides, dbOverrides = {}
   }
   const storage = createDurableState(storageEntries, []);
   storage.state.getWebSockets = () => storage.sockets.filter(socket => socket.readyState === 1);
+  let alarmAt = null;
+  storage.state.storage.setAlarm = async value => { alarmAt = Number(value); };
+  storage.state.storage.deleteAlarm = async () => { alarmAt = null; };
   const loader = createWorkerLoader({
     db: {
       getSettingsByKeys: async () => ({ record_enabled: 'false' }),
@@ -132,6 +135,7 @@ function fixture({ storageEntries = [], listClients, overrides, dbOverrides = {}
   return {
     object, storage, monitorNumericId,
     get now() { return now; },
+    get alarmAt() { return alarmAt; },
     advance(ms) { now += ms; },
     cold: () => new LiveDataDO(storage.state, env),
   };
@@ -213,7 +217,7 @@ test('real signed native private viewer revalidates the database session despite
   assert.equal(ws.readyState, 3);
 });
 
-for (const transition of ['expire', 'close']) {
+for (const transition of ['error', 'close']) {
   test(`native private viewer does not send after ${transition} while database validation is pending`, async () => {
     let release;
     let enter;
@@ -228,11 +232,11 @@ for (const transition of ['expire', 'close']) {
     } });
     await ready(f.object);
     const socket = createSocket({ role: 'viewer', clientId: 'waiting', includeHidden: true,
-      adminToken: 'fixture-token', viewerExpiresAt: f.now + 60_000 });
+      adminToken: 'fixture-token' });
     f.object.registerSession(socket.ws, socket.ws.deserializeAttachment());
     f.object.sendSnapshot(socket.ws);
     await entered;
-    if (transition === 'expire') f.advance(60_000);
+    if (transition === 'error') await f.object.webSocketError(socket.ws);
     else await f.object.webSocketClose(socket.ws);
     release();
     await f.storage.drain();
@@ -319,93 +323,287 @@ for (const reason of ['revoked', 'expired-token', 'database-failure', 'missing-t
   });
 }
 
-test('Monitor lifetime follows configured viewer TTL; heartbeats do not renew it and expiry restores idle sampling', async () => {
-  const f = fixture({ dbOverrides: { getSettingsByKeys: async () => ({ record_enabled: 'false', live_poll_active_max_duration_sec: '60' }) } });
-  await ready(f.object);
-  const agent = monitoredSocket({ id: 'ttl-agent', role: 'agent' });
-  f.object.registerSession(agent.ws, agent.ws.deserializeAttachment());
-  assert.equal((await upgrade(f.object, 'monitor', 'ttl-monitor')).status, 101);
-  await f.storage.drain();
-  const socket = f.storage.sockets[0];
-  const deadline = socket.deserializeAttachment().viewerExpiresAt;
-  assert.equal(deadline, f.now + 60_000);
-  for (let i = 0; i < 3; i++) {
-    f.advance(15_000);
+for (const role of ['monitor', 'viewer']) {
+  test(`${role} stays open and keeps Agent reports fast beyond 120s and across hibernation`, async () => {
+    const f = fixture({ dbOverrides: { getSettingsByKeys: async () => ({
+      record_enabled: 'false', live_poll_active_interval_sec: '2', live_poll_active_max_duration_sec: '120',
+    }) } });
+    await ready(f.object);
+    const agent = monitoredSocket({ id: 'persistent-agent', role: 'agent' });
+    f.object.registerSession(agent.ws, agent.ws.deserializeAttachment());
+    f.storage.state.acceptWebSocket(agent.ws);
+    assert.equal((await upgrade(f.object, role, 'continuous-viewer')).status, 101);
+    await f.storage.drain();
+    const socket = f.storage.sockets[1];
+    let frames = 0;
+    socket.send = value => {
+      assert.notEqual(frameJson(value).type, 'viewer_expired');
+      frames++;
+    };
+    let object = f.object;
+    for (let round = 0; round < 12; round++) {
+      f.advance(30_000);
+      object = f.cold();
+      await ready(object);
+      await object.alarm();
+      if (role === 'viewer') object.sendSnapshot(socket);
+      await f.storage.drain();
+      assert.equal(socket.readyState, 1, `connection closed after ${(round + 1) * 30}s`);
+      const policy = await object.buildAgentPolicy(f.now, false);
+      assert.equal(policy.mode, 'active');
+      assert.equal(policy.viewer_count, 1);
+      assert.equal(policy.report_interval_sec, 2);
+    }
+    assert.ok(frames >= 12, 'the same socket must continue receiving data');
+    assert.ok(agent.frames.every(value => JSON.parse(value).mode === 'active'));
+    assert.equal(await f.storage.state.storage.get('viewer:last_left_at'), undefined);
+  });
+
+  test(`${role} last departure keeps active for exactly 120s then pushes idle to Agents`, async () => {
+    const f = fixture();
+    await ready(f.object);
+    const agent = monitoredSocket({ id: 'grace-agent', role: 'agent' });
+    f.object.registerSession(agent.ws, agent.ws.deserializeAttachment());
+    await upgrade(f.object, role, 'last-viewer');
+    await f.storage.drain();
+    // The holding period starts at departure, even after a long viewing session.
+    f.advance(300_000);
+    const socket = f.storage.sockets[0];
+    socket.close();
+    const leftAt = f.now;
+    await f.object.webSocketClose(socket);
+    assert.equal(f.alarmAt, leftAt + 120_000);
+    assert.equal(JSON.parse(agent.frames.at(-1)).mode, 'active');
+    assert.equal(JSON.parse(agent.frames.at(-1)).viewer_count, 0);
+    f.advance(119_999);
+    assert.equal((await f.object.buildAgentPolicy(f.now, false)).mode, 'active');
+    f.advance(1);
     await f.object.alarm();
     await f.storage.drain();
-    assert.equal(socket.readyState, 1);
-    assert.equal(socket.deserializeAttachment().viewerExpiresAt, deadline);
-  }
-  const frames = socket.deserializeAttachment();
-  f.advance(15_000);
-  assert.equal(f.object.activeViewerCount(f.now), 0, 'expired Monitor cannot retain active sampling before the alarm');
+    const idle = JSON.parse(agent.frames.at(-1));
+    assert.equal(idle.mode, 'idle');
+    assert.equal(idle.report_interval_sec, 120);
+    assert.equal(f.alarmAt, null);
+  });
+}
+
+test('refreshing and returning within the grace period never sends idle or closes a live viewer', async () => {
+  const f = fixture();
+  await ready(f.object);
+  const agent = monitoredSocket({ id: 'refresh-agent', role: 'agent' });
+  f.object.registerSession(agent.ws, agent.ws.deserializeAttachment());
+  await upgrade(f.object, 'monitor', 'before-refresh');
+  await f.storage.drain();
+  f.storage.sockets[0].close();
+  const firstLeftAt = f.now;
+  await f.object.webSocketClose(f.storage.sockets[0]);
+  f.advance(119_000);
+  assert.equal((await upgrade(f.object, 'viewer', 'after-refresh')).status, 101);
+  await f.storage.drain();
+  f.advance(300_000);
   await f.object.alarm();
   await f.storage.drain();
-  assert.equal(socket.readyState, 3);
-  assert.equal(f.object.sessions.has(frames.clientId), false);
-  assert.equal(f.object.viewerExpiresAt.size, 0);
-  assert.equal(await f.storage.state.storage.get('monitor:ws_heartbeat_at'), undefined);
+  assert.equal(f.storage.sockets[1].readyState, 1);
+  assert.equal((await f.object.buildAgentPolicy(f.now, false)).mode, 'active');
+  assert.ok(agent.frames.every(value => JSON.parse(value).mode === 'active'));
+  f.storage.sockets[1].close();
+  const secondLeftAt = f.now;
+  await f.object.webSocketClose(f.storage.sockets[1]);
+  assert.ok(secondLeftAt > firstLeftAt + 120_000);
+  assert.equal(f.alarmAt, secondLeftAt + 120_000, 'a new grace period starts after the returning visitor leaves');
+});
+
+test('only the last of mixed Monitor/native viewers starts grace, and duplicate close/error cannot extend it', async () => {
+  const f = fixture();
+  await ready(f.object);
+  await upgrade(f.object, 'monitor', 'monitor');
+  await upgrade(f.object, 'viewer', 'native');
+  await f.storage.drain();
+  f.storage.sockets[0].close();
+  await f.object.webSocketClose(f.storage.sockets[0]);
+  assert.equal(await f.storage.state.storage.get('viewer:last_left_at'), undefined);
+  f.advance(180_000);
+  assert.equal((await f.object.buildAgentPolicy(f.now, false)).mode, 'active');
+  f.storage.sockets[1].close();
+  const leftAt = f.now;
+  await f.object.webSocketError(f.storage.sockets[1]);
+  assert.equal(f.alarmAt, leftAt + 120_000);
+  f.advance(30_000);
+  await f.object.webSocketClose(f.storage.sockets[1]);
+  await f.object.webSocketError(f.storage.sockets[0]);
+  assert.equal(await f.storage.state.storage.get('viewer:last_left_at'), leftAt);
+  assert.equal(f.alarmAt, leftAt + 120_000);
+});
+
+test('grace survives hibernation and HTTP policy reads without extending its original deadline', async () => {
+  const f = fixture({ dbOverrides: { getSettingsByKeys: async () => ({ live_poll_active_max_duration_sec: '600' }) } });
+  await ready(f.object);
+  await upgrade(f.object, 'monitor', 'hibernating-viewer');
+  await f.storage.drain();
+  f.storage.sockets[0].close();
+  const leftAt = f.now;
+  await f.object.webSocketClose(f.storage.sockets[0]);
+  assert.equal(f.alarmAt, leftAt + 600_000);
+  for (let i = 0; i < 3; i++) {
+    f.advance(190_000);
+    const restored = f.cold();
+    const policy = await (await restored.fetch(new Request('https://do/policy'))).json();
+    assert.equal(policy.mode, 'active');
+    assert.equal(policy.viewer_count, 0);
+    assert.equal(policy.viewer_ttl_sec, 600);
+    assert.equal(f.alarmAt, leftAt + 600_000);
+  }
+  f.advance(30_000);
+  const restored = f.cold();
+  await restored.alarm();
+  const policy = await (await restored.fetch(new Request('https://do/policy'))).json();
+  assert.equal(policy.mode, 'idle');
+  assert.equal(f.alarmAt, null);
+});
+
+test('a final close that wakes a cold DO starts grace even if the runtime no longer lists that socket', async () => {
+  const f = fixture();
+  await ready(f.object);
+  await upgrade(f.object, 'monitor', 'cold-close');
+  await f.storage.drain();
+  f.storage.sockets[0].close();
+  const restored = f.cold();
+  await restored.webSocketClose(f.storage.sockets[0]);
+  assert.equal((await restored.buildAgentPolicy(f.now, false)).mode, 'active');
+  assert.equal(f.alarmAt, f.now + 120_000);
+  f.advance(120_000);
+  const again = f.cold();
+  await again.webSocketError(f.storage.sockets[0]);
+  assert.equal((await again.buildAgentPolicy(f.now, false)).mode, 'idle');
+});
+
+for (const withAgent of [false, true]) {
+  test(`changing the holding time reschedules grace from the original departure (${withAgent ? 'WS' : 'HTTP'} Agents)`, async () => {
+    let holdSec = 120;
+    const f = fixture({ dbOverrides: { getSettingsByKeys: async () => ({ live_poll_active_max_duration_sec: String(holdSec) }) } });
+    await ready(f.object);
+    const agent = monitoredSocket({ id: 'settings-agent', role: 'agent' });
+    if (withAgent) f.object.registerSession(agent.ws, agent.ws.deserializeAttachment());
+    await upgrade(f.object, 'viewer', 'settings-viewer');
+    await f.storage.drain();
+    f.storage.sockets[0].close();
+    const leftAt = f.now;
+    await f.object.webSocketClose(f.storage.sockets[0]);
+    f.advance(30_000);
+    holdSec = 600;
+    const refresh = () => f.object.fetch(new Request('https://do/policy-refresh', { method: 'POST' }));
+    assert.equal((await refresh()).status, 200);
+    assert.equal(f.alarmAt, leftAt + 600_000);
+    f.advance(90_000);
+    assert.equal((await f.object.buildAgentPolicy(f.now, false)).mode, 'active');
+    holdSec = 180;
+    await refresh();
+    assert.equal(f.alarmAt, leftAt + 180_000);
+    f.advance(60_000);
+    await f.object.alarm();
+    assert.equal((await f.object.buildAgentPolicy(f.now, false)).mode, 'idle');
+    if (withAgent) assert.equal(JSON.parse(agent.frames.at(-1)).mode, 'idle');
+    assert.equal(await f.storage.state.storage.get('viewer:last_left_at'), leftAt);
+    assert.equal(f.alarmAt, null);
+  });
+}
+
+test('shortening the holding time past its deadline immediately pushes idle', async () => {
+  let holdSec = 600;
+  const f = fixture({ dbOverrides: { getSettingsByKeys: async () => ({ live_poll_active_max_duration_sec: String(holdSec) }) } });
+  await ready(f.object);
+  const agent = monitoredSocket({ id: 'shorter-agent', role: 'agent' });
+  f.object.registerSession(agent.ws, agent.ws.deserializeAttachment());
+  await upgrade(f.object, 'viewer', 'shorter-viewer');
+  await f.storage.drain();
+  f.storage.sockets[0].close();
+  await f.object.webSocketClose(f.storage.sockets[0]);
+  f.advance(180_000);
+  holdSec = 120;
+  await f.object.fetch(new Request('https://do/policy-refresh', { method: 'POST' }));
   assert.equal(JSON.parse(agent.frames.at(-1)).mode, 'idle');
-  assert.equal((await upgrade(f.object, 'monitor', 'replacement')).status, 101);
-  await f.storage.drain();
+  assert.equal(f.alarmAt, null);
 });
 
-test('Monitor hibernation preserves absolute deadlines and closes expired sockets during restoration', async () => {
+test('policy preparation that crosses the grace deadline cannot send stale active mode', async () => {
   const f = fixture();
   await ready(f.object);
-  await upgrade(f.object, 'monitor', 'restore-ttl');
+  await upgrade(f.object, 'viewer', 'slow-policy-viewer');
   await f.storage.drain();
-  const socket = f.storage.sockets[0];
-  const deadline = socket.deserializeAttachment().viewerExpiresAt;
-  f.advance(30_000);
-  const restored = f.cold();
-  await restored.httpClientsReady;
-  assert.equal(restored.viewerExpiresAt.get('restore-ttl'), deadline);
-  assert.equal(socket.deserializeAttachment().viewerExpiresAt, deadline);
-  f.advance(90_000);
-  const expired = f.cold();
-  await expired.httpClientsReady;
-  assert.equal(socket.readyState, 3);
-  assert.equal(expired.activeViewerCount(f.now), 0);
-  assert.equal(expired.countViewers('1.1.1.1').total, 0);
-  await f.storage.drain();
+  f.storage.sockets[0].close();
+  await f.object.webSocketClose(f.storage.sockets[0]);
+  f.advance(119_000);
+  const pending = Promise.withResolvers();
+  const entered = Promise.withResolvers();
+  f.object.getPingTasks = async () => {
+    entered.resolve();
+    return pending.promise;
+  };
+  const policy = f.object.buildAgentPolicy(f.now, false);
+  await entered.promise;
+  f.advance(1_000);
+  pending.resolve([]);
+  assert.equal((await policy).mode, 'idle');
 });
 
-test('legacy Monitor attachments gain a persisted deadline once and cannot renew it by hibernating', async () => {
-  const f = fixture();
-  const socket = monitoredSocket({ id: 'legacy-monitor' });
-  f.storage.state.acceptWebSocket(socket.ws);
-  const restored = f.cold();
-  await restored.httpClientsReady;
-  const deadline = socket.ws.deserializeAttachment().viewerExpiresAt;
-  assert.equal(deadline, f.now + 120_000);
-  f.advance(30_000);
-  await f.cold().httpClientsReady;
-  assert.equal(socket.ws.deserializeAttachment().viewerExpiresAt, deadline);
-  f.advance(90_000);
-  await f.cold().httpClientsReady;
-  assert.equal(socket.ws.readyState, 3);
-  assert.equal(socket.frames.length, 0, 'Monitor protocol must not receive viewer_expired frames');
-  await f.storage.drain();
-});
-
-test('Monitor expiry releases the full per-IP quota and expired sends cannot emit another data frame', async () => {
+test('Agent reports during grace do not renew the holding deadline', async () => {
   const f = fixture();
   await ready(f.object);
-  for (let i = 0; i < 8; i++) await upgrade(f.object, 'monitor', `expires-${i}`);
+  const agent = monitoredSocket({ id: CLIENTS[0].uuid, role: 'agent' });
+  f.object.registerSession(agent.ws, agent.ws.deserializeAttachment());
+  await upgrade(f.object, 'viewer', 'reporting-viewer');
+  await f.storage.drain();
+  f.storage.sockets[0].close();
+  const leftAt = f.now;
+  await f.object.webSocketClose(f.storage.sockets[0]);
+  for (let round = 0; round < 4; round++) {
+    f.advance(30_000);
+    await f.object.webSocketMessage(agent.ws, JSON.stringify({ type: 'report', data: { cpu: round, timestamp: f.now } }));
+    await f.storage.drain();
+    const policies = agent.frames.map(value => JSON.parse(value)).filter(value => value.type === 'policy');
+    assert.equal(policies.at(-1).mode, round < 3 ? 'active' : 'idle');
+    assert.equal(await f.storage.state.storage.get('viewer:last_left_at'), leftAt);
+    assert.equal(f.object.viewerHoldDeadline(), leftAt + 120_000);
+  }
+});
+
+test('old viewer expiry attachments are removed during restoration without closing live connections', async () => {
+  const f = fixture();
+  for (const role of ['monitor', 'viewer']) {
+    const socket = monitoredSocket({ id: `legacy-${role}`, role });
+    socket.ws.serializeAttachment({ ...socket.ws.deserializeAttachment(), viewerExpiresAt: f.now - 1 });
+    f.storage.state.acceptWebSocket(socket.ws);
+  }
+  const restored = f.cold();
+  await ready(restored);
+  for (const socket of f.storage.sockets) {
+    assert.equal(socket.readyState, 1);
+    assert.equal(socket.deserializeAttachment().viewerExpiresAt, undefined);
+  }
+  assert.equal(restored.activeViewerCount(), 2);
+  assert.equal((await restored.buildAgentPolicy(f.now, false)).mode, 'active');
+});
+
+test('long-lived viewers retain their quota and closing them releases it during the grace period', async () => {
+  const f = fixture();
+  await ready(f.object);
+  for (let i = 0; i < 8; i++) await upgrade(f.object, 'monitor', `persistent-${i}`);
   await f.storage.drain();
   assert.equal((await upgrade(f.object, 'monitor', 'blocked')).status, 429);
   f.advance(120_000);
-  assert.equal(f.object.countViewers('1.1.1.1').sameIp, 0);
+  assert.equal(f.object.countViewers('1.1.1.1').sameIp, 8);
+  assert.equal((await upgrade(f.object, 'monitor', 'still-blocked')).status, 429);
   const first = f.storage.sockets[0];
   let sends = 0;
   first.send = () => { sends++; };
   await f.object.sendMonitorFrame(first);
-  assert.equal(sends, 0);
-  assert.equal(first.readyState, 3);
-  await f.object.alarm();
-  assert.ok(f.storage.sockets.every(socket => socket.readyState === 3));
-  assert.equal((await upgrade(f.object, 'monitor', 'new-window')).status, 101);
+  assert.equal(sends, 1);
+  first.close();
+  await f.object.webSocketClose(first);
+  const before = sends;
+  await f.object.sendMonitorFrame(first);
+  assert.equal(sends, before);
+  assert.equal((await upgrade(f.object, 'monitor', 'replacement')).status, 101);
   await f.storage.drain();
 });
 
@@ -938,7 +1136,7 @@ test('空闲期间定时推送快照，避免 Monitor WebSocket 被客户端判�
   assert.equal(await f.storage.state.storage.get('monitor:ws_heartbeat_at'), undefined);
 });
 
-test('Monitor 订阅者计入活跃观看人数，驱动 Agent 快速采样并在最后离开后恢复闲置采样', async () => {
+test('Monitor 订阅者计入活跃观看人数，最后离开后等待保持时长才恢复闲置采样', async () => {
   const f = fixture();
   const socket = monitoredSocket({ id: 'm-policy' });
 
@@ -952,6 +1150,8 @@ test('Monitor 订阅者计入活跃观看人数，驱动 Agent 快速采样并�
 
   await f.object.webSocketClose(socket.ws);
   assert.equal(f.object.activeViewerCount(f.now), 0);
+  assert.equal((await f.object.buildAgentPolicy(f.now, false)).mode, 'active');
+  f.advance(120_000);
   const idlePolicy = await f.object.buildAgentPolicy(f.now, false, false, 'node-1');
   assert.equal(idlePolicy.mode, 'idle');
   assert.equal(idlePolicy.sample_interval_sec, 120);
@@ -968,7 +1168,7 @@ test('Agent active 策略支持 2 秒采样和上报', async () => {
   assert.equal(policy.report_interval_sec, 2);
 });
 
-test('首个 Monitor WebSocket 建连时向 Agent 推送 active 策略，最后断开后推送 idle 策略', async () => {
+test('首个 Monitor 建连时向 Agent 推送 active，最后断开后的宽限期结束再推送 idle', async () => {
   const f = fixture({ storageEntries: [['admin-clients:snapshot', ADMIN_SNAPSHOT]] });
   await f.object.httpClientsReady;
   const agent = monitoredSocket({ id: 'agent-policy', role: 'agent' });
@@ -991,10 +1191,14 @@ test('首个 Monitor WebSocket 建连时向 Agent 推送 active 策略，最后�
   // The runtime has already marked the socket closed when the close callback runs.
   f.storage.sockets[0].readyState = 3;
   await f.object.webSocketClose(f.storage.sockets[0]);
+  assert.equal(JSON.parse(agent.frames.at(-1)).mode, 'active');
+  f.advance(120_000);
+  await f.object.alarm();
+  await f.storage.drain();
   assert.equal(
     JSON.parse(agent.frames.at(-1)).mode,
     'idle',
-    'closing the last Monitor viewer restores idle sampling',
+    'grace expiry after the last Monitor viewer leaves restores idle sampling',
   );
 });
 

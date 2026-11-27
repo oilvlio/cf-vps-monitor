@@ -31,7 +31,7 @@ const MONITOR_WS_RATE_LIMIT_MAX = 30;
 /**
  * 通行证有效期。刻意与 viewer 窗口解耦并保持很短——它只是"取证 → 建连"
  * 这一瞬间的一次性凭据，有效期越短，被截获后的可用窗口越小。
- * viewer 窗口另由 DO 依据 `live_poll_active_max_duration_sec` 决定。
+ * 它不限制已建立连接的寿命；`live_poll_active_max_duration_sec` 只用于最后离开后的上报宽限期。
  */
 const VIEWER_TOKEN_TTL_MS = 60_000;
 const LIVE_VIEWER_WS_PROTOCOL = 'cf-monitor-viewer';
@@ -242,7 +242,7 @@ wsRoutes.get('/ws/live', async (c) => {
   url.search = '';
   url.searchParams.set('id', 'frontend-' + crypto.randomUUID());
   url.searchParams.set('role', 'viewer');
-  // 不再传 viewer_ttl_ms：窗口交由 DO 依据自己已缓存的设置决定。
+  // 观看连接不设置绝对期限；DO 在最后一个连接离开后按配置保持快速上报。
   url.searchParams.set('viewer_ip', viewerIp);
   if (includeHidden) url.searchParams.set('include_hidden', '1');
 

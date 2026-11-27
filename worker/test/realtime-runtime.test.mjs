@@ -68,7 +68,43 @@ test('AUD-30/32/35/37: actual Durable Objects preserve bounded reports, all Ping
     assert.equal(sameRound[0].values_json['1000'], 10);
   });
 
+  await t.test('native viewer close events preserve active grace across a Worker restart', async () => {
+    const policyObject = namespace.get(namespace.idFromName('runtime-viewer-policy'));
+    const agentResponse = await policyObject.fetch('https://do/?role=agent&id=runtime-node', { headers: { Upgrade: 'websocket' } });
+    assert.equal(agentResponse.status, 101);
+    const policyAgent = agentResponse.webSocket;
+    t.after(() => { try { policyAgent.close(); } catch {} });
+    const initial = await awaitMessage(policyAgent, 'policy', () => policyAgent.accept());
+    assert.equal(initial.mode, 'idle');
+
+    for (const role of ['monitor', 'viewer']) {
+      const active = awaitMessage(policyAgent, 'policy');
+      const viewerResponse = await policyObject.fetch(`https://do/?role=${role}&id=runtime-${role}`, { headers: { Upgrade: 'websocket' } });
+      assert.equal(viewerResponse.status, 101);
+      const viewer = viewerResponse.webSocket;
+      t.after(() => { try { viewer.close(); } catch {} });
+      viewer.accept();
+      const watching = await active;
+      assert.equal(watching.mode, 'active');
+      assert.equal(watching.viewer_count, 1);
+      const grace = await awaitMessage(policyAgent, 'policy', () => viewer.close());
+      assert.equal(grace.mode, 'active');
+      assert.equal(grace.viewer_count, 0);
+      assert.equal(grace.report_interval_sec, watching.report_interval_sec);
+      assert.equal(grace.viewer_ttl_sec, 120);
+    }
+
+    await f.restart();
+    const restoredNamespace = await f.mf.getDurableObjectNamespace('LIVE_DATA');
+    const restored = restoredNamespace.get(restoredNamespace.idFromName('runtime-viewer-policy'));
+    const grace = await (await restored.fetch('https://do/policy')).json();
+    assert.equal(grace.mode, 'active');
+    assert.equal(grace.viewer_count, 0);
+    assert.equal(grace.viewer_ttl_sec, 120);
+  });
+
   await t.test('HTTP state survives a native Worker restart when history is disabled', async () => {
+    const namespace = await f.mf.getDurableObjectNamespace('LIVE_DATA');
     await f.database.query("update settings set value='false' where key='record_enabled'");
     const http = namespace.get(namespace.idFromName('runtime-http'));
     const response = await http.fetch('https://do/client-report', { method: 'POST', body: JSON.stringify({

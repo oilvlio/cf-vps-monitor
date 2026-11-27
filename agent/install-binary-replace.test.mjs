@@ -63,17 +63,4 @@ if (stagedMove) {
   assert.match(body, /rm\s+-f\s+"\$tmp"/, '失败分支必须清理临时文件');
 }
 
-// 5) 旧脚本 install-linux.sh 若仍在仓库中，其 install -m 0755 的写法也不许退化成裸 cp
-try {
-  const linuxSh = readFileSync(new URL('./install-linux.sh', import.meta.url), 'utf8');
-  if (/copy_binary/.test(linuxSh) || /cf-vps-monitor-agent"\s*$/m.test(linuxSh)) {
-    assert.ok(
-      /\binstall\s+-m\s+0?755\b/.test(linuxSh) || /\bmv\s+(-[A-Za-z]+\s+)*"[^"]*\.new/.test(linuxSh),
-      'install-linux.sh 也必须用 install -m 0755 或暂存后 mv 来替换二进制',
-    );
-  }
-} catch (err) {
-  if (err.code !== 'ENOENT') throw err;
-}
-
 console.log(`ok - ${AGENT_DIR}install.sh 的二进制替换不会撞上 ETXTBSY`);

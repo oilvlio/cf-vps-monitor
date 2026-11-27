@@ -7,7 +7,7 @@ interface PriceTagsProps {
   price?: number;
   billing_cycle?: number;
   currency?: string;
-  expired_at?: string | number;
+  expired_at?: string | number | null;
   tags?: string | string[];
   style?: React.CSSProperties;
   hidden?: boolean;
@@ -31,12 +31,12 @@ export default function PriceTags({
   const tagList = showTags ? getVisibleMonitorTags(tags) : [];
   const hasPrice = price !== undefined && price !== 0;
   const billingLabel = formatBillingCycle(billing_cycle);
-  const expiry = showExpiry ? getExpiryInfo(expired_at) : { label: '', color: 'gray' };
+  const expiry: ReturnType<typeof getExpiryInfo> = showExpiry ? getExpiryInfo(expired_at) : { label: '', color: 'gray' };
 
   return (
     <Flex gap="1" wrap="wrap" style={style}>
       {hasPrice && (
-        <Badge size="1" variant="soft" color="iris">
+        <Badge size="1" variant="soft" color="gray">
           <span style={{ fontSize: 11 }}>
             {price === -1 ? '免费' : billingLabel ? `${currency}${price}/${billingLabel}` : `${currency}${price}`}
           </span>
@@ -44,7 +44,7 @@ export default function PriceTags({
       )}
 
       {expiry.label && (
-        <Badge size="1" variant="soft" color={expiry.color as any}>
+        <Badge size="1" variant="soft" color={expiry.color}>
           <span style={{ fontSize: 11 }}>{expiry.label}</span>
         </Badge>
       )}

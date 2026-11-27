@@ -51,10 +51,6 @@ checkpath() {
     esac
   done
   case "$1" in "$ROOT"/*) ;; *) return 91 ;; esac
-  if [ "$CF_SCENARIO" = state-failure ] && [ "$_fixture_type" = -d ]; then
-    printf 'failure:%s\\n' "$CF_SCENARIO" >> "$ROOT/events"
-    return 23
-  fi
   if [ "$CF_SCENARIO" = log-failure ] && [ "$_fixture_type" = -f ]; then
     printf 'failure:%s\\n' "$CF_SCENARIO" >> "$ROOT/events"
     return 24
@@ -68,29 +64,27 @@ checkpath() {
   esac
   chmod "$_fixture_mode" "$1" || return 1
 }
-# Model the documented start-stop-daemon --wait boundary using a real child.
-# This is not a substitute for native OpenRC ownership and daemon matching tests.
-fixture_start_stop_daemon() {
-  _fixture_wait=0
-  while [ "$#" -gt 0 ]; do
-    case "$1" in --wait|-w) _fixture_wait="$2"; shift 2 ;; *) return 93 ;; esac
-  done
+# Model supervise-daemon: it forks the real child itself (no command_background,
+# pidfile or --wait). Not a substitute for native OpenRC supervision tests.
+fixture_supervise_daemon() {
   "$command" --interval 3 --ping-interval 120 >> "$output_log" 2>> "$error_log" &
   _fixture_pid=$!
-  printf '%s\\n' "$_fixture_pid" > "$pidfile"
   printf '%s\\n' "$_fixture_pid" >> "$ROOT/children"
   printf '%s\\n' daemon-spawned >> "$ROOT/events"
-  if [ "$_fixture_wait" -gt 0 ]; then
-    sleep "$(awk -v ms="$_fixture_wait" 'BEGIN { printf "%.3f", ms / 1000 }')"
-    kill -0 "$_fixture_pid" 2>/dev/null || { wait "$_fixture_pid" || :; return 1; }
-    if [ -r "/proc/$_fixture_pid/stat" ] && [ "$(awk '{print $3}' "/proc/$_fixture_pid/stat")" = Z ]; then
-      wait "$_fixture_pid" || :
-      return 1
-    fi
-  fi
 }
 fixture_rc_service() {
-  [ "$#" -eq 2 ] && [ "$1" = "$SERVICE_NAME" ] && [ "$2" = restart ] || return 94
+  [ "$#" -eq 2 ] && [ "$1" = "$SERVICE_NAME" ] || return 94
+  if [ "$2" = status ]; then
+    case "$CF_SCENARIO" in
+      exits|running)
+        _fixture_last="$(tail -n 1 "$ROOT/children" 2>/dev/null)" || return 3
+        [ -n "$_fixture_last" ] && kill -0 "$_fixture_last" 2>/dev/null || return 3
+        # An unreaped exited child still answers kill -0; treat a zombie as stopped.
+        if [ -r "/proc/$_fixture_last/stat" ] && [ "$(awk '{print $3}' "/proc/$_fixture_last/stat")" = Z ]; then return 3; fi ;;
+    esac
+    return 0
+  fi
+  [ "$2" = restart ] || return 94
   printf '%s\\n' rc-service >> "$ROOT/events"
   if [ "$CF_SCENARIO" = restart-failure ]; then
     printf 'failure:%s\\n' "$CF_SCENARIO" >> "$ROOT/events"
@@ -103,7 +97,7 @@ fixture_rc_service() {
     start_pre || exit $?
     printf '%s\\n' start-pre-ok >> "$ROOT/events"
     case "$CF_SCENARIO" in
-      exits|running) fixture_start_stop_daemon \${start_stop_daemon_args:-} ;;
+      exits|running) fixture_supervise_daemon ;;
       *) return 0 ;;
     esac
   )
@@ -126,7 +120,7 @@ SERVICE_MODE=openrc; SERVICE_NAME=${quote(serviceName)}; BASE_ID=openrc-fixture;
 ENV_FILE="$ROOT/etc/conf.d/$SERVICE_NAME"; INIT_FILE="$ROOT/etc/init.d/$SERVICE_NAME"
 DRY_RUN=0; KEEP_FILES=0; AGENT_USER="$(id -un)"; WORK_BIN="$ROOT/synthetic-agent"
 SERVER=https://monitor.example.test; TOKEN=synthetic-token; NODE_NAME=synthetic-node; MODE=websocket
-INTERVAL=3; PING_INTERVAL=120; TRAFFIC_RESET_DAY=1
+INTERVAL=3; PING_INTERVAL=120
 CF_SCENARIO=${quote(scenario)}
 export ROOT SERVICE_NAME INIT_FILE CF_SCENARIO
 FIXTURE_BIN="$(cd "$ROOT/bin" && pwd)"
@@ -203,7 +197,7 @@ test('OpenRC reinstall preserves existing log bytes and corrects unsafe log perm
   if (process.platform !== 'win32') assert.equal(statSync(item.log).mode & 0o777, 0o600);
 });
 
-for (const scenario of ['state-failure', 'log-failure', 'restart-failure']) {
+for (const scenario of ['log-failure', 'restart-failure']) {
   test(`OpenRC installation does not claim success after ${scenario}`, { skip: !shellAvailable }, t => {
     const item = fixture(t, scenario);
     const result = item.run();
@@ -235,7 +229,7 @@ for (const kind of ['symlink', 'hardlink', 'directory', 'ancestor-symlink']) {
   });
 }
 
-test('OpenRC rejects a daemon that exits after the background launch returns', { skip: !shellAvailable }, t => {
+test('OpenRC rejects a daemon that exits right after supervise-daemon starts it', { skip: !shellAvailable }, t => {
   const item = fixture(t, 'exits');
   writeFileSync(item.log, 'earlier synthetic output\n', { mode: 0o600 });
   const result = item.run();
@@ -255,4 +249,13 @@ test('OpenRC confirms a running daemon and keeps its startup log', { skip: !shel
   assert.match(readFileSync(item.log, 'utf8'), /synthetic agent running/);
   assert.match(result.events, /^daemon-spawned$/m, 'the successful daemon must have been launched');
   assert.ok(result.elapsedMs < 10_000, 'startup confirmation must finish within a bounded interval');
+});
+
+test('OpenRC script uses supervise-daemon without command_background or a pidfile', { skip: !shellAvailable }, t => {
+  const item = fixture(t);
+  const result = item.run();
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const init = readFileSync(join(item.root, 'etc/init.d', serviceName), 'utf8');
+  assert.match(init, /^supervisor=supervise-daemon$/m);
+  assert.doesNotMatch(init, /command_background|^pidfile=|start_stop_daemon_args/m);
 });

@@ -17,7 +17,10 @@ export function projectAgentClientMetadata(client: Record<string, unknown>): Rec
 
 // Metadata events are patches: absent fields stay absent, including IP-presence
 // flags. Neither audience receives token material or arbitrary Agent extensions.
-export function projectClientMetadata(client: Record<string, unknown>, administrator: boolean): Record<string, unknown> {
+export function projectClientMetadata(
+  client: Record<string, unknown>,
+  administrator: boolean,
+): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   const fields: readonly string[] = administrator ? [...PUBLIC_CLIENT_FIELDS, 'ipv4', 'ipv6', 'remark'] : PUBLIC_CLIENT_FIELDS;
   for (const field of fields) {

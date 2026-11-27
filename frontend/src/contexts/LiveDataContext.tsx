@@ -21,7 +21,6 @@ import { notifyPublicDataUpdated, subscribePublicDataUpdated } from '../utils/pu
 import type { PublicDataUpdateDetail } from '../utils/publicDataEvents';
 import { mergePublicClientPatch } from '../utils/publicClients';
 import type { ClientInfo } from '../types';
-import { notifyWebsiteMonitorsUpdated, type WebsiteMonitorsUpdateDetail } from '../utils/websiteMonitorEvents';
 import { useAuth } from './AuthContext';
 
 export interface LiveRecord {
@@ -33,14 +32,15 @@ export interface LiveRecord {
   swap_total: number;
   disk: number | null;
   disk_total: number | null;
-  disk_source?: 'directory';
-  disk_sampled_at?: number;
   net_in: number;
   net_out: number;
   net_total_up: number;
   net_total_down: number;
   // null = 本机负载不可取信（容器内 /proc/loadavg 透传宿主机），不是 0。
   load: number | null;
+  // load5/load15 与 load 同语义，缺字段按 0（老数据兼容）。
+  load5: number | null;
+  load15: number | null;
   // null = 主机温度未采集或不可用；0 和负值仍是有效摄氏温度。
   temp: number | null;
   uptime: number | null;
@@ -94,7 +94,6 @@ interface LiveDataViewerExpiredMessage {
 interface LiveDataMetadataChangedMessage {
   type: 'metadata_changed';
   timestamp: number;
-  websites?: true | WebsiteMonitorsUpdateDetail;
   clients?: {
     upsert?: unknown[];
     remove?: string[];
@@ -415,7 +414,7 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
   }, [authLoading, enabled, includeHidden, scopeOwner]);
 
   const refresh = useCallback(() => {
-    fetchLiveData();
+    void fetchLiveData();
   }, [fetchLiveData]);
 
   useEffect(() => {
@@ -686,19 +685,11 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
             return;
           }
           if (isMetadataChangedMessage(message)) {
-            if (message.websites) notifyWebsiteMonitorsUpdated(message.websites);
             if (message.clients) {
               notifyPublicDataUpdated({ clients: message.clients });
-            } else if (!message.websites) {
+            } else {
               notifyPublicDataUpdated();
             }
-            // 纯网站监控变更（live-data.ts:1610 的 `{ websites: true }`）不再走
-            // notifyPublicDataUpdated：/api/public/bootstrap 的内容是"设置 + 客户端快照
-            // + 实时快照"，不含网站数据，网站本身已由上面的 notifyWebsiteMonitorsUpdated
-            // 经 /api/websites 单独刷新。此前无条件调用会扇出到 4 个订阅者
-            // （Layout 主题+站点设置、LiveDataContext bootstrap、Index 客户端列表、
-            // Dashboard 管理端列表），实测 2 次/分 × 3 请求 = 360 请求/小时/标签页，
-            // 且与标签页是否可见无关。
             return;
           }
         } catch {
@@ -736,7 +727,9 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
       if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
         try {
           ws.close();
-        } catch {}
+        } catch {
+          // Closing an already-closed socket is harmless.
+        }
       }
       clearReconnectTimeout();
       reconnectTimeoutRef.current = setTimeout(() => { void connect(); }, 0);
@@ -811,7 +804,7 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
         clearPollTimeout();
         if (cancelled) return;
         timeoutRef.current = setTimeout(
-          pollSnapshot,
+          () => { void pollSnapshot(); },
           DEFAULT_LIVE_POLL_CONFIG.idleIntervalMs,
         );
       };
@@ -860,7 +853,7 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
       if (wsOpenRef.current) {
         lastScheduledDelay = config.idleIntervalMs;
         lastScheduleWasIdle = true;
-        timeoutRef.current = setTimeout(poll, lastScheduledDelay);
+        timeoutRef.current = setTimeout(() => { void poll(); }, lastScheduledDelay);
         return;
       }
       lastScheduledDelay = getLivePollDelay({
@@ -871,7 +864,7 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
       });
       lastScheduleWasIdle = wsOpenRef.current ||
         (activeSinceRef.current !== null && now - activeSinceRef.current >= config.activeMaxDurationMs);
-      timeoutRef.current = setTimeout(poll, lastScheduledDelay);
+      timeoutRef.current = setTimeout(() => { void poll(); }, lastScheduledDelay);
     };
 
     const poll = async () => {
@@ -908,7 +901,7 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
       activeSinceRef.current = Date.now();
       if (lastScheduleWasIdle) {
         clearPollTimeout();
-        poll();
+        void poll();
       }
     };
 
@@ -917,7 +910,7 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
     window.addEventListener('pointerdown', handleUserActivity);
     window.addEventListener('keydown', handleUserActivity);
     window.addEventListener('scroll', handleUserActivity, { passive: true });
-    poll();
+    void poll();
 
     return () => {
       cancelled = true;

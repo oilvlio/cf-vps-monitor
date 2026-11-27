@@ -7,44 +7,6 @@ const playwrightModule = moduleFlag >= 0 ? process.argv[moduleFlag + 1] : proces
 const { origin, check, finish } = await createHarness({ selection, playwrightModule });
 
 try {
-  for (const transport of ['broadcast-channel', 'storage']) {
-    await check(`R-F01-${transport}`, 'private website addresses never enter public tabs or transport', async (page, data, context) => {
-      if (transport === 'storage') await context.addInitScript(() => { window.BroadcastChannel = undefined; });
-      data.authenticated = false;
-      data.websites[0].hide_url = true;
-      await page.goto(origin + '/?view=websites');
-      await page.getByText('Synthetic website', { exact: true }).waitFor();
-      assert.equal(await page.locator('.kuma-monitor-row a').count(), 0, 'Fixture: public HTTP strips private URLs');
-      await page.evaluate(() => {
-        window.reauditWebsiteMessages = [];
-        if (typeof BroadcastChannel !== 'undefined') {
-          window.reauditWebsiteChannel = new BroadcastChannel('cf-monitor:website-monitors-updated');
-          window.reauditWebsiteChannel.onmessage = event => window.reauditWebsiteMessages.push(event.data);
-        }
-        window.addEventListener('storage', event => {
-          if (event.key === 'cf-monitor:website-monitors-updated' && event.newValue) window.reauditWebsiteMessages.push(JSON.parse(event.newValue));
-        });
-      });
-      data.authenticated = true;
-      const admin = await context.newPage();
-      await admin.goto(origin + '/admin/websites');
-      await admin.getByRole('button', { name: '编辑', exact: true }).first().click();
-      const dialog = admin.getByRole('dialog', { name: '编辑监控', exact: true });
-      await dialog.getByRole('textbox', { name: '名称', exact: true }).fill('Renamed private-address monitor');
-      await dialog.getByRole('button', { name: '保存', exact: true }).click();
-      await dialog.waitFor({ state: 'hidden' });
-      await page.getByText('Renamed private-address monitor', { exact: true }).waitFor();
-      const messages = await page.evaluate(() => window.reauditWebsiteMessages);
-      data.observed = { transport, messages, links: await page.locator('.kuma-monitor-row a').evaluateAll(links => links.map(link => link.href)) };
-      assert.equal(data.observed.links.length, 0, 'R-F01: hidden addresses must remain absent after an administrator edit');
-      assert.equal(messages.length, 1, 'R-F01: one cross-tab message per mutation');
-      assert.equal(JSON.stringify(messages).includes('https://synthetic.invalid/private-path'), false, 'R-F01: private URLs must not be serialized into a public event');
-      assert.equal(await admin.evaluate(() => localStorage.getItem('cf-monitor:website-monitors-updated')), null, 'R-F01: fallback envelopes are temporary');
-      await admin.getByRole('button', { name: '编辑', exact: true }).first().click();
-      assert.equal(await admin.getByRole('dialog').getByRole('textbox', { name: '网址', exact: true }).inputValue(), 'https://synthetic.invalid/private-path', 'R-F01: administrators retain the editable address');
-    });
-  }
-
   for (const scope of ['general', 'site']) {
     for (const failure of ['server', 'network', 'invalid']) {
       await check(`R-F02-${scope}-${failure}`, 'failed settings initialization cannot unlock default-value saving', async (page, data) => {
@@ -100,7 +62,7 @@ try {
   });
   }
 
-  for (const domain of ['clients', 'websites']) {
+  for (const domain of ['clients']) {
     await check(`R-F04-${domain}`, 'a stale list refresh cannot overwrite a confirmed edit', async (page, data) => {
       const entered = deferred();
       const release = deferred();
@@ -115,8 +77,8 @@ try {
         return true;
       });
       try {
-        await page.goto(origin + (domain === 'clients' ? '/admin' : '/admin/websites'));
-        await page.getByText(domain === 'clients' ? 'Alpha Server' : 'Synthetic website', { exact: true }).first().waitFor();
+        await page.goto(origin + '/admin');
+        await page.getByText('Alpha Server', { exact: true }).first().waitFor();
         armed = true;
         await page.locator('.admin-refresh-button').click();
         const oldCall = await deadline(entered.promise, 'old list refresh starts');
@@ -134,14 +96,13 @@ try {
     });
   }
 
-  for (const domain of ['clients', 'websites']) {
+  for (const domain of ['clients']) {
     for (const mutation of ['hidden', 'order', 'failed-edit', 'remount', 'rapid-refresh']) {
       await check(`R-F04-${domain}-${mutation}`, 'list ownership preserves confirmed writes and route lifetimes', async (page, data) => {
         const entered = deferred();
         const release = deferred();
         let armed = false;
-        if (domain === 'clients') data.clients.push({ ...data.clients[0], uuid: 'node-b', name: 'Beta Server', sort_order: 1 });
-        else data.websites.push({ ...data.websites[0], id: 2, name: 'Second website', sort_order: 2 });
+        data.clients.push({ ...data.clients[0], uuid: 'node-b', name: 'Beta Server', sort_order: 1 });
         data.handlers.push(async ({ path, url, call, json }) => {
           if (!armed || path !== `/api/admin/${domain}` || !url.searchParams.has('refresh')) return false;
           armed = false;
@@ -151,9 +112,9 @@ try {
           await json(old);
           return true;
         });
-        const routePath = domain === 'clients' ? '/admin' : '/admin/websites';
-        const firstName = domain === 'clients' ? 'Alpha Server' : 'Synthetic website';
-        const names = () => page.locator(domain === 'clients' ? '.admin-node-card-name-row .admin-node-name-text' : '.admin-website-table-row .admin-website-name-text');
+        const routePath = '/admin';
+        const firstName = 'Alpha Server';
+        const names = () => page.locator('.admin-node-card-name-row .admin-node-name-text');
         try {
           await page.goto(origin + routePath);
           await page.getByText(firstName, { exact: true }).first().waitFor();
@@ -163,20 +124,20 @@ try {
           if (mutation === 'hidden') {
             if (domain === 'clients') {
               await page.locator('.admin-node-card').first().getByRole('checkbox').check();
-              await page.locator('.admin-selection-inline').getByRole('button', { name: '隐藏', exact: true }).click();
-            } else await page.locator('.admin-website-table-row').first().getByRole('button', { name: '隐藏', exact: true }).click();
-            await settleCall(page, await waitForCall(data, call => call.path.endsWith(domain === 'clients' ? '/batch-hide' : '/visibility')));
+              await page.locator('.admin-selection-inline').getByRole('button', { name: '完全隐藏', exact: true }).click();
+            }
+            await settleCall(page, await waitForCall(data, call => call.path.endsWith('/batch-hide')));
           } else if (mutation === 'order') {
             const drag = page.getByRole('button', { name: `拖拽排序 ${firstName}`, exact: true });
             await drag.focus();
             await page.keyboard.press('Space');
             await settleRender(page);
-            await page.keyboard.press(domain === 'clients' ? 'ArrowRight' : 'ArrowDown');
+            await page.keyboard.press('ArrowDown');
             await settleRender(page);
             await page.keyboard.press('Space');
             await settleCall(page, await waitForCall(data, call => call.path === `/api/admin/${domain}/reorder`));
           } else if (mutation === 'failed-edit') {
-            const editPath = domain === 'clients' ? '/api/admin/clients/node-a/edit' : '/api/admin/websites/edit';
+            const editPath = '/api/admin/clients/node-a/edit';
             data.failures[`POST ${editPath}`] = 'Synthetic rejected edit';
             await page.getByRole('button', { name: '编辑', exact: true }).first().click();
             const dialog = page.getByRole('dialog');
@@ -200,116 +161,14 @@ try {
           await settleCall(page, oldCall);
           data.observed = { names: await names().allTextContents(), persisted: data[domain].map(item => ({ name: item.name, hidden: item.hidden })) };
           if (mutation === 'hidden') {
-            const row = page.locator(domain === 'clients' ? '.admin-node-card' : '.admin-website-table-row').filter({ hasText: firstName });
-            assert.equal(await row.getByText(domain === 'clients' ? '隐藏' : '对游客隐藏', { exact: true }).count(), 1, 'R-F04: confirmed visibility survives an older GET');
-          } else if (mutation === 'order') assert.equal(data.observed.names[0], domain === 'clients' ? 'Beta Server' : 'Second website', 'R-F04: confirmed order survives an older GET');
+            const row = page.locator('.admin-node-card').filter({ hasText: firstName });
+            assert.equal(await row.getByText(domain === 'clients' ? '完全隐藏' : '对游客隐藏', { exact: true }).count(), 1, 'R-F04: confirmed visibility survives an older GET');
+          } else if (mutation === 'order') assert.equal(data.observed.names[0], 'Beta Server', 'R-F04: confirmed order survives an older GET');
           else assert.equal(data.observed.names[0], mutation === 'remount' ? 'After remount' : mutation === 'rapid-refresh' ? 'Latest refresh' : firstName);
         } finally { release.resolve(); }
       });
     }
   }
-
-  await check('R-F04-public-websites', 'a public website refresh cannot overtake a later invalidation', async (page, data) => {
-    data.authenticated = false;
-    const entered = deferred();
-    const release = deferred();
-    let armed = false;
-    data.handlers.push(async ({ path, call, json }) => {
-      if (!armed || path !== '/api/websites') return false;
-      armed = false;
-      const old = structuredClone(data.websites);
-      entered.resolve(call);
-      await release.promise;
-      await json(old);
-      return true;
-    });
-    try {
-      await page.goto(origin + '/?view=websites');
-      await page.getByText('Synthetic website', { exact: true }).waitFor();
-      armed = true;
-      await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
-      const old = await deadline(entered.promise, 'old public website read starts');
-      data.websites[0].name = 'Latest public website';
-      await page.evaluate(async () => (await import('/src/utils/websiteMonitorEvents.ts')).notifyWebsiteMonitorsUpdated());
-      await page.getByText('Latest public website', { exact: true }).waitFor();
-      release.resolve();
-      await settleCall(page, old);
-      assert.equal(await page.getByText('Latest public website', { exact: true }).count(), 1, 'R-F04: public website requests also honor invalidation order');
-    } finally { release.resolve(); }
-  });
-
-  for (const scenario of ['late-success', 'late-error', 'reopen', 'close']) {
-  await check(`R-F05-${scenario}`, 'late check history stays owned by its original website and dialog lifetime', async (page, data) => {
-    data.websites.push({ ...data.websites[0], id: 2, name: 'Second website', url: 'https://second.invalid/' });
-    const entered = deferred();
-    const release = deferred();
-    let first = true;
-    data.handlers.push(async ({ path, call, json }) => {
-      if (!first || path !== '/api/admin/websites/1/checks') return false;
-      first = false;
-      entered.resolve(call);
-      await release.promise;
-      await json(scenario === 'late-error' ? { error: 'Older A history failed' } : [{ checked_at: new Date().toISOString(), ok: true, latency_ms: 111 }], scenario === 'late-error' ? 500 : 200);
-      return true;
-    });
-    data.checks[2] = [{ checked_at: new Date().toISOString(), ok: true, latency_ms: 222 }];
-    data.checks[1] = [{ checked_at: new Date().toISOString(), ok: true, latency_ms: 333 }];
-    try {
-      await page.goto(origin + '/admin/websites');
-      await page.locator('tr').filter({ hasText: 'Synthetic website' }).getByRole('button', { name: '编辑', exact: true }).click();
-      const oldCall = await deadline(entered.promise, 'website A history starts');
-      await page.getByRole('dialog').getByRole('button', { name: '取消', exact: true }).click();
-      if (scenario === 'close') {
-        release.resolve();
-        await settleCall(page, oldCall);
-        assert.equal(await page.getByRole('dialog').count(), 0, 'closing the dialog retires its pending history');
-      } else {
-        await page.locator('tr').filter({ hasText: 'Second website' }).getByRole('button', { name: '编辑', exact: true }).click();
-        await page.getByRole('dialog').locator('.website-heartbeat-segment[data-tooltip*="222ms"]').waitFor();
-      }
-      if (scenario === 'reopen' || scenario === 'close') {
-        if (scenario === 'reopen') await page.getByRole('dialog').getByRole('button', { name: '取消', exact: true }).click();
-        await page.locator('tr').filter({ hasText: 'Synthetic website' }).getByRole('button', { name: '编辑', exact: true }).click();
-        await settleRender(page);
-      }
-      const dialog = page.getByRole('dialog');
-      if (scenario === 'reopen') await dialog.locator('.website-heartbeat-segment[data-tooltip*="333ms"]').waitFor();
-      release.resolve();
-      await settleCall(page, oldCall);
-      data.observed = { name: await dialog.getByRole('textbox', { name: '名称', exact: true }).inputValue(), checks: await dialog.locator('.website-heartbeat-segment').evaluateAll(elements => elements.map(element => element.dataset.tooltip)) };
-      assert.equal(await dialog.locator(`.website-heartbeat-segment[data-tooltip*="${scenario === 'reopen' || scenario === 'close' ? 333 : 222}ms"]`).count(), 1, 'R-F05: history belongs to the current website and opening, including reopen of the same ID');
-      await page.keyboard.press('Tab');
-      assert.equal(await dialog.evaluate(element => element.contains(document.activeElement)), true, 'history updates preserve modal focus containment');
-    } finally { release.resolve(); }
-  });
-  }
-
-  await check('R-F05-check-now', 'a late manual check cannot reload another dialog history', async (page, data) => {
-    data.websites.push({ ...data.websites[0], id: 2, name: 'Second website' });
-    data.checks[1] = [{ checked_at: new Date().toISOString(), ok: true, latency_ms: 111 }];
-    data.checks[2] = [{ checked_at: new Date().toISOString(), ok: true, latency_ms: 222 }];
-    const entered = deferred();
-    const release = deferred();
-    data.handlers.push(async ({ path, call, json }) => {
-      if (path !== '/api/admin/websites/1/check') return false;
-      entered.resolve(call);
-      await release.promise;
-      await json({ success: true });
-      return true;
-    });
-    try {
-      await page.goto(origin + '/admin/websites');
-      await page.locator('tr').filter({ hasText: 'Synthetic website' }).getByRole('button', { name: '检测', exact: true }).click();
-      const old = await deadline(entered.promise, 'manual check A starts');
-      await page.locator('tr').filter({ hasText: 'Second website' }).getByRole('button', { name: '编辑', exact: true }).click();
-      const dialog = page.getByRole('dialog');
-      await dialog.locator('.website-heartbeat-segment[data-tooltip*="222ms"]').waitFor();
-      release.resolve();
-      await settleCall(page, old);
-      await settleRender(page);
-      assert.equal(await dialog.locator('.website-heartbeat-segment[data-tooltip*="222ms"]').count(), 1, 'R-F05: A check completion cannot replace B history');
-    } finally { release.resolve(); }
-  });
 
   for (const failure of ['server', 'csrf', 'network']) {
   await check(`R-F06-${failure}`, 'failed server logout remains visible and retryable in the administrator view', async (page, data) => {
@@ -361,108 +220,6 @@ try {
       release.resolve();
       await settleCall(page, request);
       await page.waitForURL(url => url.pathname === '/login');
-    } finally { release.resolve(); }
-  });
-
-  await check('R-F07', 'GPU history failure keeps a reachable GPU tab and error state', async (page, data) => {
-    data.clients[0].gpu_name = 'Synthetic GPU';
-    data.failures['GET /api/records/gpu'] = 'Synthetic GPU history failure';
-    await page.goto(origin + '/instance/node-a');
-    await page.getByRole('heading', { name: 'Alpha Server', exact: true }).waitFor();
-    await settleCall(page, await waitForCall(data, call => call.path === '/api/records/gpu'));
-    const tab = page.getByRole('tab', { name: 'GPU', exact: true });
-    data.observed = { gpuTabCount: await tab.count() };
-    assert.equal(data.observed.gpuTabCount, 1, 'R-F07: GPU capability, not successful history, determines the GPU entry');
-    await tab.click();
-    assert.ok(await page.getByRole('alert').filter({ hasText: /GPU/ }).count() > 0, 'R-F07: GPU read failure is visible in the reachable view');
-    assert.ok(await page.getByRole('button', { name: /重试/ }).count() > 0, 'R-F07: the failed read can be retried');
-    delete data.failures['GET /api/records/gpu'];
-    data.handlers.push(async ({ path, json }) => {
-      if (path !== '/api/records/gpu') return false;
-      await json({ data: [60_000, 1000].map(ago => ({ time: new Date(Date.now() - ago).toISOString(), utilization: 65, mem_total: 2000, mem_used: 1000, temperature: 40 })), has_more: false });
-      return true;
-    });
-    const after = data.calls.length;
-    await page.getByRole('button', { name: /重试/ }).click();
-    await settleCall(page, await waitForCall(data, call => call.path === '/api/records/gpu', after));
-    assert.equal(await page.getByRole('alert').filter({ hasText: /GPU/ }).count(), 0);
-    assert.ok(await page.locator('.recharts-line-curve').count() >= 3, 'R-F07: retry renders the returned GPU series');
-    await page.getByRole('tab', { name: 'CPU', exact: true }).click();
-    assert.equal(await page.getByRole('tab', { name: 'CPU', exact: true }).getAttribute('data-state'), 'active', 'ordinary metrics remain usable');
-  });
-
-  for (const capable of [true, false]) {
-    await check(`R-F07-${capable ? 'empty' : 'no-gpu'}`, 'GPU capability and empty history have distinct states', async (page, data) => {
-      data.clients[0].gpu_name = capable ? 'Synthetic GPU' : '';
-      await page.goto(origin + '/instance/node-a');
-      await page.getByRole('heading', { name: 'Alpha Server', exact: true }).waitFor();
-      if (capable) await settleCall(page, await waitForCall(data, call => call.path === '/api/records/gpu'));
-      const tab = page.getByRole('tab', { name: 'GPU', exact: true });
-      assert.equal(await tab.count(), capable ? 1 : 0, 'R-F07: tab availability follows node capability');
-      if (capable) {
-        await tab.click();
-        assert.equal(await page.getByRole('status').filter({ hasText: /暂无 GPU/ }).count(), 1, 'R-F07: successful empty GPU history is explicit');
-        assert.equal(await page.getByRole('alert').count(), 0);
-      } else assert.equal(data.calls.filter(call => call.path === '/api/records/gpu').length, 0);
-    });
-  }
-
-  await check('R-F07-range', 'pending GPU requests expose loading and retire on a range change', async (page, data) => {
-    data.clients[0].gpu_name = 'Synthetic GPU';
-    const entered = deferred();
-    const release = deferred();
-    let first = true;
-    data.handlers.push(async ({ path, call, json }) => {
-      if (!first || path !== '/api/records/gpu') return false;
-      first = false;
-      entered.resolve(call);
-      await release.promise;
-      await json({ error: 'Older range failed' }, 500);
-      return true;
-    });
-    try {
-      await page.goto(origin + '/instance/node-a');
-      const old = await deadline(entered.promise, 'GPU history starts');
-      await page.getByRole('heading', { name: 'Alpha Server', exact: true }).waitFor();
-      const tab = page.getByRole('tab', { name: 'GPU', exact: true });
-      assert.equal(await tab.count(), 1, 'R-F07: the GPU view is reachable while history is pending');
-      await tab.click();
-      assert.equal(await page.getByRole('status').filter({ hasText: /加载 GPU/ }).count(), 1);
-      const after = data.calls.length;
-      await page.getByRole('radio', { name: '4小时', exact: true }).click();
-      await settleCall(page, await waitForCall(data, call => call.path === '/api/records/gpu', after));
-      await page.getByRole('status').filter({ hasText: /暂无 GPU/ }).waitFor();
-      release.resolve();
-      await settleCall(page, old);
-      assert.equal(await page.getByRole('alert').filter({ hasText: /GPU/ }).count(), 0, 'obsolete GPU errors cannot replace a successful new range');
-      assert.equal(await page.getByRole('status').filter({ hasText: /暂无 GPU/ }).count(), 1);
-    } finally { release.resolve(); }
-  });
-
-  await check('R-F07-node-switch', 'leaving a GPU node restores an available metric on a CPU-only node', async (page, data) => {
-    data.clients[0].gpu_name = 'Synthetic GPU';
-    data.clients.push({ ...data.clients[0], uuid: 'node-b', name: 'Beta Server', gpu_name: '' });
-    const entered = deferred();
-    const release = deferred();
-    data.handlers.push(async ({ path, call, json }) => {
-      if (path !== '/api/records/gpu') return false;
-      entered.resolve(call);
-      await release.promise;
-      await json({ error: 'Older node failed' }, 500);
-      return true;
-    });
-    try {
-      await page.goto(origin + '/instance/node-a');
-      const old = await deadline(entered.promise, 'GPU read A starts');
-      await page.getByRole('heading', { name: 'Alpha Server', exact: true }).waitFor();
-      await page.getByRole('tab', { name: 'GPU', exact: true }).click();
-      await page.locator('.instance-sidebar-node[title="Beta Server"]').click();
-      await page.getByRole('heading', { name: 'Beta Server', exact: true }).waitFor();
-      release.resolve();
-      await settleCall(page, old);
-      assert.equal(await page.getByRole('tab', { name: 'GPU', exact: true }).count(), 0);
-      assert.equal(await page.getByRole('tab', { name: 'CPU', exact: true }).getAttribute('data-state'), 'active', 'R-F07: a CPU-only node cannot remain on a now-missing GPU tab');
-      assert.equal(await page.getByRole('alert').filter({ hasText: /GPU/ }).count(), 0);
     } finally { release.resolve(); }
   });
 
@@ -541,7 +298,7 @@ try {
       await page.evaluate(() => dispatchEvent(new Event('focus')));
       const oldCall = await deadline(entered.promise, 'old live HTTP snapshot starts');
       await page.evaluate(() => dispatchEvent(new Event('focus')));
-      const newest = page.locator('.node-card .node-resource-ring-chart').getByText('70%', { exact: true });
+      const newest = page.locator('.node-card .lp-metric').filter({ hasText: 'CPU' }).getByText('70%', { exact: true });
       await newest.waitFor();
       release.resolve();
       await settleCall(page, oldCall);
@@ -809,9 +566,9 @@ try {
     await settleRender(page);
     assert.equal(await toggle.evaluate(element => element === document.activeElement), true, 'R-F10: Escape restores the menu trigger');
     await toggle.click();
-    await page.locator('.admin-sidebar a[href="/admin/websites"]').focus();
+    await page.locator('.admin-sidebar a[href="/admin/about"]').focus();
     await page.keyboard.press('Enter');
-    await page.getByText('Synthetic website', { exact: true }).first().waitFor();
+    await page.waitForURL('**/admin/about');
     await settleRender(page);
     assert.equal(await page.locator('.admin-sidebar').evaluate(aside => aside.inert), true, 'R-F10: selecting a route closes the mobile interaction tree');
     assert.equal(await toggle.evaluate(element => element === document.activeElement), true, 'R-F10: route selection restores the menu trigger');
@@ -836,42 +593,6 @@ try {
     const retry = page.getByRole('button', { name: '重试退出', exact: true });
     await retry.focus();
     assert.equal(await retry.evaluate(element => document.activeElement === element), true, 'R-F10/R-F06: the failed logout retry must be interactive outside the drawer');
-  }, { width: 390 });
-
-  await check('R-F11', 'mobile website actions have accessible names before hover', async (page, data) => {
-    data.websites.push({ ...data.websites[0], id: 2, name: 'Second website' });
-    await page.goto(origin + '/admin/websites');
-    const card = page.locator('.admin-website-card').filter({ hasText: 'Synthetic website' });
-    await card.waitFor();
-    const unnamed = await card.getByRole('button', { name: '', exact: true }).evaluateAll(elements => elements.map(element => element.outerHTML));
-    data.observed = { unnamed };
-    assert.equal(unnamed.length, 0, 'R-F11: check, edit and delete require accessible action names before hover');
-    for (const name of ['Synthetic website', 'Second website']) {
-      for (const action of ['检测', '编辑', '删除']) {
-        assert.equal(await page.getByRole('button', { name: new RegExp(`^${action}.*${name}$`) }).count(), 1, `R-F11: ${action} identifies its target ${name}`);
-      }
-    }
-    const target = page.locator('.admin-website-card').filter({ hasText: 'Second website' });
-    await target.getByRole('button', { name: /^检测/ }).focus();
-    await page.keyboard.press('Enter');
-    await settleCall(page, await waitForCall(data, call => call.path === '/api/admin/websites/2/check'));
-    await target.getByRole('button', { name: /^编辑/ }).focus();
-    await page.keyboard.press('Enter');
-    const edit = page.getByRole('dialog', { name: '编辑监控', exact: true });
-    assert.equal(await edit.getByRole('textbox', { name: '名称', exact: true }).inputValue(), 'Second website');
-    await edit.getByRole('button', { name: '取消', exact: true }).click();
-    await target.getByRole('button', { name: /^删除/ }).focus();
-    await page.keyboard.press('Enter');
-    const confirm = page.getByRole('dialog', { name: '确认删除', exact: true });
-    await confirm.getByRole('button', { name: '取消', exact: true }).click();
-    assert.equal(data.calls.filter(call => call.path === '/api/admin/websites/delete').length, 0, 'cancel does not delete either website');
-    await target.getByRole('button', { name: /^删除/ }).focus();
-    await page.keyboard.press('Enter');
-    await confirm.getByRole('button', { name: '确认删除', exact: true }).focus();
-    await page.keyboard.press('Enter');
-    await confirm.waitFor({ state: 'hidden' });
-    assert.deepEqual(data.websites.map(monitor => monitor.id), [1], 'keyboard confirmation deletes only the named website');
-    assert.equal(await page.locator('.admin-website-card').count(), 1);
   }, { width: 390 });
 
   for (const phase of ['initial', 'refresh']) {
@@ -921,39 +642,147 @@ try {
     const temperatures = unavailable ? [null, null, null] : scenario === 'zero' ? [0, 0] : scenario === 'positive' ? [42, 48] : scenario === 'negative' ? [-5, -2] : scenario === 'isolated' ? [null, 0, null, -7, null, 25, null] : [10, 12, null, null, 0, -7, null, 25, 30];
     const history = temperatures.map((temp, index) => ({
       time: new Date(Date.now() - (temperatures.length - index) * 60000).toISOString(),
-      cpu: 20 + index, ram: 512, ram_total: 1024, net_in: 4096,
+      cpu: 20 + index, ram: 512, ram_total: 1024, swap: 0, swap_total: 0,
+      net_in: 4096, net_out: 0, net_total_up: 0, net_total_down: 0,
+      load: 0.5, connections: 1, connections_udp: 0, process_count: 2,
       ...(scenario === 'missing' ? {} : { temp }),
     }));
     data.handlers.push(async ({ path, json }) => {
       if (path !== '/api/records/load') return false;
-      await json({ data: history, has_more: false });
+      await json(history);
       return true;
     });
     await page.goto(origin + '/instance/node-a');
     await page.getByRole('heading', { name: 'Alpha Server', exact: true }).waitFor();
-    const card = page.locator('.rt-Card').filter({ hasText: '监控图表' });
-    assert.equal(await card.getByText(`${history.length} 个数据点`, { exact: true }).count(), 1, 'R-A11: unknown temperature does not remove otherwise-valid CPU records');
-    assert.ok(await card.locator('.recharts-line-curve').count() > 0, 'CPU history remains rendered');
-    await page.getByRole('tab', { name: '温度', exact: true }).click();
+    await page.getByText(`采样 ${history.length} 个点`, { exact: true }).waitFor();
+    const cpu = page.getByRole('region', { name: 'CPU', exact: true });
+    assert.ok(await cpu.locator('.recharts-area-curve').count() > 0, 'CPU history remains rendered');
+    const card = page.getByRole('region', { name: '温度', exact: true });
     await settleRender(page);
-    const unavailableMessage = card.getByRole('status').filter({ hasText: /温度.*不可用/ });
-    const paths = await card.locator('.recharts-line-curve').evaluateAll(lines => lines.map(line => line.getAttribute('d')));
-    data.observed = { scenario, samples: history.length, unavailable: await unavailableMessage.count(), paths };
+    const paths = await card.locator('.recharts-area-curve').evaluateAll(lines => lines.map(line => line.getAttribute('d')));
+    data.observed = { scenario, samples: history.length, temperatureCards: await card.count(), paths };
     if (unavailable) {
-      assert.equal(await unavailableMessage.count(), 1, 'R-A11: all-unknown host temperatures need an explicit unavailable state');
+      assert.equal(await card.count(), 0, 'R-A11: all-unknown host temperatures do not render a measured metric card');
       assert.equal(paths.length, 0, 'unknown is not a zero-temperature line');
     } else {
-      assert.equal(await unavailableMessage.count(), 0, 'measured zero/negative temperature is available');
-      if (scenario === 'isolated') assert.equal(await card.locator('.recharts-line-dot').count(), 3, 'R-A11: isolated valid measurements remain visible between unknown periods');
+      assert.equal(await card.count(), 1, 'measured zero/negative temperature is available');
+      if (scenario === 'isolated') assert.equal(await card.locator('.recharts-area-dot').count(), 3, 'R-A11: isolated valid measurements remain visible between unknown periods');
       else assert.ok(paths.some(path => path && /[lLcC]/.test(path)), 'real Celsius measurements form a rendered line');
       if (scenario === 'mixed') assert.ok(paths.some(path => (path.match(/[mM]/g) || []).length >= 3), 'R-A11: null periods interrupt the temperature line');
       if (scenario === 'negative') assert.ok((await card.locator('.recharts-yAxis').textContent()).includes('-'), 'negative Celsius is represented on the axis');
     }
-    await page.getByRole('tab', { name: 'CPU', exact: true }).click();
-    assert.equal(await card.getByText(`${history.length} 个数据点`, { exact: true }).count(), 1);
-    assert.ok(await card.locator('.recharts-line-curve').count() > 0);
+    assert.equal(await page.getByText(`采样 ${history.length} 个点`, { exact: true }).count(), 1);
+    assert.ok(await cpu.locator('.recharts-area-curve').count() > 0);
   });
   }
+  await check('R-F14-ping-page', 'ping task table reorders by keyboard, pauses drag while filtering and deletes through the confirm dialog', async (page, data) => {
+    const task = (id, name) => ({ id, name, type: 'icmp', target: `192.0.2.${id}`, interval_sec: 60, all_clients: true, clients: [], sort_order: id });
+    data.pingTasks = [task(1, 'Cloudflare DNS'), task(2, 'Google HTTPS'), task(3, 'Gateway TCP')];
+    await page.goto(origin + '/admin/ping');
+    await page.getByText('Cloudflare DNS', { exact: true }).waitFor();
+    const names = () => page.locator('.admin-ping-task-name');
+    assert.deepEqual(await names().allTextContents(), ['Cloudflare DNS', 'Google HTTPS', 'Gateway TCP']);
+
+    const drag = page.getByRole('button', { name: '拖拽排序 Cloudflare DNS', exact: true });
+    await drag.focus();
+    await page.keyboard.press('Space');
+    await settleRender(page);
+    await page.keyboard.press('ArrowDown');
+    await settleRender(page);
+    await page.keyboard.press('Space');
+    const reorder = await waitForCall(data, call => call.path === '/api/admin/ping/reorder');
+    await settleCall(page, reorder);
+    const ids = (typeof reorder.body === 'string' ? JSON.parse(reorder.body) : reorder.body).ids;
+    assert.deepEqual(ids, [2, 1, 3], 'R-F14: keyboard drag posts the new full task order');
+    assert.deepEqual(await names().allTextContents(), ['Google HTTPS', 'Cloudflare DNS', 'Gateway TCP']);
+
+    const search = page.getByRole('textbox', { name: '搜索任务' });
+    await search.fill('gateway');
+    assert.equal(await names().count(), 1);
+    assert.equal(await page.getByRole('button', { name: '拖拽排序 Gateway TCP', exact: true }).isDisabled(), true, 'R-F14: drag is paused while the list is filtered');
+    await search.fill('');
+
+    await page.getByRole('button', { name: '删除 Gateway TCP' }).click();
+    const dialog = page.getByRole('alertdialog');
+    await dialog.getByText('Gateway TCP', { exact: true }).waitFor();
+    await dialog.getByRole('button', { name: '确认删除' }).click();
+    await settleCall(page, await waitForCall(data, call => call.path === '/api/admin/ping/delete'));
+    await dialog.waitFor({ state: 'detached' });
+    assert.deepEqual(await names().allTextContents(), ['Google HTTPS', 'Cloudflare DNS']);
+    data.observed = { pageErrors: [...data.errors] };
+    assert.deepEqual(data.errors, []);
+  });
+  await check('R-F15-notify-channels', 'notification channel cards start collapsed, open on channel switch and report configured state', async (page, data) => {
+    await page.goto(origin + '/admin/notifications/settings');
+    await page.getByText('Telegram 通知', { exact: true }).waitFor();
+    const card = (title) => page.locator('.sa-collapsible', { hasText: title });
+    const isOpen = (title) => card(title).locator('details').evaluate((element) => element.open);
+    for (const title of ['SMTP 邮件通知', 'Telegram 通知', 'Webhook 通知']) {
+      assert.equal(await isOpen(title), false, `R-F15: ${title} starts collapsed`);
+      assert.equal(await card(title).getByText('未配置', { exact: true }).count(), 1, `R-F15: ${title} shows its state while closed`);
+    }
+
+    await page.getByRole('combobox', { name: '通知发送方式', exact: true }).selectOption('email');
+    assert.equal(await isOpen('SMTP 邮件通知'), true, 'R-F15: choosing a channel opens its card');
+    assert.equal(await page.getByText('SMTP 邮件 尚未配置完整').count(), 1, 'R-F15: an incomplete selected channel is called out');
+    assert.equal(await card('SMTP 邮件通知').getByText('当前通道', { exact: true }).count(), 1);
+
+    await page.getByRole('textbox', { name: 'SMTP Host', exact: true }).fill('smtp.example.com');
+    await page.getByRole('textbox', { name: '发件人邮箱', exact: true }).fill('monitor@example.com');
+    await page.getByRole('textbox', { name: '收件地址', exact: true }).fill('ops@example.com');
+    await card('SMTP 邮件通知').getByText('已配置', { exact: true }).waitFor();
+    assert.equal(await page.getByText('SMTP 邮件 尚未配置完整').count(), 0, 'R-F15: the warning clears once required fields are filled');
+
+    await card('SMTP 邮件通知').locator('summary').click();
+    assert.equal(await isOpen('SMTP 邮件通知'), false, 'R-F15: the summary toggles the card closed');
+    await page.getByRole('radio', { name: /离线通知/ }).click();
+    await page.getByRole('radio', { name: '通知设置', exact: true }).click();
+    assert.equal(await isOpen('SMTP 邮件通知'), false, 'R-F15: collapsed state survives switching tabs');
+    assert.deepEqual(data.errors, []);
+  });
+  await check('R-F16-instance-route', 'built-in instance page resolves the node from the native client list, not the Monitor-contract /api/nodes', async (page, data) => {
+    const uuid = data.clients[0].uuid;
+    await page.goto(origin + `/instance/${uuid}`);
+    await page.getByText(data.clients[0].name, { exact: true }).first().waitFor();
+    assert.equal(await page.getByText('服务器不存在').count(), 0, 'R-F16: a known node must not be reported as missing');
+    await page.goto(origin + '/instance/does-not-exist');
+    await page.getByText('服务器不存在').first().waitFor();
+  });
+  await check('R-F17-admin-dialogs', 'edit-server hints are hover-only and assign-task dialog never shows probe targets', async (page, data) => {
+    const explain = '每月几号开始重新计算流量';
+    const target = 'fj-ct-v4.ip.zstaticcdn.com:80';
+    data.pingTasks = [
+      { id: 1, name: '电信v4TCP', type: 'tcp', target, interval_sec: 60, all_clients: false, clients: [], sort_order: 0 },
+      { id: 2, name: 'Cloudflare DNS', type: 'icmp', target: '1.1.1.1', interval_sec: 60, all_clients: true, clients: [], sort_order: 1 },
+    ];
+    data.homePing = {};
+
+    await page.goto(origin + '/admin');
+    await page.locator('.admin-node-card').first().getByRole('button', { name: '编辑' }).click();
+    const dialog = page.getByRole('dialog');
+    const reset = dialog.getByRole('spinbutton', { name: '流量重置日', exact: true });
+    await reset.waitFor();
+    assert.equal(await page.locator('.sa-tooltip').count(), 0, 'R-F17: no hint text is shown until the info icon is used');
+    await dialog.locator('.sa-form-field', { hasText: '流量重置日' }).getByRole('button', { name: '查看说明' }).hover();
+    await page.locator('.sa-tooltip', { hasText: explain }).waitFor();
+    await reset.fill('9');
+    await dialog.getByRole('button', { name: '保存', exact: true }).click();
+    const edit = await waitForCall(data, call => /\/api\/admin\/clients\/[^/]+\/edit$/.test(call.path));
+    await settleCall(page, edit);
+    const sent = typeof edit.body === 'string' ? JSON.parse(edit.body) : edit.body;
+    assert.equal(sent.traffic_reset_day, 9, 'R-F17: the reset day typed in the dialog is what gets saved');
+
+    await page.goto(origin + '/admin/ping');
+    await page.getByRole('radio', { name: '服务器视图' }).click();
+    await page.getByRole('button', { name: /^分配 .* 的监控任务$/ }).first().click();
+    const assign = page.getByRole('dialog');
+    await assign.getByText('电信v4TCP', { exact: true }).waitFor();
+    assert.equal(await assign.getByText(target).count(), 0, 'R-F17: probe targets are not rendered in the assign dialog');
+    assert.equal(await assign.getByText('1.1.1.1').count(), 0);
+    await assign.getByRole('textbox', { name: '搜索任务' }).fill('zstaticcdn');
+    await assign.getByText('没有匹配的任务').waitFor();
+    assert.deepEqual(data.errors, []);
+  });
 } finally {
   await finish();
 }

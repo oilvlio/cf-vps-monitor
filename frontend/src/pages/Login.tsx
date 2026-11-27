@@ -11,6 +11,7 @@ import { normalizeDisplayTheme } from '../utils/displayTheme';
 import { fetchPublicSettings } from '../utils/publicSettings';
 import { formatAppVersion } from '../utils/version';
 import { normalizeMfaCode, type MfaMethod } from '../utils/mfa';
+import { MIN_ADMIN_PASSWORD_LENGTH, validateAdminPasswordLength } from '../utils/passwordPolicy';
 
 type RecoveryStatus = {
   admin_present: boolean;
@@ -55,7 +56,7 @@ export default function Login() {
   const [recoveryLoading, setRecoveryLoading] = useState(false);
 
   React.useEffect(() => {
-    if (isAuthenticated) navigate(redirectTo, { replace: true });
+    if (isAuthenticated) void navigate(redirectTo, { replace: true });
   }, [isAuthenticated, navigate, redirectTo]);
 
   React.useEffect(() => {
@@ -115,7 +116,7 @@ export default function Login() {
       return;
     }
     toast.success('登录成功');
-    navigate(redirectTo, { replace: true });
+    void navigate(redirectTo, { replace: true });
   };
 
   const handleMfaSubmit = async (e: React.FormEvent) => {
@@ -142,13 +143,18 @@ export default function Login() {
       return;
     }
     toast.success('登录成功');
-    navigate(redirectTo, { replace: true });
+    void navigate(redirectTo, { replace: true });
   };
 
   const handleRecoverySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!recoveryKey || !recoveryUsername || !recoveryPassword) {
       toast.error('请填写 Supabase Secret key、用户名和新密码');
+      return;
+    }
+    const recoveryPasswordError = validateAdminPasswordLength(recoveryPassword);
+    if (recoveryPasswordError) {
+      toast.error(recoveryPasswordError);
       return;
     }
 
@@ -190,7 +196,7 @@ export default function Login() {
       <Card className="login-card" style={{ padding: '36px 32px' }}>
         <Flex direction="column" align="center" gap="2" mb="5">
           <Box className="login-logo">
-            <img src={siteLogoUrl || '/app-icon.png'} alt="" />
+            <img src={siteLogoUrl || '/app-icon.webp'} alt="" />
           </Box>
           <Heading size="6" style={{ fontSize: '1.5rem', letterSpacing: '-0.02em', fontWeight: 700 }}>
             CF VPS Monitor
@@ -365,7 +371,7 @@ export default function Login() {
                     id="recovery-password"
                     size="3"
                     type={showRecoveryPassword ? 'text' : 'password'}
-                    placeholder="请输入新密码"
+                    placeholder={`请输入新密码（至少 ${MIN_ADMIN_PASSWORD_LENGTH} 位）`}
                     value={recoveryPassword}
                     onChange={(e) => setRecoveryPassword(e.target.value)}
                     autoComplete="new-password"

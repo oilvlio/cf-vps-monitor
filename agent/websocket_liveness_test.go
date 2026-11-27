@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -102,6 +103,12 @@ func livenessConnection(t *testing.T, mode string) (*safeWebSocketConn, <-chan [
 			case <-ctx.Done():
 				return
 			}
+			if mode == "rejected" {
+				if err := peer.WriteJSON(serverMessage{Type: "error", Code: "REPORT_REJECTED"}); err != nil {
+					return
+				}
+				continue
+			}
 			if mode == "silent" {
 				<-ctx.Done()
 				return
@@ -171,7 +178,7 @@ func startLivenessSession(t *testing.T, conn *safeWebSocketConn, state *pingRepo
 	}}
 	done := make(chan error, 1)
 	go func() {
-		done <- runWebSocketSession(conn, preparer, state, 3*time.Second, 50*time.Millisecond)
+		done <- runWebSocketSession(context.Background(), conn, preparer, state, 3*time.Second, 50*time.Millisecond)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -221,6 +228,52 @@ func TestAUD24MissingResponsesEndSessionAndRetainResults(t *testing.T) {
 			retry := state.takeRetryReports()
 			if len(retry) != 1 || len(retry[0].PingResults) != 1 || retry[0].Timestamp != first[0].Timestamp {
 				t.Fatalf("unacknowledged sample was lost: %+v", retry)
+			}
+		})
+	}
+}
+
+func TestReportRejectedEndsSessionWithoutWaitingForAckTimeout(t *testing.T) {
+	for _, withPing := range []bool{false, true} {
+		t.Run(fmt.Sprint("ping=", withPing), func(t *testing.T) {
+			state := newPingReportState()
+			t.Cleanup(state.close)
+			if withPing {
+				state.mu.Lock()
+				state.queuePingResultsLocked([]PingResult{{TaskID: 1, Value: 23}})
+				state.mu.Unlock()
+			}
+			conn, seen, _, _ := livenessConnection(t, "rejected")
+			preparer := &reportPreparer{lastBasicInfoAt: time.Now(), collect: func(interval int) Report {
+				return Report{Timestamp: time.Now().UnixMilli(), ReportInterval: interval, CPU: 17}
+			}}
+			done := make(chan error, 1)
+			go func() {
+				// Production heartbeat gives a 90s ACK timeout. The explicit
+				// rejection must stop the session well before that deadline.
+				done <- runWebSocketSession(context.Background(), conn, preparer, state, 3*time.Second, 30*time.Second)
+			}()
+			var first []Report
+			select {
+			case first = <-seen:
+			case <-time.After(time.Second):
+				t.Fatal("peer did not receive initial report")
+			}
+			select {
+			case err := <-done:
+				if err == nil || !strings.Contains(err.Error(), "REPORT_REJECTED") {
+					t.Fatalf("expected explicit report rejection, got %v", err)
+				}
+			case <-time.After(time.Second):
+				conn.Close()
+				<-done
+				t.Fatal("rejected report stalled the session until the ACK timeout")
+			}
+			if withPing {
+				retry := state.takeRetryReports()
+				if len(retry) != 1 || len(retry[0].PingResults) != 1 || retry[0].Timestamp != first[0].Timestamp {
+					t.Fatalf("rejection lost the unacknowledged probe report: %+v", retry)
+				}
 			}
 		})
 	}
@@ -333,7 +386,7 @@ func TestAUD24HeartbeatContinuesWhileCollecting(t *testing.T) {
 	}}
 	done := make(chan error, 1)
 	go func() {
-		done <- runWebSocketSession(conn, preparer, state, 3*time.Second, 50*time.Millisecond)
+		done <- runWebSocketSession(context.Background(), conn, preparer, state, 3*time.Second, 50*time.Millisecond)
 		close(done)
 	}()
 	t.Cleanup(func() {

@@ -34,19 +34,18 @@ test('R-A05 basic-information delivery is acknowledged only after the real SQL u
     await f.database.query("update clients set os='before' where uuid='basic-info-node'");
   });
 
-  for (const path of ['/api/clients/uploadBasicInfo', '/api/clients/report']) {
-    await t.test(`${path} retains delivery on SQL failure and saves an identical retry`, async () => {
-      const basic = { os: `confirmed-${path.split('/').at(-1)}` };
-      const body = path.endsWith('/report') ? { cpu: 21, basic_info: basic } : basic;
-      const rejected = await post(path, body);
-      assert.ok(rejected.status >= 500, 'An unsaved basic-info update must not look accepted');
-      assert.equal(await storedOs(), 'before');
-      failUpdate = false;
-      const accepted = await post(path, body);
-      assert.equal(accepted.status, 200, await accepted.clone().text());
-      assert.equal(await storedOs(), basic.os, 'HTTP success must correspond to the persisted basic info');
-    });
-  }
+  await t.test('HTTP report retains delivery on SQL failure and saves an identical retry', async () => {
+    const path = '/api/clients/report';
+    const basic = { os: 'confirmed-report' };
+    const body = { cpu: 21, basic_info: basic };
+    const rejected = await post(path, body);
+    assert.ok(rejected.status >= 500, 'An unsaved basic-info update must not look accepted');
+    assert.equal(await storedOs(), 'before');
+    failUpdate = false;
+    const accepted = await post(path, body);
+    assert.equal(accepted.status, 200, await accepted.clone().text());
+    assert.equal(await storedOs(), basic.os, 'HTTP success must correspond to the persisted basic info');
+  });
 
   for (const type of ['report', 'reports']) {
     await t.test(`WebSocket ${type} retains basic info on error and acknowledges a persisted retry`, async () => {

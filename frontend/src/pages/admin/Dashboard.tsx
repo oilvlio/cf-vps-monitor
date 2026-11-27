@@ -10,15 +10,25 @@ import {
 } from '@dnd-kit/core';
 import {
   SortableContext,
-  rectSortingStrategy,
+  verticalListSortingStrategy,
   sortableKeyboardCoordinates,
   useSortable,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import {
-  Flex, Card, Text, Badge, Box, Button, TextField,
-  Dialog, Switch, IconButton, Separator, TextArea, SegmentedControl, Checkbox, Tooltip, Select
-} from '@radix-ui/themes';
+  Badge as SaBadge,
+  Button as SaButton,
+  Card as SaCard,
+  Checkbox as SaCheckbox,
+  ConfirmDialog,
+  Dialog as MinimalDialog,
+  FormInput,
+  FormSection,
+  FormSelect,
+  FormSwitch,
+  Segmented,
+  StatGrid,
+} from '../../components/ui/minimal';
 import {
   Plus, Pencil, Trash2, Copy, Search,
   Grip, RefreshCw, Download, EyeOff, Server, Wifi, Layers, KeyRound
@@ -41,6 +51,7 @@ import {
 import { ClientInfo, LiveDataMap } from '../../types';
 import {
   AgentInstallOptions,
+  AgentLogLevel,
   AgentInstallPlatform,
   buildAgentInstallCommand,
   buildAgentUninstallAllCommand,
@@ -171,28 +182,18 @@ async function copyToClipboard(text: string, message = '已复制到剪贴板') 
 function CopyableIp({ value, muted }: { value: string; muted?: boolean }) {
   const family = value.includes(':') ? 'v6' : 'v4';
   return (
-    <Flex align="center" gap="1" className={`admin-ip-line admin-ip-${family}`}>
-      <Text
-        size="1"
-        color={muted ? 'gray' : undefined}
-        title={value}
-        className="admin-ip-value"
-        style={{ fontFamily: 'monospace' }}
+    <span className={`admin-ip-line admin-ip-${family}${muted ? ' is-muted' : ''}`}>
+      <span title={value} className="admin-ip-value">{value}</span>
+      <button
+        type="button"
+        aria-label="复制 IP"
+        title="复制 IP"
+        className="admin-ip-copy"
+        onClick={() => copyToClipboard(value, 'IP 已复制')}
       >
-        {value}
-      </Text>
-      <Tooltip content="复制 IP">
-        <IconButton
-          aria-label="复制 IP"
-          className="admin-ip-copy"
-          size="1"
-          variant="ghost"
-          onClick={() => copyToClipboard(value, 'IP 已复制')}
-        >
-          <Copy size={12} />
-        </IconButton>
-      </Tooltip>
-    </Flex>
+        <Copy size={12} />
+      </button>
+    </span>
   );
 }
 
@@ -208,18 +209,15 @@ function RowActionButton({
   children: React.ReactNode;
 }) {
   return (
-    <Tooltip content={label}>
-      <IconButton
-        aria-label={label}
-        className={`admin-row-action${color === 'red' ? ' admin-row-action-danger' : ''}`}
-        size="2"
-        variant="soft"
-        color={color}
-        onClick={onClick}
-      >
-        {children}
-      </IconButton>
-    </Tooltip>
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      className={`admin-icon-button admin-row-action${color === 'red' ? ' admin-row-action-danger' : ''}`}
+      onClick={onClick}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -267,7 +265,7 @@ function formatDetailTime(value?: string | null) {
   return value ? new Date(value).toLocaleString('zh-CN') : '-';
 }
 
-function SortableNodeCard({ node, selected, onSelect, liveData, onDetail, onEdit, onDelete, onCmd, onRotateToken, dragDisabled }: SortableRowProps) {
+function SortableNodeRow({ node, selected, onSelect, liveData, onDetail, onEdit, onDelete, onCmd, onRotateToken, dragDisabled }: SortableRowProps) {
   const isOnline = liveData.online.includes(node.uuid);
   const agentVersion = normalizeAgentVersion(node.version) || '-';
   const systemVersion = formatSystemVersion(node);
@@ -287,94 +285,79 @@ function SortableNodeCard({ node, selected, onSelect, liveData, onDetail, onEdit
     disabled: dragDisabled,
   });
 
-  const cardStyle = {
-    opacity: isDragging ? 0.72 : isOnline ? 1 : 0.55,
+  const rowStyle = {
     transform: CSS.Transform.toString(transform),
     transition,
     position: 'relative',
     zIndex: isDragging ? 2 : 0,
   } as React.CSSProperties;
 
-  return (
-    <div ref={setNodeRef} className={`admin-node-card-shell${isDragging ? ' is-dragging' : ''}`} style={cardStyle}>
-      <Card className={`admin-node-card${selected ? ' is-selected' : ''}${isOnline ? ' is-online' : ' is-offline'}`}>
-        <div className="admin-node-card-header">
-          <div className="admin-node-card-controls">
-            <Tooltip content={dragDisabled ? '切到手动排序后可拖拽' : '拖拽排序'}>
-              <button
-                type="button"
-                className="admin-row-drag-handle"
-                aria-label={`拖拽排序 ${node.name || node.uuid}`}
-                disabled={dragDisabled}
-                {...attributes}
-                {...listeners}
-              >
-                <Grip size={15} />
-              </button>
-            </Tooltip>
-            <Checkbox className="admin-node-checkbox" checked={selected} onCheckedChange={() => onSelect(node.uuid)} />
-          </div>
+  const className = [
+    'sa-tr',
+    'admin-node-card',
+    selected ? 'is-selected' : '',
+    isOnline ? 'is-online' : 'is-offline',
+    isDragging ? 'is-dragging' : '',
+  ].filter(Boolean).join(' ');
 
-          <button
-            type="button"
-            className="admin-node-card-title"
-            onClick={() => onDetail(node)}
-            title={node.name || '查看详情'}
-          >
+  return (
+    <tr ref={setNodeRef} className={className} style={rowStyle}>
+      <td className="sa-td-narrow">
+        <button
+          type="button"
+          className="admin-row-drag-handle"
+          aria-label={`拖拽排序 ${node.name || node.uuid}`}
+          title={dragDisabled ? '切到手动排序后可拖拽' : '拖拽排序'}
+          disabled={dragDisabled}
+          {...attributes}
+          {...listeners}
+        >
+          <Grip size={15} />
+        </button>
+      </td>
+      <td className="sa-td-narrow">
+        <SaCheckbox checked={selected} onCheckedChange={() => onSelect(node.uuid)} aria-label={`选择 ${node.name || node.uuid}`} />
+      </td>
+      <td className="sa-td-name">
+        <div className="sa-name-cell">
+          <button type="button" className="admin-node-card-title" onClick={() => onDetail(node)} title={node.name || '查看详情'}>
             <span className="admin-node-card-name-row">
-              <span className="admin-node-card-flag">
-                <Flag region={node.region} size={20} />
-              </span>
-              <Text className="admin-node-name-text" size="2" weight="bold">{node.name || '未命名'}</Text>
+              <span className="admin-node-card-flag"><Flag region={node.region} size={18} /></span>
+              <span className="admin-node-name-text">{node.name || '未命名'}</span>
             </span>
           </button>
-
-          <Flex className="admin-row-actions">
-            <RowActionButton label="编辑" onClick={() => onEdit(node)}><Pencil size={13} /></RowActionButton>
-            <RowActionButton label="安装命令" onClick={() => onCmd(node)}><Download size={13} /></RowActionButton>
-            <RowActionButton label="重置 Token" onClick={() => onRotateToken(node)}><KeyRound size={13} /></RowActionButton>
-            <RowActionButton label="删除" color="red" onClick={() => onDelete(node)}><Trash2 size={13} /></RowActionButton>
-          </Flex>
-
-          {/* 徽章行独占第二行并跨到操作按钮列下方，让长地名能用满整卡宽度 */}
-          <span className="admin-node-card-badges">
-            <span className={`admin-node-status-text${isOnline ? ' is-online' : ' is-offline'}`}>{isOnline ? '在线' : '离线'}</span>
-            <Badge className="admin-node-region-badge" size="1" variant="soft" color="gray" title={node.region || '未知'}>{node.region || '未知'}</Badge>
-            {Boolean(node.hidden) && <Badge size="1" variant="soft" color="orange">隐藏</Badge>}
-          </span>
+          <SaBadge variant="outline" title={node.region || '未知'}>{node.region || '未知'}</SaBadge>
+          {Boolean(node.hidden) && <SaBadge variant="warning">完全隐藏</SaBadge>}
         </div>
-
-        <div className="admin-node-card-body">
-          <div className="admin-node-card-ip-panel">
-            <Text className="admin-node-card-section-label" size="1" weight="bold">IP 地址</Text>
-            <div className="admin-node-ip-stack">
-              {node.ipv4 && <CopyableIp value={node.ipv4} />}
-              {node.ipv6 && <CopyableIp value={node.ipv6} muted />}
-              {!node.ipv4 && !node.ipv6 && <Text size="1" color="gray">-</Text>}
-            </div>
-          </div>
-
-          <div className="admin-node-card-meta-grid">
-            <div className="admin-node-card-meta">
-              <Text className="admin-node-card-section-label" size="1" weight="bold">Agent</Text>
-              <Text className="admin-node-version-text" size="1" title={fullVersionTitle}>{agentVersion}</Text>
-            </div>
-            <div className="admin-node-card-meta">
-              <Text className="admin-node-card-section-label" size="1" weight="bold">系统</Text>
-              <Text className="admin-node-version-os" size="1" color="gray" title={fullVersionTitle}>{systemVersion}</Text>
-            </div>
-            <div className="admin-node-card-meta">
-              <Text className="admin-node-card-section-label" size="1" weight="bold">分组</Text>
-              <Text className="admin-node-group-text" size="1" title={node.group}>{node.group || '-'}</Text>
-            </div>
-            <div className="admin-node-card-meta admin-node-card-billing">
-              <Text className="admin-node-card-section-label" size="1" weight="bold">账单</Text>
-              <PriceTags price={node.price} billing_cycle={node.billing_cycle} expired_at={node.expired_at} currency={node.currency} showTags={false} />
-            </div>
-          </div>
+      </td>
+      <td>
+        <span className={`admin-node-status-text${isOnline ? ' is-online' : ' is-offline'}`} title={isOnline ? '在线' : '离线'}>
+          <span className="sa-status-dot" aria-hidden="true" />
+          <span className="sa-status-label">{isOnline ? '在线' : '离线'}</span>
+        </span>
+      </td>
+      <td className="sa-col-md">
+        <div className="admin-node-ip-stack">
+          {node.ipv4 && <CopyableIp value={node.ipv4} />}
+          {node.ipv6 && <CopyableIp value={node.ipv6} muted />}
+          {!node.ipv4 && !node.ipv6 && <span className="sa-muted">-</span>}
         </div>
-      </Card>
-    </div>
+      </td>
+      <td className="sa-col-md"><span className="admin-node-group-text" title={node.group}>{node.group || '-'}</span></td>
+      <td className="sa-col-lg"><span className="admin-node-version-text" title={fullVersionTitle}>{agentVersion}</span></td>
+      <td className="sa-col-xl"><span className="admin-node-version-os" title={fullVersionTitle}>{systemVersion}</span></td>
+      <td className="sa-col-lg">
+        <PriceTags price={node.price} billing_cycle={node.billing_cycle} expired_at={node.expired_at} currency={node.currency} showTags={false} />
+      </td>
+      <td className="sa-td-actions">
+        <span className="admin-row-actions">
+          <RowActionButton label="编辑" onClick={() => onEdit(node)}><Pencil size={14} /></RowActionButton>
+          <RowActionButton label="安装命令" onClick={() => onCmd(node)}><Download size={14} /></RowActionButton>
+          <RowActionButton label="重置 Token" onClick={() => onRotateToken(node)}><KeyRound size={14} /></RowActionButton>
+          <RowActionButton label="删除" color="red" onClick={() => onDelete(node)}><Trash2 size={14} /></RowActionButton>
+        </span>
+      </td>
+    </tr>
   );
 }
 
@@ -389,12 +372,7 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: Command
   useEffect(() => {
     let cancelled = false;
     if (open) {
-      // 重置日以后台记录为准：装机命令与节点配置从一开始就一致，
-      // 否则装完立刻会被 policy 改回后台的值，并连带清零当期累计。
-      setInstallOptions({
-        ...defaultAgentInstallOptions,
-        trafficResetDay: String(client.traffic_reset_day || 1),
-      });
+      setInstallOptions({ ...defaultAgentInstallOptions });
       setAgentToken(client.token || '');
       fetchPublicSettings()
         .then(d => {
@@ -415,7 +393,7 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: Command
     }
     let cancelled = false;
     setLoadingToken(true);
-    (async () => {
+    void (async () => {
       try {
         const result = await apiFetch('/admin/clients/' + client.uuid + '/token/install', { method: 'POST' });
         if (cancelled) return;
@@ -461,55 +439,86 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: Command
     });
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content className="admin-command-dialog" style={{ maxWidth: 680 }}>
-        <Dialog.Title>生成 CF VPS Monitor Agent 安装命令</Dialog.Title>
-        <Dialog.Description size="2" mb="2">节点: {client.name}</Dialog.Description>
-        <SegmentedControl.Root value={platform} onValueChange={(v) => setPlatform(v as AgentInstallPlatform)} style={{ marginBottom: 12 }}>
-          <SegmentedControl.Item value="unix">Unix 自动检测</SegmentedControl.Item>
-          <SegmentedControl.Item value="windows">Windows</SegmentedControl.Item>
-        </SegmentedControl.Root>
-
-        <Flex className="admin-command-options-scroll" direction="column" gap="3">
-          <FieldInput label="连接地址" value={serverUrl} onChange={setServerUrl} placeholder={window.location.origin} />
-          <Text size="2" weight="bold">安装选项</Text>
-          <div className="install-options-grid">
-            <label>
-              <Text size="2" weight="bold" style={{ display: 'block', marginBottom: 4 }}>安装模式</Text>
-              <Select.Root value={installOptions.installMode} onValueChange={(v) => setOption('installMode', v as AgentInstallOptions['installMode'])}>
-                <Select.Trigger style={{ width: '100%' }} />
-                <Select.Content>
-                  <Select.Item value="auto">自动选择</Select.Item>
-                  <Select.Item value="system">系统服务</Select.Item>
-                  <Select.Item value="user">用户模式</Select.Item>
-                </Select.Content>
-              </Select.Root>
-            </label>
-            <FieldInput label="GitHub 代理" value={installOptions.ghproxy} onChange={(v) => setOption('ghproxy', v)} placeholder="为空则不使用代理" />
-            <FieldInput label="下载代理" value={installOptions.downloadProxy} onChange={(v) => setOption('downloadProxy', v)} placeholder="例如 http://127.0.0.1:10808" />
-            <FieldInput label="安装目录" value={installOptions.dir} onChange={(v) => setOption('dir', v)} placeholder={platform === 'windows' ? 'C:\\Program Files\\CF VPS Monitor' : '自动选择系统目录或用户目录'} />
-            <FieldInput label="服务名称" value={installOptions.serviceName} onChange={(v) => setOption('serviceName', v)} placeholder={platform === 'windows' ? 'CFVpsMonitorAgent' : 'cf-vps-monitor-agent'} />
-            <FieldInput label="二进制下载地址" value={installOptions.binaryUrl || ''} onChange={(v) => setOption('binaryUrl', v)} placeholder="为空则自动下载预编译二进制" />
-            <FieldInput label="SHA256SUMS 地址" value={installOptions.checksumUrl || ''} onChange={(v) => setOption('checksumUrl', v)} placeholder="自定义二进制地址必须填写" />
-            <FieldInput label="Release Tag" value={installOptions.releaseTag || ''} onChange={(v) => setOption('releaseTag', v)} placeholder="为空则使用最新发布版" />
-            <FieldInput label="磁盘包含" value={installOptions.mountInclude} onChange={(v) => setOption('mountInclude', v)} placeholder="例如 /,/data,/dev/sd*" />
-            <FieldInput label="磁盘排除" value={installOptions.mountExclude} onChange={(v) => setOption('mountExclude', v)} placeholder="例如 /boot,tmpfs,/run" />
-            <FieldInput label="网卡包含" value={installOptions.nicInclude} onChange={(v) => setOption('nicInclude', v)} placeholder="例如 eth*,ens*" />
-            <FieldInput label="网卡排除" value={installOptions.nicExclude} onChange={(v) => setOption('nicExclude', v)} placeholder="例如 lo,docker*,veth*" />
-            <FieldInput label="流量重置日期" value={installOptions.trafficResetDay} onChange={(v) => setOption('trafficResetDay', v)} type="number" min={1} step={1} placeholder="1" />
-          </div>
-        </Flex>
-
-        <Box className="admin-command-code">{loadingToken ? '正在获取 Token...' : cmd}</Box>
-        <Flex justify="end" gap="2" mt="3">
-          <Button color="red" variant="soft" onClick={() => copyToClipboard(uninstallAllCmd, '彻底卸载命令已复制')}>
+    <MinimalDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="生成 CF VPS Monitor Agent 安装命令"
+      description={`节点: ${client.name}`}
+      size="xl"
+      className="admin-command-dialog"
+      footer={(
+        <>
+          <SaButton variant="outline" className="sa-modal-footer-start" onClick={() => copyToClipboard(uninstallAllCmd, '彻底卸载命令已复制')}>
             <Trash2 size={14} /> 彻底卸载
-          </Button>
-          <Button variant="soft" onClick={() => onOpenChange(false)}>关闭</Button>
-          <Button onClick={() => copyToClipboard(cmd, '命令已复制')} disabled={loadingToken || !agentToken}><Copy size={14} /> 复制命令</Button>
-        </Flex>
-      </Dialog.Content>
-    </Dialog.Root>
+          </SaButton>
+          <SaButton variant="outline" onClick={() => onOpenChange(false)}>关闭</SaButton>
+          <SaButton onClick={() => copyToClipboard(cmd, '命令已复制')} disabled={loadingToken || !agentToken}><Copy size={14} /> 复制命令</SaButton>
+        </>
+      )}
+    >
+      <Segmented
+        label="目标系统"
+        value={platform}
+        onChange={(value) => setPlatform(value as AgentInstallPlatform)}
+        options={[{ value: 'unix', label: 'Unix 自动检测' }, { value: 'windows', label: 'Windows' }]}
+      />
+
+      <pre className="sa-code-block sa-pre admin-command-code" aria-label="安装命令">{loadingToken ? '正在获取 Token...' : cmd}</pre>
+
+      <div className="sa-form-grid">
+        <div className="sa-form-span">
+          <FormInput label="连接地址" value={serverUrl} onChange={setServerUrl} placeholder={window.location.origin} />
+        </div>
+        <FormSection title="安装选项" />
+        <FormSelect
+          label="安装模式"
+          value={installOptions.installMode}
+          onChange={(v) => setOption('installMode', v as AgentInstallOptions['installMode'])}
+          options={[{ value: 'auto', label: '自动选择' }, { value: 'system', label: '系统服务' }, { value: 'user', label: '用户模式' }]}
+        />
+        <FormInput label="GitHub 代理" value={installOptions.ghproxy} onChange={(v) => setOption('ghproxy', v)} placeholder="为空则不使用代理" />
+        <FormInput label="下载代理" value={installOptions.downloadProxy} onChange={(v) => setOption('downloadProxy', v)} placeholder="例如 http://127.0.0.1:10808" />
+        <FormInput label="安装目录" value={installOptions.dir} onChange={(v) => setOption('dir', v)} placeholder={platform === 'windows' ? 'C:\\Program Files\\CF VPS Monitor' : '自动选择系统目录或用户目录'} />
+        <FormInput label="服务名称" value={installOptions.serviceName} onChange={(v) => setOption('serviceName', v)} placeholder={platform === 'windows' ? 'CFVpsMonitorAgent' : 'cf-vps-monitor-agent'} />
+        <FormInput label="Release Tag" value={installOptions.releaseTag || ''} onChange={(v) => setOption('releaseTag', v)} placeholder="为空则使用最新发布版" />
+        <FormInput label="二进制下载地址" value={installOptions.binaryUrl || ''} onChange={(v) => setOption('binaryUrl', v)} placeholder="为空则自动下载预编译二进制" />
+        <FormInput label="SHA256SUMS 地址" value={installOptions.checksumUrl || ''} onChange={(v) => setOption('checksumUrl', v)} placeholder="自定义二进制地址必须填写" />
+        <FormInput label="磁盘包含" value={installOptions.mountInclude} onChange={(v) => setOption('mountInclude', v)} placeholder="例如 /,/data,/dev/sd*" />
+        <FormInput label="磁盘排除" value={installOptions.mountExclude} onChange={(v) => setOption('mountExclude', v)} placeholder="例如 /boot,tmpfs,/run" />
+        <FormInput label="网卡包含" value={installOptions.nicInclude} onChange={(v) => setOption('nicInclude', v)} placeholder="例如 eth*,ens*" />
+        <FormInput label="网卡排除" value={installOptions.nicExclude} onChange={(v) => setOption('nicExclude', v)} placeholder="例如 lo,docker*,veth*" />
+        <FormSelect
+          label="GPU 采集"
+          value={installOptions.enableGpu ? 'on' : 'off'}
+          onChange={(v) => setOption('enableGpu', v === 'on')}
+          options={[{ value: 'off', label: '关闭（默认，不探测、不上报 GPU）' }, { value: 'on', label: '开启（探测 nvidia-smi / rocm-smi）' }]}
+        />
+        <FormSelect
+          label="日志等级"
+          value={installOptions.logLevel}
+          onChange={(v) => setOption('logLevel', v as AgentLogLevel)}
+          options={[
+            { value: 'info', label: 'info（默认，仅记录启动、连接与异常）' },
+            { value: 'debug', label: 'debug（含每次上报与 ack）' },
+            { value: 'warn', label: 'warn' },
+            { value: 'error', label: 'error' },
+          ]}
+        />
+        {platform === 'unix' && (
+          <>
+            <FormSelect
+              label="容器宿主机负载"
+              value={installOptions.allowHostLoad ? 'on' : 'off'}
+              onChange={(v) => setOption('allowHostLoad', v === 'on')}
+              options={[{ value: 'on', label: '上报宿主机负载（默认）' }, { value: 'off', label: '不上报（LXC/Incus 等容器无法获得本机负载时留空）' }]}
+            />
+            {installOptions.allowHostLoad && (
+              <FormInput label="宿主机核数" value={installOptions.hostCpuCores} onChange={(v) => setOption('hostCpuCores', v)} type="number" min={1} step={1} placeholder="按容器核数折算，使负载色点反映宿主机利用率" />
+            )}
+          </>
+        )}
+      </div>
+    </MinimalDialog>
   );
 }
 
@@ -529,73 +538,31 @@ function DetailDialog({ client, open, onOpenChange }: { client: AdminClient; ope
   ];
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content className="admin-node-dialog" style={{ maxWidth: 600 }}>
-        <Dialog.Title>机器详细信息</Dialog.Title>
-        <Dialog.Description size="2" mb="3">{client.name}</Dialog.Description>
-        <Flex className="admin-node-detail-list" direction="column" gap="1">
-          {fields.map(([label, value]) => (
-            <div key={label} className="admin-node-detail-row">
-              <Text className="admin-node-detail-label" size="2" color="gray">{label}</Text>
+    <MinimalDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="机器详细信息"
+      description={client.name}
+      size="lg"
+      footer={<SaButton onClick={() => onOpenChange(false)}>完成</SaButton>}
+    >
+      <div className="sa-kv">
+        {fields.map(([label, value]) => (
+          <div key={label} className="sa-kv-row">
+            <span className="sa-kv-label">{label}</span>
+            <span className="sa-kv-value">
               {label === 'IPv4' && client.ipv4 ? (
                 <CopyableIp value={client.ipv4} />
               ) : label === 'IPv6' && client.ipv6 ? (
                 <CopyableIp value={client.ipv6} muted />
               ) : (
-                <Text className="admin-node-detail-value" size="2">{value}</Text>
+                value
               )}
-            </div>
-          ))}
-        </Flex>
-        <Flex justify="end" mt="3"><Button onClick={() => onOpenChange(false)}>完成</Button></Flex>
-      </Dialog.Content>
-    </Dialog.Root>
-  );
-}
-
-function FieldInput({
-  label,
-  value,
-  onChange,
-  textarea,
-  type,
-  placeholder,
-  helper,
-  min,
-  max,
-  step,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  textarea?: boolean;
-  type?: string;
-  placeholder?: string;
-  helper?: string;
-  min?: string | number;
-  max?: string | number;
-  step?: string | number;
-}) {
-  return (
-    <label>
-      <Text size="2" weight="bold" style={{ display: 'block', marginBottom: 4 }}>{label}</Text>
-      {textarea
-        ? <TextArea style={{ width: '100%' }} value={value} onChange={e => onChange(e.target.value)} rows={2} placeholder={placeholder} />
-        : (
-          <TextField.Root
-            style={{ width: '100%' }}
-            value={value}
-            onChange={e => onChange(e.target.value)}
-            type={(type || 'text') as never}
-            placeholder={placeholder}
-            min={min as never}
-            max={max as never}
-            step={step as never}
-          />
-        )
-      }
-      {helper && <Text size="1" color="gray" style={{ display: 'block', marginTop: 4 }}>{helper}</Text>}
-    </label>
+            </span>
+          </div>
+        ))}
+      </div>
+    </MinimalDialog>
   );
 }
 
@@ -603,7 +570,6 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
   const apiFetch = useApi();
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState<Record<string, unknown>>({});
-
   useEffect(() => {
     if (client) setForm({
       name: client.name || '', remark: client.remark || '', public_remark: client.public_remark || '',
@@ -661,82 +627,72 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
   };
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content aria-describedby={undefined} className="admin-node-dialog admin-node-edit-dialog" style={{ maxWidth: 640 }}>
-        <Dialog.Title>编辑服务器</Dialog.Title>
-        <div className="admin-node-dialog-scroll">
-          <Flex className="admin-node-edit-form" direction="column" gap="3">
-            <FieldInput label="名称" value={String(form.name || '')} onChange={v => update('name', v)} />
-            <FieldInput label="私有备注" value={String(form.remark || '')} onChange={v => update('remark', v)} textarea />
-            <FieldInput label="公开备注" value={String(form.public_remark || '')} onChange={v => update('public_remark', v)} textarea />
-            <FieldInput label="分组" value={String(form.group || '')} onChange={v => update('group', v)} />
-            <FieldInput label="标签 (分号分隔)" value={String(form.tags || '')} onChange={v => update('tags', v)} />
-            <Separator size="4" />
-            <Text size="2" weight="bold">计费信息</Text>
-            <div className="billing-price-grid">
-              <Box>
-                <FieldInput
-                  label="价格"
-                  value={String(form.price ?? 0)}
-                  onChange={v => update('price', v)}
-                  type="number"
-                  min="-1"
-                  step="0.01"
-                />
-              </Box>
-              <Box>
-                <FieldInput label="货币" value={String(form.currency || '¥')} onChange={v => update('currency', v)} />
-              </Box>
-              <Text className="billing-price-helper" size="1" color="gray">
-                0 不显示，-1 表示免费
-              </Text>
-            </div>
-            <CurrencySymbols onPick={(symbol) => update('currency', symbol)} />
-            <div className="billing-schedule-grid">
-              <Box>
-                <BillingCycleSelect value={form.billing_cycle as number | string | undefined} onChange={v => update('billing_cycle', v)} />
-              </Box>
-              <Box>
-                <ExpiryDateInput value={String(form.expired_at || '')} onChange={v => update('expired_at', v)} />
-              </Box>
-            </div>
-            <TrafficLimitEditor
-              value={(form.traffic_limit_form as TrafficLimitFormValue) || createTrafficLimitFormValue(0, 'sum')}
-              onChange={(value) => update('traffic_limit_form', value)}
-            />
-            <Box>
-              <FieldInput
-                label="流量重置日"
-                value={String(form.traffic_reset_day ?? 1)}
-                onChange={v => update('traffic_reset_day', v)}
-                type="number"
-                min="1"
-                max="31"
-                step="1"
-              />
-              <Text size="1" color="gray" style={{ display: 'block', marginTop: 4 }}>
-                每月几号开始重新计算流量，保存后由服务端下发给探针，无需重装。
-                <Text size="1" color="orange"> 改这个值会让当期已累计的流量从此刻重新起算。</Text>
-              </Text>
-            </Box>
-            <Flex className="billing-switch-row" gap="3">
-              <Flex className="billing-switch-item" align="center" justify="between">
-                <Text size="2">对游客隐藏</Text>
-                <Switch checked={Boolean(form.hidden)} onCheckedChange={v => update('hidden', v)} />
-              </Flex>
-              <Flex className="billing-switch-item" align="center" justify="between">
-                <Text size="2">自动续费</Text>
-                <Switch checked={Boolean(form.auto_renewal)} onCheckedChange={v => update('auto_renewal', v)} />
-              </Flex>
-            </Flex>
-          </Flex>
+    <MinimalDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="编辑服务器"
+      description={client?.name}
+      size="lg"
+      className="admin-node-edit-dialog"
+      footer={(
+        <>
+          <SaButton variant="outline" onClick={() => onOpenChange(false)}>取消</SaButton>
+          <SaButton onClick={handleSave} disabled={saving}>{saving ? '保存中...' : '保存'}</SaButton>
+        </>
+      )}
+    >
+      <div className="sa-form-grid">
+        <div className="sa-form-span">
+          <FormInput label="名称" value={String(form.name || '')} onChange={v => update('name', v)} />
         </div>
-        <Flex gap="3" justify="end" mt="4">
-          <Button variant="soft" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={handleSave} disabled={saving}>{saving ? '保存中...' : '保存'}</Button>
-        </Flex>
-      </Dialog.Content>
-    </Dialog.Root>
+        <FormInput label="私有备注" value={String(form.remark || '')} onChange={v => update('remark', v)} textarea rows={2} />
+        <FormInput label="公开备注" value={String(form.public_remark || '')} onChange={v => update('public_remark', v)} textarea rows={2} />
+        <FormInput label="分组" value={String(form.group || '')} onChange={v => update('group', v)} />
+        <FormInput label="标签 (分号分隔)" value={String(form.tags || '')} onChange={v => update('tags', v)} />
+
+        <FormSection title="计费信息" />
+        <FormInput
+          label="价格"
+          value={String(form.price ?? 0)}
+          onChange={v => update('price', v)}
+          type="number"
+          min="-1"
+          step="0.01"
+          hint="0 不显示，-1 表示免费"
+        />
+        <FormInput label="货币" value={String(form.currency || '¥')} onChange={v => update('currency', v)} />
+        <div className="sa-form-span">
+          <CurrencySymbols onPick={(symbol) => update('currency', symbol)} />
+        </div>
+        <BillingCycleSelect value={form.billing_cycle as number | string | undefined} onChange={v => update('billing_cycle', v)} />
+        <ExpiryDateInput value={String(form.expired_at || '')} onChange={v => update('expired_at', v)} />
+        <TrafficLimitEditor
+          value={(form.traffic_limit_form as TrafficLimitFormValue) || createTrafficLimitFormValue(0, 'sum')}
+          onChange={(value) => update('traffic_limit_form', value)}
+        />
+        <FormInput
+          label="流量重置日"
+          value={String(form.traffic_reset_day ?? 1)}
+          onChange={v => update('traffic_reset_day', v)}
+          type="number"
+          min="1"
+          max="31"
+          step="1"
+          tip="每月几号开始重新计算流量，保存后由服务端下发给探针，无需重装。探针按天记录流量增量，改这个值只会换一个统计窗口，当期流量不会清零（探针保留最近一年的逐日数据）。"
+        />
+        <div />
+
+        <FormSection title="显示与续费" />
+        <FormSwitch
+          inline
+          label="对游客完全隐藏"
+          tip="「完全隐藏」后节点整体不出现在游客前台；价格信息会下发给主题，由主题决定是否展示。"
+          checked={Boolean(form.hidden)}
+          onCheckedChange={v => update('hidden', v)}
+        />
+        <FormSwitch inline label="自动续费" checked={Boolean(form.auto_renewal)} onCheckedChange={v => update('auto_renewal', v)} />
+      </div>
+    </MinimalDialog>
   );
 }
 
@@ -776,19 +732,20 @@ function AddDialog({ open, onOpenChange, onSaved }: { open: boolean; onOpenChang
   };
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 420 }}>
-        <Dialog.Title>添加服务器</Dialog.Title>
-        <Flex direction="column" gap="3" mt="2">
-          <FieldInput label="服务器名称" value={name} onChange={setName} placeholder="可选，创建后可修改" />
-          <Text size="1" color="gray">创建后将生成 Token，用于 Agent 连接</Text>
-        </Flex>
-        <Flex gap="3" justify="end" mt="4">
-          <Button variant="soft" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={handleAdd} disabled={loading}>{loading ? '创建中...' : '创建'}</Button>
-        </Flex>
-      </Dialog.Content>
-    </Dialog.Root>
+    <MinimalDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="添加服务器"
+      size="sm"
+      footer={(
+        <>
+          <SaButton variant="outline" onClick={() => onOpenChange(false)}>取消</SaButton>
+          <SaButton onClick={handleAdd} disabled={loading}>{loading ? '创建中...' : '创建'}</SaButton>
+        </>
+      )}
+    >
+      <FormInput label="服务器名称" value={name} onChange={setName} placeholder="可选，创建后可修改" hint="创建后将生成 Token，用于 Agent 连接" />
+    </MinimalDialog>
   );
 }
 
@@ -813,18 +770,17 @@ function DeleteDialog({ client, open, onOpenChange, onDeleted }: { client: Admin
     }
   };
 
-  return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 400 }}>
-        <Dialog.Title>确认删除</Dialog.Title>
-        <Text size="2">确定要删除服务器 <strong>{client?.name}</strong> 吗？此操作不可撤销。</Text>
-        <Flex gap="3" justify="end" mt="4">
-          <Button variant="soft" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button color="red" onClick={handleDelete} disabled={deleting}>{deleting ? '删除中...' : '确认删除'}</Button>
-        </Flex>
-      </Dialog.Content>
-    </Dialog.Root>
-  );
+  return <ConfirmDialog
+    open={open}
+    onOpenChange={onOpenChange}
+    title="确认删除"
+    description={<>确定要删除服务器 <strong>{client?.name}</strong> 吗？此操作不可撤销。</>}
+    confirmLabel={deleting ? '删除中...' : '确认删除'}
+    destructive
+    keepOpenOnConfirm
+    confirmDisabled={deleting}
+    onConfirm={handleDelete}
+  />;
 }
 
 function RotateTokenDialog({ client, open, onOpenChange, onRotated }: { client: AdminClient | null; open: boolean; onOpenChange: (v: boolean) => void; onRotated: (token?: string) => void }) {
@@ -853,21 +809,17 @@ function RotateTokenDialog({ client, open, onOpenChange, onRotated }: { client: 
     }
   };
 
-  return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 420 }}>
-        <Dialog.Title>重置 Agent Token</Dialog.Title>
-        <Flex direction="column" gap="2">
-          <Text size="2">确定要重置 <strong>{client?.name}</strong> 的 Agent Token 吗？</Text>
-          <Text size="2" color="gray">旧 Agent 会立刻无法继续上报，需要用新的安装命令或配置重新启动。</Text>
-        </Flex>
-        <Flex gap="3" justify="end" mt="4">
-          <Button variant="soft" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button color="red" onClick={handleRotate} disabled={rotating}>{rotating ? '重置中...' : '确认重置'}</Button>
-        </Flex>
-      </Dialog.Content>
-    </Dialog.Root>
-  );
+  return <ConfirmDialog
+    open={open}
+    onOpenChange={onOpenChange}
+    title="重置 Agent Token"
+    description={<><p>确定要重置 <strong>{client?.name}</strong> 的 Agent Token 吗？</p><p>旧 Agent 会立刻无法继续上报，需要用新的安装命令或配置重新启动。</p></>}
+    confirmLabel={rotating ? '重置中...' : '确认重置'}
+    destructive
+    keepOpenOnConfirm
+    confirmDisabled={rotating}
+    onConfirm={handleRotate}
+  />;
 }
 
 export default function AdminDashboard() {
@@ -935,7 +887,7 @@ export default function AdminDashboard() {
         body: JSON.stringify({ uuids: selectedNodes }),
       });
       if (!result.success) throw new Error(result.error || '批量隐藏失败');
-      toast.success(`已隐藏 ${result.updated ?? selectedNodes.length} 个节点`);
+      toast.success(`已对游客完全隐藏 ${result.updated ?? selectedNodes.length} 个节点`);
       updateClients((prev) => prev.map((client) => selectedNodes.includes(client.uuid) ? { ...client, hidden: true } : client));
       setSelectedNodes([]);
       notifyPublicDataUpdated({
@@ -1103,7 +1055,7 @@ export default function AdminDashboard() {
         icon: <Layers size={18} />,
       },
       {
-        label: '对游客隐藏',
+        label: '对游客完全隐藏',
         value: String(hiddenCount),
         detail: '不会出现在游客前台',
         icon: <EyeOff size={18} />,
@@ -1114,129 +1066,139 @@ export default function AdminDashboard() {
   if (loading) return <Loading />;
 
   return (
-    <Flex className="admin-dashboard-page" direction="column" gap="3">
-      <Flex className="admin-parent-title-row admin-server-title-row" justify="between" align="center" mb="3">
-        <Flex align="center" gap="2">
+    <div className="sa-scope admin-dashboard-page">
+      <div className="admin-parent-title-row admin-server-title-row">
+        <div className="sa-page-title">
           <Server size={20} />
-          <Text size="5" weight="bold">服务器</Text>
-        </Flex>
-        <section className="admin-page-hero admin-server-overview-hero">
-          <div className="admin-overview-strip">
-            {overviewCards.map((card) => (
-              <div className="admin-overview-item" key={card.label} title={clientsReady ? card.detail : '尚未读取到服务器列表'}>
-                <Flex align="center" gap="2" className="admin-overview-line">
-                  <span className="admin-overview-icon" aria-hidden="true">{card.icon}</span>
-                  <Text className="admin-overview-label" size="2">{card.label}</Text>
-                  <Text className="admin-overview-value" size="4" weight="bold">{clientsReady ? card.value : '—'}</Text>
-                </Flex>
-              </div>
-            ))}
-          </div>
-        </section>
-      </Flex>
+          <span>服务器</span>
+        </div>
+      </div>
+
+      <StatGrid
+        label="服务器概览"
+        items={overviewCards.map((card) => ({
+          label: card.label,
+          value: clientsReady ? card.value : '—',
+          detail: clientsReady ? card.detail : '尚未读取到服务器列表',
+          icon: card.icon,
+          title: clientsReady ? card.detail : '尚未读取到服务器列表',
+        }))}
+      />
 
       {clientsError && (
-        <Flex role="alert" align="center" justify="between" gap="3" wrap="wrap">
-          <Text color="red" size="2">
-            {clientsReady ? '刷新服务器列表失败，当前保留上次读取的数据。' : '读取服务器列表失败，尚无法确认服务器数量。'}
-          </Text>
-          <Button variant="soft" size="1" onClick={() => void loadClients(true)}>重试读取</Button>
-        </Flex>
+        <div className="sa-alert" role="alert">
+          <span>{clientsReady ? '刷新服务器列表失败，当前保留上次读取的数据。' : '读取服务器列表失败，尚无法确认服务器数量。'}</span>
+          <SaButton variant="outline" size="sm" onClick={() => void loadClients(true)}>重试读取</SaButton>
+        </div>
       )}
 
-      <Card className="admin-filter-card">
-        <Flex className="admin-filter-toolbar" direction="column" gap="2">
-          <Flex className="admin-filter-primary-row" gap="2" align="center">
-            <Box className="admin-status-filter">
-              <SegmentedControl.Root value={statusFilter} onValueChange={(value) => setStatusFilter(value as NodeStatusFilter)} size="1">
-                <SegmentedControl.Item value="all">全部</SegmentedControl.Item>
-                <SegmentedControl.Item value="online">在线</SegmentedControl.Item>
-                <SegmentedControl.Item value="offline">离线</SegmentedControl.Item>
-              </SegmentedControl.Root>
-            </Box>
+      <SaCard className="admin-node-card-panel">
+        <div className="sa-toolbar admin-filter-toolbar">
+          <div className="sa-toolbar-group">
+            <div className="sa-search">
+              <Search size={14} aria-hidden="true" />
+              <input
+                className="sa-input admin-server-search"
+                placeholder="查找服务器"
+                aria-label="查找服务器"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+              />
+            </div>
+            <Segmented
+              label="状态筛选"
+              value={statusFilter}
+              onChange={(value) => setStatusFilter(value as NodeStatusFilter)}
+              options={[{ value: 'all', label: '全部' }, { value: 'online', label: '在线' }, { value: 'offline', label: '离线' }]}
+            />
+            <select className="sa-input sa-select admin-filter-group-select" aria-label="分组筛选" value={selectedGroup} onChange={(event) => setSelectedGroup(event.target.value)}>
+              <option value="all">全部分组</option>
+              {groups.map((group) => <option key={group} value={group}>{group}</option>)}
+            </select>
+          </div>
+          <div className="sa-toolbar-group">
+            <Segmented
+              label="排序方式"
+              value={sortKey}
+              onChange={(value) => setSortKey(value as AdminSortKey)}
+              options={[{ value: 'manual', label: '手动' }, { value: 'name', label: '名称' }, { value: 'status', label: '状态' }]}
+            />
+            <SaButton className="admin-sort-dir-button" variant="outline" size="sm" disabled={sortKey === 'manual'} onClick={() => setSortDir((value) => value === 'asc' ? 'desc' : 'asc')}>
+              {sortDir === 'asc' ? '升序' : '降序'}
+            </SaButton>
+            <button type="button" className="admin-icon-button admin-refresh-button" onClick={() => { void loadClients(true); void refreshLive(); }} title="刷新" aria-label="刷新">
+              <RefreshCw size={14} />
+            </button>
+            <SaButton className="admin-add-server-button" size="sm" onClick={() => setAddOpen(true)}><Plus size={16} /> 添加服务器</SaButton>
+          </div>
+        </div>
 
-            <Flex className="admin-search-cluster" gap="2" align="center">
-              <TextField.Root className="admin-server-search" size="1" placeholder="查找服务器" value={search} onChange={e => setSearch(e.target.value)}>
-                <TextField.Slot><Search size={14} /></TextField.Slot>
-              </TextField.Root>
-              <IconButton className="admin-refresh-button" variant="soft" size="1" onClick={() => { loadClients(true); refreshLive(); }} title="刷新"><RefreshCw size={14} /></IconButton>
-            </Flex>
-
-            {selectedNodes.length > 0 && (
-              <Flex className="admin-selection-inline" gap="2" align="center">
-                <Badge variant="soft" color="blue">已选 {selectedNodes.length}</Badge>
-                {selectedVisibleCount !== selectedNodes.length && (
-                  <Text size="1" color="gray">当前结果 {selectedVisibleCount}</Text>
-                )}
-                <Button variant="soft" size="1" color="red" onClick={() => setBatchDeleteOpen(true)}>
-                  <Trash2 size={14} /> 删除
-                </Button>
-                <Button variant="soft" size="1" onClick={batchHideNodes}>
-                  <EyeOff size={14} /> 隐藏
-                </Button>
-                <Button variant="ghost" size="1" onClick={() => setSelectedNodes([])}>清除</Button>
-              </Flex>
+        {selectedNodes.length > 0 && (
+          <div className="sa-selection admin-selection-inline">
+            <span className="sa-selection-count">已选 {selectedNodes.length}</span>
+            {selectedVisibleCount !== selectedNodes.length && (
+              <span className="sa-muted">当前结果 {selectedVisibleCount}</span>
             )}
+            <span className="sa-selection-actions">
+              <SaButton variant="outline" size="sm" onClick={batchHideNodes}><EyeOff size={14} /> 完全隐藏</SaButton>
+              <SaButton variant="destructive" size="sm" onClick={() => setBatchDeleteOpen(true)}><Trash2 size={14} /> 删除</SaButton>
+              <SaButton variant="outline" size="sm" onClick={() => setSelectedNodes([])}>清除</SaButton>
+            </span>
+          </div>
+        )}
 
-            <Select.Root value={selectedGroup} onValueChange={setSelectedGroup}>
-              <Select.Trigger className="admin-filter-group-select" aria-label="分组筛选" />
-              <Select.Content>
-                <Select.Item value="all">全部分组</Select.Item>
-                {groups.map((group) => (
-                  <Select.Item key={group} value={group}>{group}</Select.Item>
-                ))}
-              </Select.Content>
-            </Select.Root>
-
-            <Flex className="admin-sort-controls" gap="2" align="center">
-              <SegmentedControl.Root value={sortKey} onValueChange={(value) => setSortKey(value as AdminSortKey)} size="1">
-                <SegmentedControl.Item value="manual">手动</SegmentedControl.Item>
-                <SegmentedControl.Item value="name">名称</SegmentedControl.Item>
-                <SegmentedControl.Item value="status">状态</SegmentedControl.Item>
-              </SegmentedControl.Root>
-              <Button className="admin-sort-dir-button" variant="soft" size="1" disabled={sortKey === 'manual'} onClick={() => setSortDir((value) => value === 'asc' ? 'desc' : 'asc')}>
-                {sortDir === 'asc' ? '升序' : '降序'}
-              </Button>
-            </Flex>
-            <Button className="admin-add-server-button" size="1" onClick={() => setAddOpen(true)}><Plus size={16} /> 添加服务器</Button>
-          </Flex>
-        </Flex>
-      </Card>
-
-      <Card className="admin-node-card-panel">
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-          <SortableContext items={filteredUuids} strategy={rectSortingStrategy}>
-            <Flex className="admin-node-card-panel-header" justify="between" align="center" gap="2">
-              <Text size="2" weight="bold">服务器节点</Text>
-              <Flex align="center" gap="2">
-                <Text size="1" color="gray">{clientsReady ? `当前 ${filtered.length} 个` : '数量未知'}</Text>
-                <Checkbox checked={allFilteredSelected} onCheckedChange={toggleSelectAll} />
-              </Flex>
-            </Flex>
-            {filtered.length === 0 ? (
-              <Text align="center" color="gray" style={{ display: 'block', padding: 24 }}>{!clientsReady ? '请重试读取服务器列表' : search ? '未找到匹配的服务器' : '暂无服务器'}</Text>
-            ) : (
-              <div className="admin-node-card-grid">
-                {filtered.map((client) => (
-                  <SortableNodeCard
-                    key={client.uuid}
-                    node={client}
-                    selected={selectedNodes.includes(client.uuid)}
-                    onSelect={toggleSelect}
-                    liveData={liveData}
-                    dragDisabled={dragDisabled}
-                    onDetail={(c) => { setDetailClient(c); setDetailOpen(true); }}
-                    onEdit={(c) => { setEditClient(c); setEditOpen(true); }}
-                    onDelete={(c) => { setDeleteClient(c); setDeleteOpen(true); }}
-                    onCmd={(c) => { setCmdClient(c); setCmdOpen(true); }}
-                    onRotateToken={(c) => { setRotateTokenClient(c); setRotateTokenOpen(true); }}
-                  />
-                ))}
-              </div>
-            )}
+          <SortableContext items={filteredUuids} strategy={verticalListSortingStrategy}>
+            <div className="sa-table-scroll">
+              <table className="sa-table">
+                <thead>
+                  <tr>
+                    <th className="sa-td-narrow" aria-label="排序" />
+                    <th className="sa-td-narrow">
+                      <SaCheckbox
+                        checked={allFilteredSelected}
+                        indeterminate={selectedVisibleCount > 0 && !allFilteredSelected}
+                        onCheckedChange={toggleSelectAll}
+                        aria-label="选择当前全部服务器"
+                      />
+                    </th>
+                    <th>服务器</th>
+                    <th>状态</th>
+                    <th className="sa-col-md">IP 地址</th>
+                    <th className="sa-col-md">分组</th>
+                    <th className="sa-col-lg">Agent</th>
+                    <th className="sa-col-xl">系统</th>
+                    <th className="sa-col-lg">账单</th>
+                    <th className="sa-td-actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.length === 0 ? (
+                    <tr>
+                      <td colSpan={10} className="sa-empty">{!clientsReady ? '请重试读取服务器列表' : search ? '未找到匹配的服务器' : '暂无服务器'}</td>
+                    </tr>
+                  ) : filtered.map((client) => (
+                    <SortableNodeRow
+                      key={client.uuid}
+                      node={client}
+                      selected={selectedNodes.includes(client.uuid)}
+                      onSelect={toggleSelect}
+                      liveData={liveData}
+                      dragDisabled={dragDisabled}
+                      onDetail={(c) => { setDetailClient(c); setDetailOpen(true); }}
+                      onEdit={(c) => { setEditClient(c); setEditOpen(true); }}
+                      onDelete={(c) => { setDeleteClient(c); setDeleteOpen(true); }}
+                      onCmd={(c) => { setCmdClient(c); setCmdOpen(true); }}
+                      onRotateToken={(c) => { setRotateTokenClient(c); setRotateTokenOpen(true); }}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </SortableContext>
         </DndContext>
-      </Card>
+        <div className="sa-table-footer">{clientsReady ? `当前 ${filtered.length} 个，共 ${clients.length} 个` : '数量未知'}</div>
+      </SaCard>
       <BatchDeleteDialog
         count={selectedNodes.length}
         open={batchDeleteOpen}
@@ -1290,21 +1252,20 @@ export default function AdminDashboard() {
       }} />
       {detailClient && <DetailDialog client={detailClient} open={detailOpen} onOpenChange={setDetailOpen} />}
       {cmdClient && <GenerateCommandDialog client={cmdClient} open={cmdOpen} onOpenChange={setCmdOpen} />}
-    </Flex>
+    </div>
   );
 }
 
 function BatchDeleteDialog({ count, open, onOpenChange, onConfirm }: { count: number; open: boolean; onOpenChange: (v: boolean) => void; onConfirm: () => void }) {
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Content aria-describedby={undefined} style={{ maxWidth: 400 }}>
-        <Dialog.Title>批量删除确认</Dialog.Title>
-        <Text size="2">确定要删除选中的 {count} 个节点吗？此操作不可撤销。</Text>
-        <Flex gap="3" justify="end" mt="4">
-          <Button variant="soft" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button color="red" onClick={onConfirm}>确认删除 {count} 个节点</Button>
-        </Flex>
-      </Dialog.Content>
-    </Dialog.Root>
+    <ConfirmDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="批量删除确认"
+      description={`确定要删除选中的 ${count} 个节点吗？此操作不可撤销。`}
+      confirmLabel={`确认删除 ${count} 个节点`}
+      destructive
+      onConfirm={onConfirm}
+    />
   );
 }

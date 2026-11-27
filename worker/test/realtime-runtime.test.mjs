@@ -59,6 +59,13 @@ test('AUD-30/32/35/37: actual Durable Objects preserve bounded reports, all Ping
       select count(distinct item.key)::int as count from ping_snapshots p
       cross join lateral jsonb_each(p.values_json) item where p.client='runtime-node'
     `)).rows[0].count === 1000, 15000);
+    const sameRound = (await f.database.query(`
+      select values_json from ping_snapshots where client='runtime-node' and time=$1
+    `, [new Date(timestamp).toISOString()])).rows;
+    assert.equal(sameRound.length, 1);
+    assert.equal(Object.keys(sameRound[0].values_json).length, 1000);
+    assert.equal(sameRound[0].values_json['1'], 10);
+    assert.equal(sameRound[0].values_json['1000'], 10);
   });
 
   await t.test('HTTP state survives a native Worker restart when history is disabled', async () => {

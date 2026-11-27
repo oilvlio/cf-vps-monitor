@@ -7,7 +7,10 @@ const severities = ['info', 'low', 'moderate', 'high', 'critical'];
 
 function requireSuccessfulScan(name, result) {
   if (result.error || result.status !== 0 || typeof result.stdout !== 'string') {
-    const detail = result.error?.message || result.stderr || result.stdout || 'scanner did not complete';
+    // govulncheck prints its findings on stdout and only download progress on stderr,
+    // so showing stderr alone hides the actual vulnerabilities. Show both.
+    const output = [result.stdout, result.stderr].filter(part => typeof part === 'string' && part.trim()).join('\n');
+    const detail = result.error?.message || output || 'scanner did not complete';
     throw new Error(`${name} failed (exit ${result.status ?? 'unavailable'}):\n${String(detail).trim().slice(0, 12000)}`);
   }
 }

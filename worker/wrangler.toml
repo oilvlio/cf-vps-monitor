@@ -1,3 +1,6 @@
+# 本地 wrangler dev / wrangler types 读取本文件（工作目录 worker/）。
+# 生产部署读取仓库根目录的 wrangler.toml；[assets] 与 [observability] 两边必须一致，
+# scripts/wrangler-config.test.mjs 会校验。
 name = "cf-vps-monitor"
 main = "src/index.ts"
 compatibility_date = "2026-06-21"
@@ -5,10 +8,13 @@ compatibility_flags = ["nodejs_compat"]
 
 [observability]
 enabled = true
+# 只对错误路径全量记录：关闭每个请求的 invocation 日志（agent 每 3 秒上报 +
+# 每 2 分钟 cron 会产生大量噪音，很容易吃满免费额度）。worker 代码只在错误 /
+# 降级路径写 console.error / console.warn，所以采样率保持 1，确保这些日志不被丢弃。
 head_sampling_rate = 1
 
 [observability.logs]
-invocation_logs = true
+invocation_logs = false
 head_sampling_rate = 1
 
 [placement]
@@ -16,6 +22,73 @@ mode = "smart"
 
 [triggers]
 crons = ["*/2 * * * *"]
+
+# 高频入口只用原生 Rate Limiting 绑定（按机房近似计数，不占 DO 请求 / 写入额度）；
+# 敏感低频入口（管理员恢复 POST、Agent 鉴权失败、setup 初始化）仍走 RATE_LIMIT DO。
+# 与根目录 wrangler.toml 保持一致，scripts/wrangler-config.test.mjs 会校验。
+[[ratelimits]]
+name = "RATE_LIMIT_5"
+namespace_id = "4039125"
+
+  [ratelimits.simple]
+  limit = 5
+  period = 60
+
+[[ratelimits]]
+name = "RATE_LIMIT_20"
+namespace_id = "4039120"
+
+  [ratelimits.simple]
+  limit = 20
+  period = 60
+
+[[ratelimits]]
+name = "RATE_LIMIT_30"
+namespace_id = "4039130"
+
+  [ratelimits.simple]
+  limit = 30
+  period = 60
+
+[[ratelimits]]
+name = "RATE_LIMIT_60"
+namespace_id = "4039160"
+
+  [ratelimits.simple]
+  limit = 60
+  period = 60
+
+[[ratelimits]]
+name = "RATE_LIMIT_120"
+namespace_id = "4039121"
+
+  [ratelimits.simple]
+  limit = 120
+  period = 60
+
+[[ratelimits]]
+name = "RATE_LIMIT_180"
+namespace_id = "4039180"
+
+  [ratelimits.simple]
+  limit = 180
+  period = 60
+
+[[ratelimits]]
+name = "RATE_LIMIT_240"
+namespace_id = "4039240"
+
+  [ratelimits.simple]
+  limit = 240
+  period = 60
+
+[[ratelimits]]
+name = "RATE_LIMIT_3000"
+namespace_id = "4039200"
+
+  [ratelimits.simple]
+  limit = 3000
+  period = 60
 
 [[durable_objects.bindings]]
 name = "LIVE_DATA"
@@ -38,5 +111,6 @@ SUPABASE_URL = "https://PROJECT_REF.supabase.co"
 
 [assets]
 directory = "../frontend/dist"
+binding = "ASSETS"
 not_found_handling = "single-page-application"
-run_worker_first = ["/api/*", "/ping", "/agent/*"]
+run_worker_first = ["/*", "!/assets/*"]

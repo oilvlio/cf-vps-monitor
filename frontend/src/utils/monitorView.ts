@@ -36,15 +36,26 @@ export interface AdminFilterOptions extends MonitorFilterOptions {
   sortDir?: 'asc' | 'desc';
 }
 
-export function normalizeLiveData(rawLiveData: any): LiveDataMap {
-  if (!rawLiveData) return { online: [], data: {}, statusReady: false };
+type RawLiveClient = Partial<LiveRecord> & { uuid?: string; online?: boolean };
 
-  const online = [...(rawLiveData.online || [])] as string[];
+interface RawLiveData {
+  online?: string[];
+  data?: Record<string, LiveRecord>;
+  clients?: RawLiveClient[];
+  last_known?: LiveDataMap['last_known'];
+  statusReady?: boolean;
+}
+
+export function normalizeLiveData(payload: unknown): LiveDataMap {
+  if (!payload || typeof payload !== 'object') return { online: [], data: {}, statusReady: false };
+  const rawLiveData = payload as RawLiveData;
+
+  const online = [...(rawLiveData.online || [])];
   const data: Record<string, LiveRecord> = {};
 
   if (rawLiveData.data) {
     for (const [uuid, record] of Object.entries(rawLiveData.data)) {
-      data[uuid] = record as LiveRecord;
+      data[uuid] = record;
     }
   }
 

@@ -38,8 +38,7 @@ test('AUD-01/AUD-05: actual workerd, middleware and PostgreSQL enforce complete 
       const pattern = new RegExp(`${owner}\\.(get|post|put|patch|delete)\\('([^']+)'`, 'g');
       for (const match of source.matchAll(pattern)) routes.push([match[1].toUpperCase(), prefix + match[2]]);
     }
-    routes.push(['POST', '/api/admin/cron/run']);
-    assert.ok(routes.length >= 60);
+    assert.ok(routes.length >= 50);
     for (const [method, template] of routes) {
       const path = template.replace(/:uuid/g, 'synthetic-node').replace(/:id/g, '1').replace(/:short/g, 'synthetic-theme');
       const response = await f.fetch(path, { method, ...(method === 'GET' ? {} : { body: '{}' }) });

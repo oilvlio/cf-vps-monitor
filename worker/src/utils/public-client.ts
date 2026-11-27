@@ -18,7 +18,7 @@ export const PUBLIC_CLIENT_FIELDS = [
   'disk_total', 'version', 'price', 'billing_cycle', 'auto_renewal', 'currency',
   'expired_at', 'group', 'tags', 'hidden', 'traffic_limit', 'traffic_limit_type',
   'traffic_reset_day', 'sort_order', 'created_at', 'updated_at',
-] as const;
+] as const satisfies readonly (keyof PublicClientRow)[];
 
 function pickFields<T extends object, K extends keyof T>(source: T, keys: readonly K[]): Pick<T, K> {
   const result = {} as Pick<T, K>;

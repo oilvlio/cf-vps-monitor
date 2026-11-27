@@ -34,7 +34,6 @@ test-results/
 design-previews/
 .superpowers/
 .worktrees/
-cf-monitor-encrypted-backup-*.json
 
 # Logs
 *.log

@@ -11,22 +11,32 @@
 import { normalizeMonitorReport, toMonitorRecord, type MonitorReportPayload } from '../utils/monitor-report';
 import * as db from '../db/queries';
 import { getDatabase, type DatabaseProviderEnv } from '../db/provider';
-import { MAX_PING_RESULTS_PER_REPORT, MAX_PING_VALUE_MS, PING_LOSS_VALUE, validatePingResults } from '../utils/ping-result';
+import { validatePingResults } from '../utils/ping-result';
 import {
+  PING_RAW_RETENTION_DEFAULT_HOURS,
+  PING_RAW_RETENTION_MAX_HOURS,
+  RAW_RETENTION_MIN_HOURS,
   buildAdminSettings,
   isRecordPersistenceEnabled as normalizeRecordPersistenceEnabled,
 } from '../settings/schema';
 import { bestEffortRecordHealthEvent, errorDetail, type StoredHealthComponent } from '../utils/observability';
 import { isPublicIpAddress } from '../utils/request-ip';
 import { unwrapMonitorReportEnvelope } from '../utils/report-envelope';
-import { isRecordPersistDue } from '../utils/record-persist';
-import { checkWebsiteMonitorHttp } from '../utils/website-monitor';
+import {
+  collectTrafficSamples, estimateTrafficDelta, localDateKey, nextTrafficBase, normalizeResetDay, parseTrafficImport,
+  parseTrafficSample, selectDueSamples, TRAFFIC_APPLY_MIN_GAP_MS, trafficPeriodStart, type TrafficSample,
+} from '../utils/traffic-samples';
+import { isRecordPersistDue, recordPersistThresholdMs } from '../utils/record-persist';
 import { toPublicReport } from '../utils/public-report';
 import { projectAgentClientMetadata, projectClientMetadata } from '../utils/client-metadata';
+import { notifyReportedIpChange } from '../utils/ip-change';
 import { compactLiveReport, serializedBytes } from '../utils/live-report-state';
 import { evaluateHistoryCapacity } from '../utils/history-capacity';
-import { MAX_BACKUP_BYTES } from '../utils/backup';
-import { measureRestoredClientSnapshot, restoredClientMetadata } from '../utils/restore-client-snapshot';
+import { buildMonitorNodeFromStatic, buildMonitorStaticNodesFromClients, monitorTrafficWithTotals, type MonitorNodeStatic } from '../monitor/contract';
+import { gzipSync, strToU8 } from 'fflate';
+import { agentPingTasksForClient, pingPolicyVersion } from '../utils/agent-ping-policy';
+import { verifyAdminToken } from '../auth/jwt';
+import { validateAdminSession } from '../auth/admin-session';
 
 // 客户端状态
 interface ClientState {
@@ -43,7 +53,6 @@ interface ReportLifecycle {
   clientId: string;
   receivedAt: number;
   removalVersion: number;
-  restoreVersion: number;
 }
 
 const RECORD_PERSIST_INTERVAL_MS = 120_000;
@@ -51,15 +60,12 @@ const PING_RECORD_PERSIST_INTERVAL_MS = 120_000;
 const MIN_RECORD_PERSIST_INTERVAL_MS = 3_000;
 const MAX_RECORD_PERSIST_INTERVAL_MS = 3_600_000;
 const MIN_PING_RECORD_PERSIST_INTERVAL_MS = 60_000;
+// 按用户配置的原始 Ping 保留期留一整天安全余量，避免迟到样本命中已删除分区。
+const DEFAULT_PING_OBSERVED_MAX_AGE_MS = (PING_RAW_RETENTION_DEFAULT_HOURS - 24) * 60 * 60 * 1000;
 const MAX_PING_RECORD_PERSIST_INTERVAL_MS = 3_600_000;
 const RECORD_SETTING_CACHE_MS = 30_000;
 const LIVE_VIEWER_WS_PROTOCOL = 'cf-monitor-viewer';
-const RECORD_HIGH_WATERMARK_DEFAULT_ROWS = 700_000;
-const RECORD_HIGH_WATERMARK_MIN_ROWS = 1_000;
-const RECORD_HIGH_WATERMARK_MAX_ROWS = 10_000_000;
-// 字节熔断线：Supabase 卡的是磁盘字节，行数只是它的粗糙代理
-//（同样行数可能对应 72MB 也可能 189MB，且行数完全不含索引开销）。
-// 行数熔断保留为次要边界，两者谁先到就熔断谁。
+// 字节熔断线直接按分区树实际分配空间判断。
 const RECORD_HIGH_WATERMARK_DEFAULT_BYTES = 419_430_400;
 const RECORD_HIGH_WATERMARK_MIN_BYTES = 16_777_216;
 const RECORD_HIGH_WATERMARK_MAX_BYTES = 549_755_813_888;
@@ -70,8 +76,6 @@ const RECORD_CAPACITY_AUDIT_THROTTLE_MS = 10 * 60 * 1000;
 const HOT_PATH_HEALTH_OK_THROTTLE_MS = 60 * 60 * 1000;
 const POLICY_SETTING_CACHE_MS = 30_000;
 const PING_TASK_CACHE_MS = 120_000;
-const WEBSITE_PROBE_TASK_CACHE_MS = 120_000;
-const AGENT_POLICY_OPTIONAL_ERROR_THROTTLE_MS = 5 * 60 * 1000;
 const RECORD_CAPACITY_SNAPSHOT_KEY = 'record:capacity:snapshot';
 const AGENT_POLICY_SETTING_KEYS = [
   'live_poll_active_interval_sec',
@@ -83,7 +87,7 @@ const RECORD_PERSISTENCE_SETTING_KEYS = [
   'record_enabled',
   'record_persist_interval_sec',
   'ping_record_persist_interval_sec',
-  'record_high_watermark_rows',
+  'ping_record_preserve_time',
   'record_high_watermark_bytes',
 ];
 const HTTP_CLIENT_MIN_TTL_MS = 30_000;
@@ -92,7 +96,6 @@ const HTTP_CLIENT_MAX_TTL_MS = 24 * 60 * 60 * 1000;
 const HTTP_CLIENT_REPORT_MAX_BODY_BYTES = 512 * 1024;
 const HTTP_CLIENT_META_MAX_BODY_BYTES = 16 * 1024;
 const HTTP_ADMIN_CLIENTS_SNAPSHOT_MAX_BODY_BYTES = 256 * 1024;
-const HTTP_PING_RESULT_MAX_BODY_BYTES = 64 * 1024;
 const AGENT_WS_MAX_MESSAGE_BYTES = 512 * 1024;
 // Cloudflare permits 16,384 bytes; leave room for structured-clone overhead.
 const AGENT_ATTACHMENT_BUDGET_BYTES = 12 * 1024;
@@ -103,22 +106,26 @@ const VIEWER_DEFAULT_TTL_MS = 120 * 1000;
 const VIEWER_MAX_TOTAL_SESSIONS = 128;
 const VIEWER_MAX_SESSIONS_PER_IP = 8;
 const PING_RESULT_STORAGE_PREFIX = 'ping-result:';
-const PING_VALUE_CHANGE_THRESHOLD_MS = 5;
-const PING_UNCHANGED_HEARTBEAT_MS = 30 * 60_000;
-const GPU_SNAPSHOT_META_PREFIX = 'gpu-snapshot-meta:';
-const GPU_SNAPSHOT_UNCHANGED_HEARTBEAT_MS = 30 * 60_000;
-const GPU_UTILIZATION_BUCKET_PERCENT = 5;
-const GPU_TEMPERATURE_BUCKET_C = 2;
-const GPU_MEMORY_BUCKET_MIN_UNITS = 64;
-const GPU_MEMORY_BUCKET_RATIO = 0.01;
+// Ping 快照不做「值没变就不落库」的压缩：保留期内按落库间隔全量保存，
+// 详情页与 Monitor 按 hours/points 和保留期选择 raw/rollup 网格（见 history-bucket.ts），
+// 首页探测点的最新 24 格（utils/home-ping.ts）按落库间隔读取。
 const ADMIN_CLIENTS_SNAPSHOT_KEY = 'admin-clients:snapshot';
+// monitor 主题契约的 /api/ws：帧本身是全量快照，节流只是避免同一轮上报刷屏。
+// 真正的推送节奏跟 agent 上报（3–5s）走，不复制上游 hub 的 2s。
+const MONITOR_FRAME_MIN_INTERVAL_MS = 2_000;
+const MONITOR_WS_HEARTBEAT_MS = 15_000;
+const MONITOR_WS_HEARTBEAT_KEY = 'monitor:ws_heartbeat_at';
+const MONITOR_FRAME_PENDING_KEY = 'monitor:frame_pending_at';
+// monitor 静态投影与当日/累计流量的自刷新间隔。DO 不再依赖 Worker 推送，
+// 有订阅者时按这个节奏自行从元数据/数据库派生。
+const MONITOR_DATA_REFRESH_MS = 60_000;
 const AGENT_AUTH_SNAPSHOT_PREFIX = 'agent-auth:';
 const AGENT_AUTH_UUID_PREFIX = 'agent-auth-uuid:';
 const GEO_REGION_CACHE_MS = 48 * 60 * 60 * 1000;
-type SessionRole = 'agent' | 'viewer';
+type SessionRole = 'agent' | 'viewer' | 'monitor';
 type AgentPolicyMode = 'active' | 'idle';
 type JsonObject = Record<string, unknown>;
-type LiveDataEnv = DatabaseProviderEnv & Record<string, unknown>;
+type LiveDataEnv = DatabaseProviderEnv & { JWT_SECRET?: string } & Record<string, unknown>;
 
 interface LiveSnapshotClient extends JsonObject {
   uuid: string;
@@ -154,7 +161,6 @@ interface AgentPolicyMessage {
   ping_interval_sec: number;
   ping_policy_version: string;
   ping_tasks: db.PingTask[];
-  website_probe_tasks: db.WebsiteMonitor[];
   policy_ttl_sec: number;
   idle_policy_ttl_sec: number;
   // 只有在后台确实存有该节点的重置日时才下发；缺省时探针保留自己的
@@ -266,12 +272,13 @@ function normalizeAgentAuthSnapshot(value: unknown): AgentAuthSnapshot | null {
     billing_cycle: numberField(value, 'billing_cycle'),
     auto_renewal: booleanField(value, 'auto_renewal'),
     currency: stringField(value, 'currency'),
-    expired_at: stringField(value, 'expired_at'),
+    expired_at: nullableStringField(value, 'expired_at'),
     group: stringField(value, 'group'),
     tags: stringField(value, 'tags'),
     hidden: booleanField(value, 'hidden'),
     traffic_limit: numberField(value, 'traffic_limit'),
     traffic_limit_type: stringField(value, 'traffic_limit_type') || 'sum',
+    traffic_reset_day: numberField(value, 'traffic_reset_day') || 1,
     created_at: stringField(value, 'created_at'),
     updated_at: stringField(value, 'updated_at'),
   };
@@ -306,27 +313,20 @@ interface PingPersistenceResult {
   taskId: number;
   value: number;
   intervalSec?: number;
+  /** Agent 记录的探测开始时间；缺省表示老版本 Agent，沿用收到报告的时间。 */
+  observedAtMs?: number;
 }
 
 interface PingResultState {
   lastAcceptedMs: number;
-  value?: number;
-  persistedAt?: number;
-}
-
-interface GPUSnapshotMeta {
-  signature: string;
-  persistedAt: number;
 }
 
 interface RecordCapacitySnapshot {
-  measurement: 'live-row-bytes-plus-index-estimate';
-  rows: number;
+  measurement: 'partition-tree-bytes';
   bytes: number;
   blocked: boolean;
   checkedAt: number;
   nextCheckAt: number;
-  highWatermarkRows: number;
   highWatermarkBytes: number;
 }
 
@@ -365,12 +365,13 @@ interface AgentAuthSnapshot extends JsonObject {
   billing_cycle: number;
   auto_renewal: boolean;
   currency: string;
-  expired_at: string;
+  expired_at: string | null;
   group: string;
   tags: string;
   hidden: boolean;
   traffic_limit: number;
   traffic_limit_type: string;
+  traffic_reset_day: number;
   sort_order?: number;
   created_at: string;
   updated_at: string;
@@ -394,6 +395,18 @@ interface SessionAttachment {
   lastReport?: MonitorReportPayload;
   lastReportTime?: number;
   expiresAt?: number;
+  /** monitor 主题契约的 /api/ws：客户端带了 ?gzip 时发 gzip 二进制帧。 */
+  gzip?: boolean;
+  /** monitor 主题契约的 /api/ws：该连接是否由管理员建立（每连接独立，不进共享 meta）。 */
+  admin?: boolean;
+  /** Internal credential, persisted only in the socket attachment for revalidation. */
+  adminToken?: string;
+}
+
+interface MonitorFrameContent {
+  text: string;
+  /** 同一轮广播内复用，避免每个 gzip 订阅连接重复压缩。 */
+  gzipBuffer?: ArrayBuffer;
 }
 
 export function normalizeViewerTtlMs(value: unknown): number {
@@ -412,17 +425,15 @@ export class LiveDataDO {
   private lastKnownClients = new Map<string, ClientState>();
   private clientReportWrites = new Map<string, Promise<unknown>>();
   private clientRemovalVersions = new Map<string, number>();
-  private restoreVersion = 0;
   private httpClientsReady: Promise<void>;
   private recordPersistenceEnabled: boolean = true;
   private recordPersistIntervalMs: number = RECORD_PERSIST_INTERVAL_MS;
   private pingRecordPersistIntervalMs: number = PING_RECORD_PERSIST_INTERVAL_MS;
+  private pingObservedMaxAgeMs: number = DEFAULT_PING_OBSERVED_MAX_AGE_MS;
   private recordPersistenceCheckedAt: number = 0;
-  private recordHighWatermarkRows: number = RECORD_HIGH_WATERMARK_DEFAULT_ROWS;
   private recordHighWatermarkBytes: number = RECORD_HIGH_WATERMARK_DEFAULT_BYTES;
   private recordCapacityBytes: number = 0;
   private recordCapacityNextCheckAt: number = 0;
-  private recordCapacityRows: number = 0;
   private recordCapacityBlocked: boolean = false;
   private recordCapacityLastAuditAt: number = 0;
   private healthOkLastWriteAt: Map<string, number> = new Map();
@@ -439,16 +450,42 @@ export class LiveDataDO {
   private policySettingsPending: Promise<AgentPolicySettings> | null = null;
   private pingTasksCache: { value: db.PingTask[]; expiresAt: number } | null = null;
   private pingTasksPending: Promise<db.PingTask[]> | null = null;
-  private websiteProbeTasksCache: Map<string, { value: db.WebsiteMonitor[]; expiresAt: number }> = new Map();
-  private websiteProbeTasksPending: Map<string, Promise<db.WebsiteMonitor[]>> = new Map();
-  private policyOptionalErrorLastWriteAt: Map<string, number> = new Map();
+  private pingTaskTimeouts: db.PingTaskClientTimeout[] = [];
   private adminClientsUpdatedAt: number | null = null;
   private adminClientsSnapshot: AdminClientsSnapshot | null = null;
   private adminClientMetadata = new Map<string, JsonObject>();
+  // monitor 主题的静态节点投影：由本对象从 admin 元数据（缺失时回退数据库）自行
+  // 派生，不再由 Worker 推送。每帧只合入实时数据；`monitorTrafficTotals` 按
+  // MONITOR_DATA_REFRESH_MS 节流刷新，且只在存在 monitor 订阅者时才刷新。
+  // 只保留公开节点；admin 是每个订阅连接自己的属性（见 SessionAttachment.admin）。
+  private monitorStaticNodes: MonitorNodeStatic[] | null = null;
+  // 管理员连接用的投影：多出 hidden 节点（public: false）。没有隐藏节点时与上面同一个数组。
+  private monitorStaticNodesAdmin: MonitorNodeStatic[] | null = null;
+  private monitorTrafficTotals: Record<string, db.MonitorTrafficTotals> = {};
+  private monitorDataRefreshedAt = 0;
+  private monitorDataPending: Promise<void> | null = null;
+  private monitorRefreshBroadcastPending = false;
+  private monitorFrameAt = 0;
+  private monitorFramePendingAt = 0;
   private trafficResetDays = new Map<string, number>();
   private trafficResetDaysAt = 0;
+  // 流量统计：每个节点最近一次由数据库返回的当前周期合计（用来覆盖 report 的 net_total_*），
+  // 以及对数据库故障告警的节流时间戳。仅内存：DO 重启后第一份 report 会立刻重新取一次。
+  private trafficTotals = new Map<string, {
+    up: number;
+    down: number;
+    /** 这份合计对应的周期起始日；null 表示还没有从数据库取到过。 */
+    periodStart: string | null;
+    /** 最近一次成功交给数据库的样本时间（毫秒）。 */
+    lastAppliedTs?: number;
+    /** 与 up/down 同时更新的基线样本：up/down 对应「数据库已记到这个样本为止」的合计。 */
+    base?: TrafficSample;
+    inFlight: boolean;
+  }>();
+  private trafficErrorAt = new Map<string, number>();
   private networkMetadataSignatures = new Map<string, { signature: string; syncedAt: number }>();
   private basicInfoSignatures = new Map<string, string>();
+  private networkMetadataLifecycles = new Map<string, object>();
   private metadataSyncQueues = new Map<string, Promise<void>>();
   private pingWriteQueues = new Map<string, Promise<unknown>>();
   private geoRegionCache = new Map<string, { region: string; expiresAt: number }>();
@@ -466,6 +503,11 @@ export class LiveDataDO {
 
   private async hydrateHttpClients(): Promise<void> {
     await this.readAdminClientsSnapshot();
+    const pendingAt = await this.state.storage.get<number>(MONITOR_FRAME_PENDING_KEY);
+    if (typeof pendingAt === 'number' && Number.isFinite(pendingAt) && pendingAt > 0) {
+      this.monitorFramePendingAt = pendingAt;
+      this.monitorFrameAt = pendingAt - MONITOR_FRAME_MIN_INTERVAL_MS;
+    }
     const now = Date.now();
     const stored = await this.state.storage.list<ClientState>({ prefix: HTTP_LIVE_STATE_PREFIX });
     const obsolete: string[] = [];
@@ -517,7 +559,7 @@ export class LiveDataDO {
     for (let offset = 0; offset < obsolete.length; offset += 128) {
       await this.state.storage.delete(obsolete.slice(offset, offset + 128));
     }
-    if (stored.size) await this.scheduleExpiryAlarm(now);
+    if (stored.size || this.viewerExpiresAt.size) await this.scheduleExpiryAlarm(now);
   }
 
   private async persistClientSnapshot(client: ClientState): Promise<void> {
@@ -558,7 +600,7 @@ export class LiveDataDO {
     const attachment = ws.deserializeAttachment();
     if (!attachment || typeof attachment !== 'object') return null;
     const value = attachment as Partial<SessionAttachment>;
-    if (value.role !== 'agent' && value.role !== 'viewer') return null;
+    if (value.role !== 'agent' && value.role !== 'viewer' && value.role !== 'monitor') return null;
     if (typeof value.clientId !== 'string' || value.clientId.trim() === '') return null;
     return {
       role: value.role,
@@ -587,14 +629,22 @@ export class LiveDataDO {
       expiresAt: typeof value.expiresAt === 'number' && Number.isFinite(value.expiresAt)
         ? value.expiresAt
         : undefined,
+      gzip: value.gzip === true,
+      admin: value.admin === true,
+      adminToken: typeof value.adminToken === 'string' ? value.adminToken : undefined,
     };
   }
 
   private registerSession(ws: WebSocket, attachment: SessionAttachment): void {
+    // Older Monitor attachments have no deadline. Assign and persist one once,
+    // so a hibernation wake cannot keep extending their remaining lifetime.
+    if (attachment.role === 'monitor' && !attachment.viewerExpiresAt) {
+      attachment = { ...attachment, viewerExpiresAt: Date.now() + normalizeViewerTtlMs(this.policySettings.viewerTtlSec * 1000) };
+    }
     ws.serializeAttachment(attachment);
     this.sessions.set(attachment.clientId, ws);
     this.sessionRoles.set(attachment.clientId, attachment.role);
-    if (attachment.role === 'viewer' && attachment.viewerExpiresAt) {
+    if ((attachment.role === 'viewer' || attachment.role === 'monitor') && attachment.viewerExpiresAt) {
       this.viewerExpiresAt.set(attachment.clientId, attachment.viewerExpiresAt);
     } else {
       this.viewerExpiresAt.delete(attachment.clientId);
@@ -606,17 +656,11 @@ export class LiveDataDO {
     for (const ws of this.state.getWebSockets()) {
       const attachment = this.getSessionAttachment(ws);
       if (!attachment) continue;
-      if (attachment.role === 'viewer' && attachment.viewerExpiresAt && attachment.viewerExpiresAt <= now) {
+      if ((attachment.role === 'viewer' || attachment.role === 'monitor') && attachment.viewerExpiresAt && attachment.viewerExpiresAt <= now) {
         this.expireViewer(attachment.clientId, ws, now);
         continue;
       }
-      this.sessions.set(attachment.clientId, ws);
-      this.sessionRoles.set(attachment.clientId, attachment.role);
-      if (attachment.role === 'viewer' && attachment.viewerExpiresAt) {
-        this.viewerExpiresAt.set(attachment.clientId, attachment.viewerExpiresAt);
-      } else {
-        this.viewerExpiresAt.delete(attachment.clientId);
-      }
+      this.registerSession(ws, attachment);
       if (
         attachment.role === 'agent' &&
         attachment.lastReport &&
@@ -641,6 +685,9 @@ export class LiveDataDO {
       token,
       authorization,
       password,
+      // This value is derived below from the accepted traffic sample, never from
+      // Agent-controlled report fields.
+      traffic_period_start: _untrustedTrafficPeriodStart,
       ...safeReport
     } = report as MonitorReportPayload & Record<string, unknown>;
 
@@ -745,15 +792,256 @@ export class LiveDataDO {
   }
 
   private sendSnapshot(ws: WebSocket) {
-    if (ws.readyState !== WebSocket.READY_STATE_OPEN) return;
-    const includeHidden = this.getSessionAttachment(ws)?.includeHidden === true;
-    try {
-      ws.send(JSON.stringify({
+    this.state.waitUntil(this.sendViewerMessage(ws, () => {
+      const includeHidden = this.getSessionAttachment(ws)?.includeHidden === true;
+      return JSON.stringify({
         type: 'snapshot',
         ...this.buildSnapshot(includeHidden),
-      }));
-    } catch (error) {
-      // Viewer snapshots are best effort; HTTP fallback will retry.
+      });
+    }));
+  }
+
+  private async sendViewerMessage(ws: WebSocket, payload: () => string): Promise<void> {
+    const attachment = this.getSessionAttachment(ws);
+    if (!attachment || ws.readyState !== WebSocket.READY_STATE_OPEN) return;
+    if (attachment.viewerExpiresAt && attachment.viewerExpiresAt <= Date.now()) {
+      this.expireViewer(attachment.clientId, ws, Date.now());
+      return;
+    }
+    if (attachment.includeHidden && !await this.validatePrivateViewer(ws, attachment)) return;
+    try { ws.send(payload()); } catch { /* Close/error handlers clean up. */ }
+  }
+
+  private async validatePrivateViewer(ws: WebSocket, attachment: SessionAttachment): Promise<boolean> {
+    try {
+      const payload = attachment.adminToken ? await verifyAdminToken(attachment.adminToken, this.env) : null;
+      const database = this.getQueryDatabase();
+      if (!payload || !database || !await validateAdminSession(database, payload, { fresh: true })) {
+        throw new Error('Admin session expired');
+      }
+    } catch {
+      this.cleanupSession(ws, attachment);
+      try { ws.close(1008, 'Admin session expired'); } catch { /* Best effort. */ }
+      await this.scheduleExpiryAlarm(Date.now());
+      if (this.activeViewerCount(Date.now()) === 0) await this.broadcastAgentPolicy(Date.now(), false);
+      return false;
+    }
+    if (ws.readyState !== WebSocket.READY_STATE_OPEN || this.sessions.get(attachment.clientId) !== ws) return false;
+    if (attachment.viewerExpiresAt && attachment.viewerExpiresAt <= Date.now()) {
+      this.expireViewer(attachment.clientId, ws, Date.now());
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * 从 admin 元数据派生 monitor 的静态投影。
+   *
+   * `adminClientMetadata` 存的是清洗过的 `db.Client` 行（见 writeAdminClientsSnapshot
+   * 与 refreshMonitorData 的兜底），投影逻辑在 monitor/contract.ts 的
+   * buildMonitorStaticNodesFromClients：toPublicClient 白名单 + hidden 过滤 + 与
+   * /api/nodes 一致的排序。
+   */
+  private buildMonitorStaticNodes(): { visible: MonitorNodeStatic[]; admin: MonitorNodeStatic[] } {
+    const admin = buildMonitorStaticNodesFromClients(this.adminClientMetadata.values(), this.monitorTrafficTotals, true);
+    const visible = admin.every(node => node.public) ? admin : admin.filter(node => node.public);
+    return { visible, admin };
+  }
+
+  /**
+   * 有 monitor 订阅者时刷新静态投影与当日/累计流量。
+   *
+   * 元数据优先取 `adminClientMetadata`（随 admin 操作更新并持久化）；冷启动且从未
+   * 有管理员操作过时，DO 自己查一次 `listClients` 兜底，避免首帧为空。
+   * 失败时保留上一份投影，并在下一个刷新周期重试。
+   */
+  private refreshMonitorData(now: number): Promise<void> {
+    if (this.monitorDataPending) return this.monitorDataPending;
+    this.monitorDataPending = (async () => {
+      try {
+        const database = this.getQueryDatabase();
+        if (database && this.adminClientMetadata.size === 0) {
+          const clients = await db.listClients(database);
+          // 兜底行也要过 sanitizeAdminClientSnapshotItem：去掉 token / token_hash、
+          // 清理内网 IP，保持「这个 map 里只有清洗过的数据」的不变量（与
+          // writeAdminClientsSnapshot 写入的行同形）。
+          if (clients.length > 0) {
+            this.adminClientMetadata = new Map(
+              clients
+                .map(client => this.sanitizeAdminClientSnapshotItem(client as unknown as JsonObject))
+                .filter((client): client is JsonObject => Boolean(client))
+                .map(client => [String(client.uuid), client]),
+            );
+          }
+        }
+        const uuids = [...this.adminClientMetadata.keys()];
+        if (database && uuids.length > 0) {
+          // getTrafficTotals 自带 10s 缓存，这里再按 60s 节流，热路径上不会每帧查库。
+          this.monitorTrafficTotals = await db.getTrafficTotals(database, uuids);
+        }
+        const projections = this.buildMonitorStaticNodes();
+        this.monitorStaticNodes = projections.visible;
+        this.monitorStaticNodesAdmin = projections.admin;
+        this.monitorDataRefreshedAt = now;
+      } catch {
+        // 保持最后一次成功的投影（首次失败仍为 null），不广播伪造的空节点或零流量。
+        this.monitorDataRefreshedAt = now - MONITOR_DATA_REFRESH_MS + 5_000;
+      }
+    })().catch(() => undefined).finally(() => {
+      this.monitorDataPending = null;
+    });
+    return this.monitorDataPending;
+  }
+
+  /** 等待静态投影可用；过期时顺带刷新一次（建连/心跳路径用）。 */
+  private async readyMonitorData(): Promise<void> {
+    const now = Date.now();
+    if (this.monitorStaticNodes === null || now - this.monitorDataRefreshedAt >= MONITOR_DATA_REFRESH_MS) {
+      await this.refreshMonitorData(now);
+    }
+  }
+
+  /** 元数据变更后标记投影过期，下一次广播会先刷新再补一帧。 */
+  private invalidateMonitorData(): void {
+    this.monitorDataRefreshedAt = 0;
+  }
+
+  private hasOpenMonitorSubscriber(): boolean {
+    for (const [id, role] of this.sessionRoles) {
+      if (role !== 'monitor') continue;
+      if (this.sessions.get(id)?.readyState === WebSocket.READY_STATE_OPEN) return true;
+    }
+    return false;
+  }
+
+  /**
+   * monitor hub 的 WS 帧：`{admin, nodes}`（与 /api/nodes 同形）。
+   * 只用 DO 内存里的静态投影 + 实时报告拼装，**不查库**；节奏跟随 agent 上报。
+   * `admin` 取该连接建连时的身份，不能存在共享投影里——否则会广播给所有人。
+   */
+  private buildMonitorFrameText(nowMs: number, admin: boolean): string {
+    const meta = admin ? this.monitorStaticNodesAdmin : this.monitorStaticNodes;
+    if (!meta) return JSON.stringify({ admin, nodes: [] });
+    const nodes = meta.map((node) => {
+      // online 只看 this.clients（在线上报表）；lastKnownClients 是离线保留值，
+      // 用来给离线节点提供 last_seen / 周期流量，不代表在线。
+      const liveClient = this.clients.get(node.uuid);
+      const retained = liveClient ?? this.lastKnownClients.get(node.uuid);
+      const online = Boolean(liveClient && (!liveClient.expiresAt || liveClient.expiresAt > nowMs));
+      // 管理员帧里的隐藏节点（public: false）也要带实时数据，否则会显示成离线、全零。
+      const live = retained ? this.projectSnapshotClient(retained, admin && !node.public, !online) : null;
+      return buildMonitorNodeFromStatic({
+        node,
+        live,
+        online,
+        lastReportMs: retained?.lastReportTime ?? 0,
+        // day_*/total_* 用静态投影里的 monitorTrafficTotals（与 /api/nodes 的
+        // monitorTrafficWithTotals 同源），month_* 从实时条目取：否则 metrics
+        // 里的 total_* 会掉成 0，和 /api/nodes 派生路径漂移。
+        traffic: monitorTrafficWithTotals(live, {
+          day_rx: node.day_rx,
+          day_tx: node.day_tx,
+          total_rx: node.total_rx,
+          total_tx: node.total_tx,
+        }),
+        nowMs,
+      });
+    });
+    return JSON.stringify({ admin, nodes });
+  }
+
+  /**
+   * 一帧的 JSON 文本只生成一次；`gzip` 在同一个管理/公开分组内也按需只压一次。
+   * 广播时多个 monitor 连接共用这两个字段，避免每个连接都重新序列化、压缩。
+   */
+  private encodeMonitorFrame(frame: MonitorFrameContent, gzip: boolean): string | ArrayBuffer {
+    if (!gzip) return frame.text;
+    if (!frame.gzipBuffer) {
+      const bytes = gzipSync(strToU8(frame.text));
+      frame.gzipBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    }
+    return frame.gzipBuffer;
+  }
+
+  private async sendMonitorFrame(
+    ws: WebSocket,
+    frame?: MonitorFrameContent,
+    gzip?: boolean,
+  ): Promise<void> {
+    if (ws.readyState !== WebSocket.READY_STATE_OPEN) return;
+    const attachment = this.getSessionAttachment(ws);
+    if (attachment?.viewerExpiresAt && attachment.viewerExpiresAt <= Date.now()) {
+      this.expireViewer(attachment.clientId, ws, Date.now());
+      return;
+    }
+    if (attachment?.admin) {
+      if (!await this.validatePrivateViewer(ws, attachment)) return;
+    }
+    const content = frame ?? {
+      text: this.buildMonitorFrameText(Date.now(), attachment?.admin === true),
+    };
+    const useGzip = gzip ?? attachment?.gzip === true;
+    try {
+      ws.send(this.encodeMonitorFrame(content, useGzip));
+    } catch {
+      // 坏连接由 close/error 回调清理。
+    }
+  }
+
+  private broadcastMonitorFrame(force = false): void {
+    // 没有 monitor 订阅者就不刷新也不出帧：totals 的数据库查询只在有观看者时发生。
+    if (!this.hasOpenMonitorSubscriber()) return;
+    const now = Date.now();
+    if (!force && now - this.monitorFrameAt < MONITOR_FRAME_MIN_INTERVAL_MS) {
+      if (!this.monitorFramePendingAt) {
+        // Persist the trailing edge so hibernation cannot discard a throttled update.
+        this.monitorFramePendingAt = this.monitorFrameAt + MONITOR_FRAME_MIN_INTERVAL_MS;
+        this.state.waitUntil(this.state.storage.put(MONITOR_FRAME_PENDING_KEY, this.monitorFramePendingAt)
+          .then(() => this.scheduleExpiryAlarm(Date.now())));
+      }
+      return;
+    }
+    if (this.monitorFramePendingAt) {
+      this.monitorFramePendingAt = 0;
+      this.state.waitUntil(this.state.storage.delete(MONITOR_FRAME_PENDING_KEY));
+    }
+    this.monitorFrameAt = now;
+    // 投影或 totals 过期时先刷新，刷新后再补一帧，让节点增删/流量立刻可见。
+    const stale = now - this.monitorDataRefreshedAt >= MONITOR_DATA_REFRESH_MS;
+    if (this.monitorStaticNodes === null || stale) {
+      if (!this.monitorRefreshBroadcastPending) {
+        this.monitorRefreshBroadcastPending = true;
+        this.state.waitUntil(
+          this.refreshMonitorData(now)
+            .then(() => {
+              this.monitorRefreshBroadcastPending = false;
+              this.broadcastMonitorFrame(true);
+            })
+            .catch(() => {
+              this.monitorRefreshBroadcastPending = false;
+            }),
+        );
+      }
+      // 还没有任何投影时不发空帧：等刷新完成后的补帧。
+      if (this.monitorStaticNodes === null) return;
+    }
+    // 同一轮广播里，管理员帧与公开帧各序列化一次；gzip 也按分组复用。
+    const monitorFrames = new Map<boolean, MonitorFrameContent>();
+    for (const [id, session] of this.sessions) {
+      if (this.sessionRoles.get(id) !== 'monitor') continue;
+      if (session.readyState !== WebSocket.READY_STATE_OPEN) continue;
+      const attachment = this.getSessionAttachment(session);
+      const admin = attachment?.admin === true;
+      let frame = monitorFrames.get(admin);
+      if (!frame) {
+        frame = { text: this.buildMonitorFrameText(now, admin) };
+        monitorFrames.set(admin, frame);
+      }
+      try {
+        this.state.waitUntil(this.sendMonitorFrame(session, frame, attachment?.gzip === true));
+      } catch {
+        // waitUntil 不可用时退化为不发这一帧；下一轮上报会补上完整状态。
+      }
     }
   }
 
@@ -778,8 +1066,7 @@ export class LiveDataDO {
   }
 
   private isReportCurrent(lifecycle: ReportLifecycle): boolean {
-    return lifecycle.removalVersion === (this.clientRemovalVersions.get(lifecycle.clientId) || 0)
-      && lifecycle.restoreVersion === this.restoreVersion;
+    return lifecycle.removalVersion === (this.clientRemovalVersions.get(lifecycle.clientId) || 0);
   }
 
   private assertReportCurrent(lifecycle: ReportLifecycle): void {
@@ -790,7 +1077,6 @@ export class LiveDataDO {
     const lifecycle: ReportLifecycle = {
       clientId, receivedAt: Date.now(),
       removalVersion: this.clientRemovalVersions.get(clientId) || 0,
-      restoreVersion: this.restoreVersion,
     };
     const previous = this.clientReportWrites.get(clientId) || Promise.resolve();
     // Reserve the entire report/batch before its first external probe await.
@@ -818,6 +1104,7 @@ export class LiveDataDO {
     expiresAt?: number,
     ws?: WebSocket,
     network?: ReportNetworkMetadata,
+    trustedTrafficPeriodStart?: string,
   ): Promise<MonitorReportPayload> {
     this.assertReportCurrent(lifecycle);
     const { clientId, receivedAt: now } = lifecycle;
@@ -825,6 +1112,9 @@ export class LiveDataDO {
       normalizeMonitorReport(data),
       network || (ws ? this.getSessionAttachment(ws) || undefined : undefined),
     );
+    if (typeof trustedTrafficPeriodStart === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(trustedTrafficPeriodStart)) {
+      report.traffic_period_start = trustedTrafficPeriodStart;
+    }
     let wroteSnapshot = false;
     let next: ClientState;
     try {
@@ -863,7 +1153,7 @@ export class LiveDataDO {
     } else {
       this.broadcastOfflineClient(next, Date.now());
     }
-    this.runBackground('do_live_network_metadata', this.syncNetworkMetadataFromReport(clientId, next.name, next.hidden, report, now));
+    this.runBackground('do_live_network_metadata', this.syncNetworkMetadataFromReport(clientId, next.name, next.hidden, report, now, normalizeMonitorReport(data)));
     return report;
   }
 
@@ -873,7 +1163,14 @@ export class LiveDataDO {
     _hidden: boolean,
     report: MonitorReportPayload,
     now: number,
+    reported: MonitorReportPayload = report,
   ): Promise<void> {
+    let lifecycle = this.networkMetadataLifecycles.get(clientId);
+    if (!lifecycle) {
+      lifecycle = {};
+      this.networkMetadataLifecycles.set(clientId, lifecycle);
+    }
+    const isCurrent = () => this.networkMetadataLifecycles.get(clientId) === lifecycle;
     const patch: JsonObject = {};
     if (typeof report.ipv4 === 'string' && isPublicIpAddress(report.ipv4)) patch.ipv4 = report.ipv4.trim();
     if (typeof report.ipv6 === 'string' && isPublicIpAddress(report.ipv6)) patch.ipv6 = report.ipv6.trim();
@@ -882,19 +1179,30 @@ export class LiveDataDO {
       const inferredRegion = await this.inferRegionFromPublicIp(String(patch.ipv4 || patch.ipv6 || ''));
       if (inferredRegion && (!patch.region || isDetailedRegion(inferredRegion))) patch.region = inferredRegion;
     }
-    if (Object.keys(patch).length === 0) return;
+    if (!isCurrent() || Object.keys(patch).length === 0) return;
     this.applyInferredNetworkMetadataToLiveReport(clientId, patch, now);
 
     const signature = JSON.stringify(patch);
     await this.runClientMetadataSync(clientId, async () => {
+      if (!isCurrent()) return;
       const previous = this.networkMetadataSignatures.get(clientId);
       if (previous?.signature === signature) return;
       const database = this.getQueryDatabase();
       if (!database) return;
-      await db.updateClient(database, clientId, patch as Partial<db.Client>);
+      const previousClient = this.adminClientMetadata.get(clientId) || {};
+      const changes = Object.fromEntries(Object.entries(patch).filter(([key, value]) => previousClient[key] !== value));
+      if (Object.keys(changes).length) await db.updateClient(database, clientId, changes as Partial<db.Client>);
+      if (!isCurrent()) return;
       const client = await this.upsertAdminClientSnapshot({ uuid: clientId, ...patch }, true);
+      if (!isCurrent()) return;
+      await this.patchAgentAuthMetadata(clientId, patch);
+      if (!isCurrent()) return;
       this.networkMetadataSignatures.set(clientId, { signature, syncedAt: now });
       if (client) this.broadcastMetadataChanged({ clients: { upsert: [client] } });
+      // Only Agent-reported addresses trigger notifications; inferred transport
+      // addresses may alternate between IPv4 and IPv6 on dual-stack nodes.
+      await notifyReportedIpChange(database, clientId, _clientName, previousClient, reported).catch(error =>
+        bestEffortRecordHealthEvent(database, 'do_live_network_metadata', 'error', errorDetail(error)));
     });
   }
 
@@ -1056,7 +1364,11 @@ export class LiveDataDO {
     }
     if (!forceRefresh && this.pingTasksPending) return this.pingTasksPending;
 
-    const pending = db.listPingTasks(database).then((tasks) => {
+    const pending = Promise.all([
+      db.listPingTasks(database),
+      typeof db.listPingTaskClientTimeouts === 'function' ? db.listPingTaskClientTimeouts(database) : [],
+    ]).then(([tasks, timeouts]) => {
+      this.pingTaskTimeouts = timeouts;
       this.pingTasksCache = {
         value: tasks,
         expiresAt: now + PING_TASK_CACHE_MS,
@@ -1073,30 +1385,7 @@ export class LiveDataDO {
 
   private pingTasksForClient(tasks: db.PingTask[], clientId?: string): db.PingTask[] {
     if (!clientId) return [];
-    const intervalSec = this.policySettings.pingIntervalSec;
-    return tasks
-      .filter(task => task.all_clients || task.clients.includes(clientId))
-      .map(task => ({ ...task, interval_sec: intervalSec }));
-  }
-
-  private async pingPolicyVersion(tasks: db.PingTask[], intervalSec: number): Promise<string> {
-    const digestInput = JSON.stringify({
-      interval_sec: intervalSec,
-      tasks: tasks.map(task => ({
-        id: task.id,
-        name: task.name,
-        type: task.type,
-        target: task.target,
-        interval_sec: task.interval_sec,
-        all_clients: task.all_clients,
-        clients: [...task.clients].sort(),
-      })),
-    });
-    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(digestInput));
-    return Array.from(new Uint8Array(digest))
-      .slice(0, 8)
-      .map(byte => byte.toString(16).padStart(2, '0'))
-      .join('');
+    return agentPingTasksForClient(tasks, this.pingTaskTimeouts, clientId, this.policySettings.pingIntervalSec);
   }
 
   private invalidatePingTasksCache(): void {
@@ -1104,56 +1393,13 @@ export class LiveDataDO {
     this.pingTasksPending = null;
   }
 
-  private invalidateWebsiteProbeTasksCache(): void {
-    this.websiteProbeTasksCache.clear();
-    this.websiteProbeTasksPending.clear();
-  }
-
-  private async getWebsiteProbeTasks(now: number, clientId?: string, requireSuccess = false): Promise<db.WebsiteMonitor[]> {
-    const database = this.getQueryDatabase();
-    if (!database || !clientId) return [];
-    const cached = this.websiteProbeTasksCache.get(clientId);
-    if (cached && cached.expiresAt > now) return cached.value;
-    const existing = this.websiteProbeTasksPending.get(clientId);
-    if (existing) return existing;
-
-    const pending = db.listAgentWebsiteProbeTasks(database, clientId, new Date(now).toISOString(), 20)
-      .then((tasks) => {
-        this.websiteProbeTasksCache.set(clientId, {
-          value: tasks,
-          expiresAt: now + WEBSITE_PROBE_TASK_CACHE_MS,
-        });
-        return tasks;
-      });
-    this.websiteProbeTasksPending.set(clientId, pending);
-    try {
-      return await pending;
-    } catch (error) {
-      const component = 'agent_policy_website_probe_tasks';
-      const previous = this.policyOptionalErrorLastWriteAt.get(component) || 0;
-      if (now - previous >= AGENT_POLICY_OPTIONAL_ERROR_THROTTLE_MS) {
-        this.policyOptionalErrorLastWriteAt.set(component, now);
-        await bestEffortRecordHealthEvent(
-          database,
-          component,
-          'error',
-          `website probe tasks lookup failed; policy sent without website probes: ${errorDetail(error)}`,
-          { auditAction: 'agent_policy_website_probe_tasks_error' },
-        );
-      }
-      if (requireSuccess) throw error;
-      return [];
-    } finally {
-      if (this.websiteProbeTasksPending.get(clientId) === pending) {
-        this.websiteProbeTasksPending.delete(clientId);
-      }
-    }
-  }
-
   private activeViewerCount(now: number): number {
     let count = 0;
     for (const [id, role] of this.sessionRoles) {
-      if (role !== 'viewer') continue;
+      // Monitor-compatible pages also represent active human viewers. They use
+      // their own full-snapshot protocol, but must still activate fast Agent
+      // sampling just like the built-in viewer sockets.
+      if (role !== 'viewer' && role !== 'monitor') continue;
       const session = this.sessions.get(id);
       const expiresAt = this.viewerExpiresAt.get(id);
       if (expiresAt && expiresAt <= now) continue;
@@ -1162,6 +1408,132 @@ export class LiveDataDO {
       }
     }
     return count;
+  }
+
+  // 流量统计：Agent 只上报各网卡的累计读数（traffic_sample），不保存任何本地状态。
+  // 这里约每 2 分钟（与 ping record 同节奏）把样本交给数据库，由它换算增量、累加到 Agent 本地日期的日桶，
+  // 并返回当前计费周期 [重置日, 今天] 的合计；用这个合计覆盖 report 的 net_total_up/down，
+  // 下游（实时推送、records 落库、公开接口）看到的就是合成好的月度流量。
+  //   * 两次落库之间，合计 = 数据库上次返回的合计 + 本份样本相对上次落库样本的增量（只在内存里估算，规则与 SQL 一致），
+  //     所以月度总量随每份 report 刷新；写库节奏不变；
+  //   * 落库失败只丢这一次样本（读数是累计的，下一次差值会把空档补上），report 本身照常接收；
+  //   * 不带 traffic_sample 的 report（旧版 Agent）原样放行，其 net_total_* 本来就是 Agent 自己算的。
+  // 同时处理旧版 Agent 的一次性本地历史导入（traffic_import），成功后返回 imported=true，随 ack 回给 Agent。
+  private async applyTraffic(
+    clientId: string,
+    reports: JsonObject[],
+    nowMs: number,
+  ): Promise<{ reports: JsonObject[]; imported: boolean; periodStart: string | null }> {
+    if (!reports.some(report => 'traffic_sample' in report || 'traffic_import' in report)) {
+      // Legacy values are not synthesized from our cached totals. Do not attach
+      // their period, or accept an Agent-supplied label for these values.
+      const safeReports = reports.map((report) => {
+        const { traffic_period_start: _untrustedPeriodStart, ...rest } = report;
+        return rest;
+      });
+      return { reports: safeReports, imported: false, periodStart: null };
+    }
+    const database = this.getQueryDatabase();
+    let imported = false;
+    const legacy = parseTrafficImport(reports);
+    if (database && legacy) {
+      try {
+        await db.importTrafficHistory(database, clientId, legacy.days, legacy.baseline);
+        imported = true;
+        // 导入改变了历史：丢掉旧合计，让紧接着的第一个样本立刻重新取一次。
+        this.trafficTotals.delete(clientId);
+      } catch (error) {
+        this.noteTrafficError(database, clientId, 'import', error);
+      }
+    }
+
+    const samples = database ? collectTrafficSamples(reports, report => this.reportTimestamp(report, nowMs)) : [];
+    let state = this.trafficTotals.get(clientId);
+    if (database && samples.length > 0) {
+      const latest = samples[samples.length - 1];
+      const resetDay = normalizeResetDay(await this.trafficResetDayFor(clientId));
+      const dateKey = localDateKey(latest.ts, latest.utc_offset);
+      const periodStart = trafficPeriodStart(resetDay, dateKey);
+      if (!state) {
+        state = { up: 0, down: 0, periodStart: null, inFlight: false };
+        this.trafficTotals.set(clientId, state);
+      }
+      const current = state;
+      const due = selectDueSamples(samples, current.lastAppliedTs, TRAFFIC_APPLY_MIN_GAP_MS);
+      // 重置日被修改 / 跨过周期边界：即使没有到期的样本也要立刻刷新合计（空样本只读不写）。
+      const periodChanged = current.periodStart !== periodStart;
+      if (!current.inFlight && (due.length > 0 || periodChanged)) {
+        current.inFlight = true;
+        const task = db.applyTrafficSamples(database, clientId, due, periodStart, dateKey)
+          .then(totals => {
+            current.up = totals.up;
+            current.down = totals.down;
+            current.periodStart = periodStart;
+            if (due.length > 0) {
+              current.lastAppliedTs = due[due.length - 1].ts;
+              current.base = nextTrafficBase(current.base, due[due.length - 1]);
+            }
+          })
+          .catch(error => this.noteTrafficError(database, clientId, 'apply', error))
+          .finally(() => { current.inFlight = false; });
+        // 还没有可用合计（首次 / 周期变了）时等结果，让这份 report 就带上正确的数字；否则放到后台，不拖慢上报。
+        if (periodChanged) await task;
+        else this.runBackground('do_record_persistence', task);
+      }
+    }
+
+    const totals = this.trafficTotals.get(clientId);
+    const prepared = reports.map(report => {
+      const {
+        traffic_sample: sample,
+        traffic_import: _legacy,
+        traffic_period_start: _untrustedPeriodStart,
+        ...rest
+      } = report;
+      if (sample !== undefined && totals && totals.periodStart !== null) {
+        // 落库仍是约 2 分钟一次，但展示不必跟着停：合计 = 数据库已记的合计 + 本份样本相对基线的未入库增量。
+        // 这样流量少、实时网速在动时，累计流量也随每份 report 一起走；落库后由数据库的精确值接管。
+        const pending = this.pendingTraffic(totals, sample, report, nowMs);
+        return {
+          ...rest,
+          net_total_up: totals.up + pending.up,
+          net_total_down: totals.down + pending.down,
+          traffic_period_start: totals.periodStart,
+        };
+      }
+      return rest;
+    });
+    // Only the report whose totals we synthesized may carry their period label.
+    const finalPeriod = prepared[prepared.length - 1]?.traffic_period_start;
+    return { reports: prepared, imported, periodStart: typeof finalPeriod === 'string' ? finalPeriod : null };
+  }
+
+  private pendingTraffic(
+    totals: { periodStart: string | null; base?: TrafficSample },
+    rawSample: unknown,
+    report: JsonObject,
+    nowMs: number,
+  ): { up: number; down: number } {
+    const base = totals.base;
+    if (!base || totals.periodStart === null) return { up: 0, down: 0 };
+    // 基线还停在上一个计费周期（刚跨周期、只读刷新过）：此时的差值有一部分属于旧周期，不能加进新周期的合计。
+    if (localDateKey(base.ts, base.utc_offset) < totals.periodStart) return { up: 0, down: 0 };
+    const sample = parseTrafficSample(rawSample, this.reportTimestamp(report, nowMs));
+    return sample ? estimateTrafficDelta(base, sample) : { up: 0, down: 0 };
+  }
+
+  private noteTrafficError(database: db.QueryDatabase, clientId: string, phase: 'import' | 'apply', error: unknown): void {
+    const key = `${clientId}:${phase}`;
+    const now = Date.now();
+    if (now - (this.trafficErrorAt.get(key) ?? 0) < 10 * 60_000) return;
+    this.trafficErrorAt.set(key, now);
+    this.runBackground('do_record_persistence', bestEffortRecordHealthEvent(
+      database,
+      'do_record_persistence',
+      'error',
+      `traffic ${phase} failed for ${clientId}: ${errorDetail(error)}`,
+      { auditAction: 'traffic_error' },
+    ));
   }
 
   // 节点的流量重置日来自后台快照。返回 undefined 表示「后台没有这个节点的记录」，
@@ -1193,7 +1565,6 @@ export class LiveDataDO {
     const viewerCount = this.activeViewerCount(now);
     const mode: AgentPolicyMode = viewerCount > 0 ? 'active' : 'idle';
     const pingTasks = this.pingTasksForClient(await this.getPingTasks(now), clientId);
-    const websiteProbeTasks = await this.getWebsiteProbeTasks(now, clientId);
     return {
       type: 'policy',
       mode,
@@ -1203,9 +1574,8 @@ export class LiveDataDO {
       viewer_count: viewerCount,
       viewer_ttl_sec: settings.viewerTtlSec,
       ping_interval_sec: settings.pingIntervalSec,
-      ping_policy_version: await this.pingPolicyVersion(pingTasks, settings.pingIntervalSec),
+      ping_policy_version: await pingPolicyVersion(pingTasks, settings.pingIntervalSec),
       ping_tasks: pingTasks,
-      website_probe_tasks: websiteProbeTasks,
       policy_ttl_sec: mode === 'active' ? 30 : 120,
       idle_policy_ttl_sec: 120,
       traffic_reset_day: await this.trafficResetDayFor(clientId),
@@ -1277,6 +1647,22 @@ export class LiveDataDO {
           expiries.push(expiresAt);
         }
       }
+      const hasMonitorSubscribers = [...this.sessionRoles].some(([id, role]) =>
+        role === 'monitor' && this.sessions.get(id)?.readyState === WebSocket.READY_STATE_OPEN,
+      );
+      if (hasMonitorSubscribers) {
+        if (this.monitorFramePendingAt) expiries.push(this.monitorFramePendingAt);
+        let heartbeatAt = await this.state.storage.get<number>(MONITOR_WS_HEARTBEAT_KEY);
+        if (typeof heartbeatAt !== 'number' || !Number.isFinite(heartbeatAt)) {
+          heartbeatAt = now + MONITOR_WS_HEARTBEAT_MS;
+          await this.state.storage.put(MONITOR_WS_HEARTBEAT_KEY, heartbeatAt);
+        }
+        expiries.push(heartbeatAt);
+      } else {
+        await this.state.storage.delete(MONITOR_WS_HEARTBEAT_KEY);
+        this.monitorFramePendingAt = 0;
+        await this.state.storage.delete(MONITOR_FRAME_PENDING_KEY);
+      }
       const nextExpiry = expiries.sort((a, b) => a - b)[0];
 
       if (nextExpiry === undefined) {
@@ -1284,13 +1670,16 @@ export class LiveDataDO {
         return;
       }
 
-      await this.state.storage.setAlarm(Math.max(nextExpiry, now + 1000));
+      const minimumDelay = nextExpiry === this.monitorFramePendingAt ? 1 : 1000;
+      await this.state.storage.setAlarm(Math.max(nextExpiry, now + minimumDelay));
     } catch {
       // Alarm scheduling is best effort; snapshots still filter expired HTTP clients.
     }
   }
 
   private broadcastToViewers(message: JsonObject, audience: 'all' | 'public' | 'admin' = 'all') {
+    // monitor 主题的 /api/ws 也靠这些实时事件驱动；帧是全量快照，节流在内部。
+    this.broadcastMonitorFrame();
     let publicPayload = '';
     let adminPayload = '';
     for (const [id, session] of this.sessions) {
@@ -1300,25 +1689,25 @@ export class LiveDataDO {
       const includeHidden = this.getSessionAttachment(session)?.includeHidden === true;
       if (audience === 'admin' && !includeHidden) continue;
       if (audience === 'public' && includeHidden) continue;
-      try {
+      this.state.waitUntil(this.sendViewerMessage(session, () => {
         if (includeHidden) {
           adminPayload ||= JSON.stringify(message.type === 'update' && isObjectPayload(message.data)
             ? { ...message, data: this.projectViewerReport(String(message.client), message.data as MonitorReportPayload, true) }
             : message);
-          session.send(adminPayload);
+          return adminPayload;
         } else {
           publicPayload ||= JSON.stringify(message.type === 'update' && isObjectPayload(message.data)
             ? { ...message, data: this.projectViewerReport(String(message.client), message.data as MonitorReportPayload, false) }
             : message);
-          session.send(publicPayload);
+          return publicPayload;
         }
-      } catch {
-        // Close/error handlers clean up broken viewer sockets.
-      }
+      }));
     }
   }
 
   private broadcastMetadataChanged(detail: JsonObject = {}, audience: 'all' | 'public' | 'admin' = 'all') {
+    // 节点增删/改名后静态投影要重建：标记过期，广播时的刷新会重建并补帧。
+    this.invalidateMonitorData();
     const timestamp = Date.now();
     for (const target of ['public', 'admin'] as const) {
       if (audience !== 'all' && audience !== target) continue;
@@ -1355,7 +1744,7 @@ export class LiveDataDO {
     const now = Date.now();
     for (const ws of this.sessions.values()) {
       const attachment = this.getSessionAttachment(ws);
-      if (!attachment || attachment.role !== 'viewer') continue;
+      if (!attachment || (attachment.role !== 'viewer' && attachment.role !== 'monitor')) continue;
       if (ws.readyState !== WebSocket.READY_STATE_OPEN) continue;
       const expiresAt = this.viewerExpiresAt.get(attachment.clientId) ?? attachment.viewerExpiresAt;
       if (expiresAt && expiresAt <= now) continue;
@@ -1375,6 +1764,7 @@ export class LiveDataDO {
         headers: {
           'Content-Type': 'application/json',
           'Retry-After': '60',
+          'Cache-Control': 'no-store',
         },
       });
     }
@@ -1384,6 +1774,7 @@ export class LiveDataDO {
         headers: {
           'Content-Type': 'application/json',
           'Retry-After': '60',
+          'Cache-Control': 'no-store',
         },
       });
     }
@@ -1391,6 +1782,7 @@ export class LiveDataDO {
   }
 
   private expireViewer(id: string, session: WebSocket, now: number): void {
+    const monitor = this.getSessionAttachment(session)?.role === 'monitor';
     this.viewerExpiresAt.delete(id);
     if (this.sessions.get(id) === session) {
       this.sessions.delete(id);
@@ -1399,7 +1791,7 @@ export class LiveDataDO {
 
     if (session.readyState !== WebSocket.READY_STATE_OPEN) return;
     try {
-      session.send(JSON.stringify({
+      if (!monitor) session.send(JSON.stringify({
         type: 'viewer_expired',
         timestamp: now,
       }));
@@ -1449,8 +1841,14 @@ export class LiveDataDO {
     if (!client) {
       return Response.json({ error: 'Invalid agent auth snapshot' }, { status: 400 });
     }
-    await this.state.storage.put(`${AGENT_AUTH_SNAPSHOT_PREFIX}${client.token_hash}`, client);
-    await this.state.storage.put(`${AGENT_AUTH_UUID_PREFIX}${client.uuid}`, client.token_hash);
+    const previousHash = await this.state.storage.get<string>(`${AGENT_AUTH_UUID_PREFIX}${client.uuid}`);
+    if (previousHash && previousHash !== client.token_hash) {
+      await this.state.storage.delete(`${AGENT_AUTH_SNAPSHOT_PREFIX}${previousHash}`);
+    }
+    await this.state.storage.put({
+      [`${AGENT_AUTH_SNAPSHOT_PREFIX}${client.token_hash}`]: client,
+      [`${AGENT_AUTH_UUID_PREFIX}${client.uuid}`]: client.token_hash,
+    });
     return Response.json({ success: true });
   }
 
@@ -1460,7 +1858,13 @@ export class LiveDataDO {
     const tokenHash = stringField(parsed.body, 'token_hash').trim();
     if (!tokenHash) return Response.json({ error: 'Invalid token hash' }, { status: 400 });
     const client = await this.state.storage.get<AgentAuthSnapshot>(`${AGENT_AUTH_SNAPSHOT_PREFIX}${tokenHash}`);
-    return client
+    const currentHash = client
+      ? await this.state.storage.get<string>(`${AGENT_AUTH_UUID_PREFIX}${client.uuid}`)
+      : undefined;
+    if (client && currentHash !== tokenHash) {
+      await this.state.storage.delete(`${AGENT_AUTH_SNAPSHOT_PREFIX}${tokenHash}`);
+    }
+    return client && currentHash === tokenHash
       ? Response.json({ client })
       : Response.json({ error: 'Snapshot missing' }, { status: 404 });
   }
@@ -1469,6 +1873,14 @@ export class LiveDataDO {
     const tokenHash = await this.state.storage.get<string>(`${AGENT_AUTH_UUID_PREFIX}${uuid}`);
     if (tokenHash) await this.state.storage.delete(`${AGENT_AUTH_SNAPSHOT_PREFIX}${tokenHash}`);
     await this.state.storage.delete(`${AGENT_AUTH_UUID_PREFIX}${uuid}`);
+  }
+
+  private async patchAgentAuthMetadata(uuid: string, patch: JsonObject): Promise<void> {
+    const hash = await this.state.storage.get<string>(`${AGENT_AUTH_UUID_PREFIX}${uuid}`);
+    if (!hash) return;
+    const key = `${AGENT_AUTH_SNAPSHOT_PREFIX}${hash}`;
+    const client = await this.state.storage.get<AgentAuthSnapshot>(key);
+    if (client) await this.state.storage.put(key, { ...client, ...projectAgentClientMetadata(patch) });
   }
 
   private async removeAgentAuthSnapshot(request: Request): Promise<Response> {
@@ -1496,6 +1908,7 @@ export class LiveDataDO {
     if (meta.source === 'agent') {
       const patch = projectAgentClientMetadata(isObjectPayload(meta.client) ? meta.client : meta);
       const client = await this.upsertAdminClientSnapshot({ uuid, ...patch }, true);
+      await this.patchAgentAuthMetadata(uuid, patch);
       if (client) this.broadcastMetadataChanged({ clients: { upsert: [client] } });
       return Response.json({ success: true });
     }
@@ -1593,9 +2006,26 @@ export class LiveDataDO {
     this.sessionRoles.delete(meta.uuid);
     this.clients.delete(meta.uuid);
     this.lastKnownClients.delete(meta.uuid);
+    this.networkMetadataLifecycles.delete(meta.uuid);
     await this.state.storage.delete(`${HTTP_LIVE_STATE_PREFIX}${meta.uuid}`);
     await this.removeAgentAuthByUuid(String(meta.uuid));
     if (!keepMetadata) {
+      this.basicInfoSignatures.delete(meta.uuid);
+      this.networkMetadataSignatures.delete(meta.uuid);
+      this.trafficTotals.delete(meta.uuid);
+      this.trafficResetDays.delete(meta.uuid);
+      this.trafficErrorAt.delete(meta.uuid);
+      delete this.monitorTrafficTotals[meta.uuid];
+      this.recordLastPersistAt.delete(meta.uuid);
+      const pingPrefix = `${PING_RESULT_STORAGE_PREFIX}${meta.uuid}:`;
+      for (const key of this.pingResultStateCache.keys()) {
+        if (key.startsWith(pingPrefix)) this.pingResultStateCache.delete(key);
+      }
+      const pingState = await this.state.storage.list({ prefix: pingPrefix });
+      const keys = [`record:persist:${meta.uuid}`, `offline:streak:${meta.uuid}`, ...pingState.keys()];
+      for (let offset = 0; offset < keys.length; offset += 128) {
+        await this.state.storage.delete(keys.slice(offset, offset + 128));
+      }
       await this.removeAdminClientSnapshot(String(meta.uuid));
     }
     if (existing) {
@@ -1658,6 +2088,8 @@ export class LiveDataDO {
   private async storeAdminClientsSnapshot(snapshot: AdminClientsSnapshot): Promise<void> {
     await this.state.storage.put(ADMIN_CLIENTS_SNAPSHOT_KEY, snapshot);
     this.rememberAdminClientsSnapshot(snapshot);
+    // 元数据是 monitor 静态投影的来源，写入后让下一帧重建。
+    this.invalidateMonitorData();
   }
 
   private async writeAdminClientsSnapshot(request: Request): Promise<Response> {
@@ -1744,7 +2176,7 @@ export class LiveDataDO {
     const parsed = await parseJsonRequestWithLimit(request, HTTP_CLIENT_REPORT_MAX_BODY_BYTES);
     if ('response' in parsed) return parsed.response;
     const payload = parsed.body;
-    const reports = Array.isArray(payload?.reports)
+    let reports = Array.isArray(payload?.reports)
       ? payload.reports.slice(0, AGENT_REPORT_MAX_BATCH).filter(isObjectPayload)
       : isObjectPayload(payload?.report)
         ? [payload.report]
@@ -1770,24 +2202,33 @@ export class LiveDataDO {
       this.assertReportCurrent(lifecycle);
       const clientName = control.name;
       const hidden = control.hidden;
+      const traffic = await this.applyTraffic(clientId, reports, now);
+      reports = traffic.reports;
+      this.assertReportCurrent(lifecycle);
       const reportsToPersist: Array<{ report: JsonObject; reportTime: number }> = [];
+      const pingRounds: Array<{ report: JsonObject; reportTime: number }> = [];
+      let finalReport: { report: JsonObject; reportTime: number } | null = null;
       for (let index = 0; index < reports.length; index += 1) {
         this.assertReportCurrent(lifecycle);
         const rawReport = reports[index];
         const reportTime = this.reportTimestamp(rawReport, now);
         const isLast = index === reports.length - 1;
         if (isLast) {
-          const report = await this.updateClientReport(
-            lifecycle, clientName, hidden, rawReport, now + ttlMs, undefined, network,
-          );
-          reportsToPersist.push({ report, reportTime });
+          finalReport = { report: rawReport, reportTime };
         } else {
           reportsToPersist.push({ report: rawReport, reportTime });
         }
-        await this.persistPingResultsFromReport(clientId, rawReport, reportTime);
-        this.assertReportCurrent(lifecycle);
-        await this.persistWebsiteProbeResultsFromReport(clientId, rawReport, reportTime);
-        this.assertReportCurrent(lifecycle);
+        pingRounds.push({ report: rawReport, reportTime });
+      }
+
+      await this.persistPingResultsFromReports(clientId, pingRounds, now, lifecycle);
+      this.assertReportCurrent(lifecycle);
+      if (finalReport) {
+        const report = await this.updateClientReport(
+          lifecycle, clientName, hidden, finalReport.report, now + ttlMs, undefined, network,
+          traffic.periodStart ?? undefined,
+        );
+        reportsToPersist.push({ report, reportTime: finalReport.reportTime });
       }
 
       await this.scheduleExpiryAlarm(now);
@@ -1799,7 +2240,12 @@ export class LiveDataDO {
       }
       this.runBackground('do_record_persistence', this.persistReportsSequential(clientId, reportsToPersist));
 
-      return Response.json({ success: true, persisted: false, queued: true });
+      return Response.json({
+        success: true,
+        persisted: false,
+        queued: true,
+        ...(traffic.imported ? { traffic_imported: true } : {}),
+      });
     }).catch(() => Response.json({ error: 'Report was not accepted; retry this report' }, { status: 503 }));
   }
 
@@ -1877,11 +2323,16 @@ export class LiveDataDO {
         if (this.basicInfoSignatures.get(clientId) === signature) return;
         const database = this.getQueryDatabase();
         if (!database) return;
-        await db.updateClient(database, clientId, patch as Partial<db.Client>);
+        const previousClient = this.adminClientMetadata.get(clientId) || {};
+        const changes = Object.fromEntries(Object.entries(patch).filter(([key, value]) => previousClient[key] !== value));
+        if (Object.keys(changes).length) await db.updateClient(database, clientId, changes as Partial<db.Client>);
         if (lifecycle) this.assertReportCurrent(lifecycle);
         const clientPatch = await this.upsertAdminClientSnapshot({ uuid: clientId, ...patch }, true);
+        await this.patchAgentAuthMetadata(clientId, patch);
         this.basicInfoSignatures.set(clientId, signature);
         if (clientPatch) this.broadcastMetadataChanged({ clients: { upsert: [clientPatch] } });
+        await notifyReportedIpChange(database, clientId, _clientName, previousClient, basicInfo).catch(error =>
+          bestEffortRecordHealthEvent(database, 'do_basic_info_sync', 'error', errorDetail(error)));
       });
     } catch (error) {
       // No successful signature was committed: the unacknowledged report retries.
@@ -1894,153 +2345,20 @@ export class LiveDataDO {
     }
   }
 
-  private async persistPingResultsFromReport(clientId: string, report: JsonObject, nowMs: number): Promise<void> {
-    const results = this.pingResultsFromReport(report);
-    if (results.length === 0) return;
-    await this.persistPingResult(clientId, { results }, nowMs);
-  }
-
-  private websiteProbeResultsFromReport(report: JsonObject): JsonObject[] {
-    const results = report.website_probe_results;
-    return Array.isArray(results) ? results.slice(0, 50).filter(isObjectPayload) : [];
-  }
-
-  private async persistWebsiteProbeResultsFromReport(clientId: string, report: JsonObject, nowMs: number): Promise<void> {
-    const results = this.websiteProbeResultsFromReport(report);
-    if (results.length === 0) return;
-    const database = this.getQueryDatabase();
-    if (!database) return;
-
-    try {
-      if (!(await this.isRecordPersistenceEnabled(nowMs))) return;
-      if (!(await this.canPersistWithinCapacity(nowMs))) return;
-
-      const assigned = new Set((await this.getWebsiteProbeTasks(nowMs, clientId, true)).map(task => task.id));
-      if (assigned.size === 0) return;
-      const checkedAt = new Date(nowMs).toISOString();
-      let changed = false;
-      const fallbackChecked = new Set<number>();
-      for (const item of results) {
-        const monitorId = Number(item.monitor_id);
-        const configRevision = item.config_revision;
-        const latencyMs = Math.round(Number(item.latency_ms));
-        const statusCode = item.status_code === null || item.status_code === undefined ? null : Number(item.status_code);
-        const rawStatusCode = item.raw_status_code === null || item.raw_status_code === undefined ? statusCode : Number(item.raw_status_code);
-        const effectiveStatus = item.effective_status === 'up' ? 'up' : item.effective_status === 'down' ? 'down' : null;
-        if (
-          !Number.isInteger(monitorId) ||
-          !assigned.has(monitorId) ||
-          typeof configRevision !== 'string' ||
-          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(configRevision) ||
-          !Number.isFinite(latencyMs) ||
-          latencyMs < 0 ||
-          latencyMs > 60_000 ||
-          !effectiveStatus ||
-          (statusCode !== null && (!Number.isInteger(statusCode) || statusCode < 100 || statusCode > 599)) ||
-          (rawStatusCode !== null && (!Number.isInteger(rawStatusCode) || rawStatusCode < 100 || rawStatusCode > 599))
-        ) {
-          continue;
-        }
-        const updated = await db.recordWebsiteCheck(database, {
-          monitor_id: monitorId,
-          config_revision: configRevision,
-          checked_at: checkedAt,
-          ok: Boolean(item.ok) && effectiveStatus === 'up',
-          effective_status: effectiveStatus,
-          effective_reason: typeof item.effective_reason === 'string' ? item.effective_reason.slice(0, 80) : effectiveStatus,
-          status_code: statusCode,
-          raw_status_code: rawStatusCode,
-          latency_ms: latencyMs,
-          error: typeof item.error === 'string' && item.error ? item.error.slice(0, 120) : null,
-          source_type: 'agent',
-          source_client: clientId,
-        });
-        if (!updated) continue;
-        changed = true;
-
-        if (effectiveStatus === 'down' && updated.agent_probe_status_enabled && !fallbackChecked.has(monitorId)) {
-          fallbackChecked.add(monitorId);
-          const fallbackCheck = await checkWebsiteMonitorHttp(updated);
-          const fallbackUpdated = await db.recordWebsiteCheck(database, fallbackCheck);
-          changed = Boolean(fallbackUpdated) || changed;
-        }
-      }
-      if (changed) this.broadcastMetadataChanged({ websites: true });
-    } catch (error) {
-      await bestEffortRecordHealthEvent(
-        database,
-        'website_probe_persistence',
-        'error',
-        `website probe persist failed for ${clientId}: ${errorDetail(error)}`,
-        { auditAction: 'website_probe_persistence_error' },
-      );
-      throw error;
-    }
-  }
-
-  private async restoreClients(request: Request): Promise<Response> {
-    const parsed = await parseJsonRequestWithLimit(request, MAX_BACKUP_BYTES);
-    if ('response' in parsed) return parsed.response;
-    if (!Array.isArray(parsed.body.clients) || parsed.body.clients.length > 1000 ||
-      parsed.body.clients.some(client => !isObjectPayload(client))) {
-      return Response.json({ error: 'Invalid restored client list' }, { status: 400 });
-    }
-    const clients = parsed.body.clients.map(restoredClientMetadata);
-    if (clients.some(client => !client.uuid) || new Set(clients.map(client => client.uuid)).size !== clients.length) {
-      return Response.json({ error: 'Invalid or duplicate restored client UUID' }, { status: 400 });
-    }
-    if (!measureRestoredClientSnapshot(clients, false).fits) {
-      return Response.json({ error: 'Restored client snapshot exceeds the safe storage size' }, { status: 413 });
-    }
-
-    // A restore is a rare whole-configuration transition. Only local storage is
-    // awaited in this gate; no database or other external I/O can hold it open.
-    return this.state.blockConcurrencyWhile(async () => {
-      this.restoreVersion += 1;
-      const previous = await this.readAdminClientsSnapshot();
-      const updatedAt = Math.max(Date.now(), (previous?.updatedAt || 0) + 1);
-      for (const prefix of [HTTP_LIVE_STATE_PREFIX, AGENT_AUTH_SNAPSHOT_PREFIX, AGENT_AUTH_UUID_PREFIX]) {
-        while (true) {
-          const entries = await this.state.storage.list({ prefix, limit: 128 });
-          if (entries.size === 0) break;
-          await this.state.storage.delete([...entries.keys()]);
-        }
-      }
-      await this.storeAdminClientsSnapshot({ clients, updatedAt, removed: [], complete: true });
-      for (const socket of new Set([...this.sessions.values(), ...this.state.getWebSockets()])) {
-        const attachment = this.getSessionAttachment(socket);
-        if (attachment?.role !== 'agent') continue;
-        try { socket.close(1008, 'Client configuration restored'); } catch {}
-        this.sessions.delete(attachment.clientId);
-        this.sessionRoles.delete(attachment.clientId);
-      }
-      this.clients.clear();
-      this.lastKnownClients.clear();
-      this.networkMetadataSignatures.clear();
-      this.basicInfoSignatures.clear();
-      this.trafficResetDays.clear();
-      this.trafficResetDaysAt = 0;
-      this.recordPersistenceCheckedAt = 0;
-      this.policySettingsCheckedAt = 0;
-      this.invalidatePingTasksCache();
-      this.invalidateWebsiteProbeTasksCache();
-      this.broadcastMetadataChanged({ clients: true });
-      for (const [id, socket] of this.sessions) {
-        if (this.sessionRoles.get(id) === 'viewer') this.sendSnapshot(socket);
-      }
-      await this.scheduleExpiryAlarm(Date.now());
-      return Response.json({ success: true, count: clients.length, version: updatedAt });
-    });
+  private async persistPingResultsFromReports(
+    clientId: string,
+    reports: Array<{ report: JsonObject; reportTime: number }>,
+    nowMs: number,
+    lifecycle?: ReportLifecycle,
+  ): Promise<void> {
+    if (!reports.some(({ report }) => this.pingResultsFromReport(report).length > 0)) return;
+    await this.runPingWrite(clientId, () => this.persistQueuedPingRounds(clientId, reports, nowMs, lifecycle));
   }
 
   // HTTP 请求处理（用于 Agent 上报数据）
   async fetch(request: Request): Promise<Response> {
     await this.httpClientsReady;
     const url = new URL(request.url);
-
-    if (request.method === 'POST' && url.pathname === '/clients-restore') {
-      return this.restoreClients(request);
-    }
 
     if (request.method === 'POST' && url.pathname === '/client-meta') {
       return this.updateClientMeta(request);
@@ -2081,12 +2399,7 @@ export class LiveDataDO {
       return this.updateHttpClientReport(request);
     }
 
-    if (request.method === 'POST' && url.pathname === '/ping-result') {
-      return this.updateHttpPingResult(request);
-    }
-
     if (request.method === 'POST' && url.pathname === '/policy-refresh') {
-      this.invalidateWebsiteProbeTasksCache();
       await this.broadcastAgentPolicy(Date.now(), false, true);
       return Response.json({ success: true });
     }
@@ -2099,7 +2412,6 @@ export class LiveDataDO {
 
     if (request.method === 'POST' && url.pathname === '/ping-tasks-refresh') {
       this.invalidatePingTasksCache();
-      this.invalidateWebsiteProbeTasksCache();
       await this.broadcastAgentPolicy(Date.now(), false, true);
       return Response.json({ success: true });
     }
@@ -2135,23 +2447,35 @@ export class LiveDataDO {
 
     // WebSocket 升级
     if (request.headers.get('Upgrade') === 'websocket') {
-      const pair = new WebSocketPair();
-      const [client, server] = Object.values(pair);
-
       const clientId = url.searchParams.get('id') || crypto.randomUUID();
       const clientName = url.searchParams.get('name') || clientId;
       const hidden = url.searchParams.get('hidden') === '1' || url.searchParams.get('hidden') === 'true';
-      const role = url.searchParams.get('role') === 'agent' ? 'agent' : 'viewer';
+      const roleParam = url.searchParams.get('role');
+      const role: SessionRole = roleParam === 'agent'
+        ? 'agent'
+        : roleParam === 'monitor' ? 'monitor' : 'viewer';
       const viewerIp = url.searchParams.get('viewer_ip') || undefined;
       const sourceIp = url.searchParams.get('source_ip') || undefined;
       const region = url.searchParams.get('region') || undefined;
       const now = Date.now();
       const activeViewersBefore = this.activeViewerCount(now);
 
-      if (role === 'viewer') {
+      if (role === 'viewer' || role === 'monitor') {
         const limitResponse = this.enforceViewerConnectionLimit(viewerIp);
         if (limitResponse) return limitResponse;
         await this.getAgentPolicySettings(now);
+        if (role === 'monitor') {
+          await this.readyMonitorData();
+          if (this.monitorStaticNodes === null) {
+            return Response.json({ error: 'Monitor data is temporarily unavailable' }, {
+              status: 503, headers: { 'Cache-Control': 'no-store', 'Retry-After': '5' },
+            });
+          }
+        }
+        // A settings read can yield to another upgrade; recheck immediately
+        // before registering, with no await between admission and registration.
+        const afterSettings = this.enforceViewerConnectionLimit(viewerIp);
+        if (afterSettings) return afterSettings;
       }
 
       const oldSession = role === 'agent' ? this.sessions.get(clientId) : undefined;
@@ -2163,7 +2487,7 @@ export class LiveDataDO {
         }
       }
 
-      // viewer 窗口由 DO 自己的设置决定（已缓存，无需额外查库）。
+      // viewer 与 Monitor 的窗口由 DO 自己的设置决定（已缓存）。
       // 显式传参仍然优先，便于覆盖与向后兼容；缺省时才回落到设置项，
       // 从而消除"对外宣称 X 秒、实际执行写死的 120 秒"这一不一致。
       const viewerTtlParam = url.searchParams.get('viewer_ttl_ms');
@@ -2176,18 +2500,32 @@ export class LiveDataDO {
         clientId,
         clientName,
         hidden,
-        ...(role === 'viewer' && viewerIp ? { viewerIp } : {}),
-        ...(role === 'viewer' ? { viewerExpiresAt: now + viewerTtlMs } : {}),
+        ...((role === 'viewer' || role === 'monitor') && viewerIp ? { viewerIp } : {}),
+        ...((role === 'viewer' || role === 'monitor') ? { viewerExpiresAt: now + viewerTtlMs } : {}),
         ...(role === 'viewer' && (url.searchParams.get('include_hidden') === '1' || url.searchParams.get('include_hidden') === 'true') ? { includeHidden: true } : {}),
         ...(role === 'agent' && sourceIp && isPublicIpAddress(sourceIp) ? { sourceIp } : {}),
         ...(role === 'agent' && region && this.isUsefulRegion(region) ? { region } : {}),
+        ...(role === 'monitor' && url.searchParams.get('gzip') === '1' ? { gzip: true } : {}),
+        ...(role === 'monitor' && url.searchParams.get('admin') === '1' ? { admin: true } : {}),
+        ...((role === 'monitor' && url.searchParams.get('admin') === '1'
+          || role === 'viewer' && (url.searchParams.get('include_hidden') === '1' || url.searchParams.get('include_hidden') === 'true'))
+          ? { adminToken: request.headers.get('X-CF-Monitor-Admin-Token') || '' } : {}),
       };
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair);
       this.registerSession(server, attachment);
       this.state.acceptWebSocket(server);
 
       if (role === 'viewer') {
         this.sendSnapshot(server);
         this.runBackground('do_viewer_expiry', this.scheduleExpiryAlarm(now));
+        if (activeViewersBefore === 0) {
+          this.runBackground('do_agent_policy', this.broadcastAgentPolicy(now, true));
+        }
+      } else if (role === 'monitor') {
+        // 数据已在配额准入前准备好，首帧无需再次读库。
+        this.state.waitUntil(this.sendMonitorFrame(server));
+        this.state.waitUntil(this.scheduleExpiryAlarm(now));
         if (activeViewersBefore === 0) {
           this.runBackground('do_agent_policy', this.broadcastAgentPolicy(now, true));
         }
@@ -2216,37 +2554,45 @@ export class LiveDataDO {
   }
 
   private async handleMessage(clientId: string, clientName: string, hidden: boolean, data: Record<string, unknown>, ws: WebSocket) {
-    if (data?.type === 'ping_result') {
-      await this.resolveReportClientControl(clientId, clientName, hidden);
-      this.runBackground('ping_persistence', this.persistPingResult(clientId, data, Date.now()));
-      return;
+    if (data?.type !== 'report' && data?.type !== 'reports') {
+      throw new Error('Unsupported Agent message type');
     }
-
     return this.runClientReport(clientId, async lifecycle => {
       const now = lifecycle.receivedAt;
       const control = await this.resolveReportClientControl(clientId, clientName, hidden);
       this.assertReportCurrent(lifecycle);
       clientName = control.name;
       hidden = control.hidden;
-      const reports = data?.type === 'reports' && Array.isArray(data.reports)
+      const received = data?.type === 'reports' && Array.isArray(data.reports)
         ? data.reports.slice(0, AGENT_REPORT_MAX_BATCH).filter(isObjectPayload)
         : [unwrapMonitorReportEnvelope(data)];
+      const traffic = await this.applyTraffic(clientId, received, now);
+      const reports = traffic.reports;
+      this.assertReportCurrent(lifecycle);
       const reportsToPersist: Array<{ report: JsonObject; reportTime: number }> = [];
+      const pingRounds: Array<{ report: JsonObject; reportTime: number }> = [];
+      let finalReport: { report: JsonObject; reportTime: number } | null = null;
       for (let index = 0; index < reports.length; index += 1) {
         this.assertReportCurrent(lifecycle);
         const rawReport = reports[index];
         const reportTime = this.reportTimestamp(rawReport, now);
         const isLast = index === reports.length - 1;
         if (isLast) {
-          const report = await this.updateClientReport(lifecycle, clientName, hidden, rawReport, undefined, ws);
-          reportsToPersist.push({ report, reportTime });
+          finalReport = { report: rawReport, reportTime };
         } else {
           reportsToPersist.push({ report: rawReport, reportTime });
         }
-        await this.persistPingResultsFromReport(clientId, rawReport, reportTime);
-        this.assertReportCurrent(lifecycle);
-        await this.persistWebsiteProbeResultsFromReport(clientId, rawReport, reportTime);
-        this.assertReportCurrent(lifecycle);
+        pingRounds.push({ report: rawReport, reportTime });
+      }
+
+      await this.persistPingResultsFromReports(clientId, pingRounds, now, lifecycle);
+      this.assertReportCurrent(lifecycle);
+      if (finalReport) {
+        const report = await this.updateClientReport(
+          lifecycle, clientName, hidden, finalReport.report, undefined, ws, undefined,
+          traffic.periodStart ?? undefined,
+        );
+        reportsToPersist.push({ report, reportTime: finalReport.reportTime });
       }
 
       const basicInfoReport = this.latestBasicInfoReport(reports);
@@ -2256,7 +2602,11 @@ export class LiveDataDO {
       this.assertReportCurrent(lifecycle);
       if (this.sessions.get(clientId) === ws && ws.readyState === WebSocket.READY_STATE_OPEN) {
         try {
-          ws.send(JSON.stringify({ type: 'ack', timestamp: now }));
+          ws.send(JSON.stringify({
+            type: 'ack',
+            timestamp: now,
+            ...(traffic.imported ? { traffic_imported: true } : {}),
+          }));
         } catch {
           // 忽略 ack 发送错误
         }
@@ -2289,7 +2639,7 @@ export class LiveDataDO {
       // A rejected report must be observable by the Agent rather than looking
       // like a successfully accepted message with missing history.
       if (ws.readyState === WebSocket.READY_STATE_OPEN) {
-        try { ws.send(JSON.stringify({ type: 'error', code: 'REPORT_REJECTED', error: 'Invalid or unsupported Agent report' })); } catch {}
+        try { ws.send(JSON.stringify({ type: 'error', code: 'REPORT_REJECTED', error: 'Invalid or unsupported Agent report' })); } catch { /* The connection may already be gone; the Agent will retry. */ }
       }
     }
   }
@@ -2298,10 +2648,10 @@ export class LiveDataDO {
     await this.httpClientsReady;
     const attachment = this.getSessionAttachment(ws);
     if (attachment) {
-      const wasViewer = attachment.role === 'viewer';
-      const activeViewersBefore = this.activeViewerCount(Date.now());
       this.cleanupSession(ws, attachment);
-      if (wasViewer && activeViewersBefore > 0) {
+      if (attachment.role === 'monitor') await this.scheduleExpiryAlarm(Date.now());
+      if ((attachment.role === 'viewer' || attachment.role === 'monitor')
+        && this.activeViewerCount(Date.now()) === 0) {
         await this.broadcastAgentPolicy(Date.now(), false);
       }
     }
@@ -2311,10 +2661,10 @@ export class LiveDataDO {
     await this.httpClientsReady;
     const attachment = this.getSessionAttachment(ws);
     if (attachment) {
-      const wasViewer = attachment.role === 'viewer';
-      const activeViewersBefore = this.activeViewerCount(Date.now());
       this.cleanupSession(ws, attachment);
-      if (wasViewer && activeViewersBefore > 0) {
+      if (attachment.role === 'monitor') await this.scheduleExpiryAlarm(Date.now());
+      if ((attachment.role === 'viewer' || attachment.role === 'monitor')
+        && this.activeViewerCount(Date.now()) === 0) {
         await this.broadcastAgentPolicy(Date.now(), false);
       }
     }
@@ -2325,6 +2675,24 @@ export class LiveDataDO {
     const now = Date.now();
     await this.removeExpiredClients(now);
     this.removeExpiredViewers(now);
+    const hasMonitorSubscribers = [...this.sessionRoles].some(([id, role]) =>
+      role === 'monitor' && this.sessions.get(id)?.readyState === WebSocket.READY_STATE_OPEN,
+    );
+    if (hasMonitorSubscribers) {
+      const heartbeatAt = await this.state.storage.get<number>(MONITOR_WS_HEARTBEAT_KEY);
+      const heartbeatDue = typeof heartbeatAt !== 'number' || !Number.isFinite(heartbeatAt) || heartbeatAt <= now;
+      if (heartbeatDue) {
+        await this.state.storage.put(MONITOR_WS_HEARTBEAT_KEY, now + MONITOR_WS_HEARTBEAT_MS);
+      }
+      if (heartbeatDue || (this.monitorFramePendingAt && this.monitorFramePendingAt <= now)) {
+        await this.readyMonitorData();
+        // An unchanged snapshot still serves as a keepalive for clients that
+        // declare the stream timed out when no node happens to report.
+        this.broadcastMonitorFrame(heartbeatDue);
+      }
+    } else {
+      await this.state.storage.delete(MONITOR_WS_HEARTBEAT_KEY);
+    }
     await this.broadcastAgentPolicy(now, false);
     await this.scheduleExpiryAlarm(now);
   }
@@ -2367,7 +2735,11 @@ export class LiveDataDO {
       if (!Number.isFinite(graceMs) || graceMs <= 0) continue;
 
       const live = this.clients.get(uuid);
-      const lastSeen = live && Number.isFinite(live.lastReportTime) ? live.lastReportTime : null;
+      const retained = this.lastKnownClients.get(uuid);
+      const lastSeen = Math.max(
+        live && Number.isFinite(live.lastReportTime) ? live.lastReportTime : 0,
+        retained && Number.isFinite(retained.lastReportTime) ? retained.lastReportTime : 0,
+      );
       // 调用方可传入数据库侧的最后记录时间，两者取较新——DO 刚重启且 attachment
       // 尚未恢复时，数据库的值可以兜底，避免把在线节点判成离线。
       const fallback = Number(entry.fallbackLastSeen);
@@ -2450,13 +2822,11 @@ export class LiveDataDO {
         Math.max(boundedPingIntervalSec * 1000, MIN_PING_RECORD_PERSIST_INTERVAL_MS),
         MAX_PING_RECORD_PERSIST_INTERVAL_MS,
       );
-      const highWatermarkRows = Number(settings.record_high_watermark_rows);
-      this.recordHighWatermarkRows = Number.isFinite(highWatermarkRows)
-        ? Math.min(
-          Math.max(Math.floor(highWatermarkRows), RECORD_HIGH_WATERMARK_MIN_ROWS),
-          RECORD_HIGH_WATERMARK_MAX_ROWS,
-        )
-        : RECORD_HIGH_WATERMARK_DEFAULT_ROWS;
+      const pingRetentionHours = Number(settings.ping_record_preserve_time);
+      const boundedPingRetentionHours = Number.isFinite(pingRetentionHours)
+        ? Math.min(Math.max(Math.floor(pingRetentionHours), RAW_RETENTION_MIN_HOURS), PING_RAW_RETENTION_MAX_HOURS)
+        : PING_RAW_RETENTION_DEFAULT_HOURS;
+      this.pingObservedMaxAgeMs = (boundedPingRetentionHours - 24) * 60 * 60 * 1000;
       const highWatermarkBytes = Number(settings.record_high_watermark_bytes);
       this.recordHighWatermarkBytes = Number.isFinite(highWatermarkBytes)
         ? Math.min(
@@ -2481,19 +2851,14 @@ export class LiveDataDO {
 
   private capacityCheckDelayMs(): number {
     if (this.recordCapacityBlocked) return RECORD_CAPACITY_CACHE_CRITICAL_MS;
-    if (this.recordHighWatermarkRows <= 0 || this.recordHighWatermarkBytes <= 0) return RECORD_CAPACITY_CACHE_NEAR_MS;
-    // 两条熔断线取更紧张的那个比例：离任一条线近了都该查得更勤。
-    const ratio = Math.max(
-      this.recordCapacityRows / this.recordHighWatermarkRows,
-      this.recordCapacityBytes / this.recordHighWatermarkBytes,
-    );
+    if (this.recordHighWatermarkBytes <= 0) return RECORD_CAPACITY_CACHE_NEAR_MS;
+    const ratio = this.recordCapacityBytes / this.recordHighWatermarkBytes;
     if (ratio >= 0.95) return RECORD_CAPACITY_CACHE_CRITICAL_MS;
     if (ratio >= 0.8) return RECORD_CAPACITY_CACHE_NEAR_MS;
     return RECORD_CAPACITY_CACHE_FAR_MS;
   }
 
   private applyRecordCapacitySnapshot(snapshot: RecordCapacitySnapshot): void {
-    this.recordCapacityRows = snapshot.rows;
     this.recordCapacityBytes = snapshot.bytes;
     this.recordCapacityBlocked = snapshot.blocked;
     this.recordCapacityNextCheckAt = snapshot.nextCheckAt;
@@ -2502,16 +2867,12 @@ export class LiveDataDO {
   private normalizeRecordCapacitySnapshot(raw: unknown): RecordCapacitySnapshot | null {
     if (!raw || typeof raw !== 'object') return null;
     const value = raw as Partial<RecordCapacitySnapshot>;
-    const rows = Number(value.rows);
     const bytes = Number(value.bytes);
     const checkedAt = Number(value.checkedAt);
     const nextCheckAt = Number(value.nextCheckAt);
-    const highWatermarkRows = Number(value.highWatermarkRows);
     const highWatermarkBytes = Number(value.highWatermarkBytes);
     if (
-      value.measurement !== 'live-row-bytes-plus-index-estimate' ||
-      !Number.isFinite(rows) ||
-      rows < 0 ||
+      value.measurement !== 'partition-tree-bytes' ||
       !Number.isFinite(bytes) ||
       bytes < 0 ||
       !Number.isFinite(highWatermarkBytes) ||
@@ -2520,28 +2881,22 @@ export class LiveDataDO {
       !Number.isFinite(checkedAt) ||
       checkedAt <= 0 ||
       !Number.isFinite(nextCheckAt) ||
-      nextCheckAt <= checkedAt ||
-      !Number.isFinite(highWatermarkRows) ||
-      highWatermarkRows < RECORD_HIGH_WATERMARK_MIN_ROWS ||
-      highWatermarkRows > RECORD_HIGH_WATERMARK_MAX_ROWS
+      nextCheckAt <= checkedAt
     ) {
       return null;
     }
     return {
-      measurement: 'live-row-bytes-plus-index-estimate',
-      rows,
+      measurement: 'partition-tree-bytes',
       bytes,
       blocked: Boolean(value.blocked),
       checkedAt,
       nextCheckAt,
-      highWatermarkRows,
       highWatermarkBytes,
     };
   }
 
   private isReusableRecordCapacitySnapshot(snapshot: RecordCapacitySnapshot, now: number): boolean {
-    return snapshot.highWatermarkRows === this.recordHighWatermarkRows
-      && snapshot.highWatermarkBytes === this.recordHighWatermarkBytes
+    return snapshot.highWatermarkBytes === this.recordHighWatermarkBytes
       && snapshot.nextCheckAt > now;
   }
 
@@ -2550,8 +2905,7 @@ export class LiveDataDO {
       const snapshot = this.normalizeRecordCapacitySnapshot(
         await this.state.storage.get(RECORD_CAPACITY_SNAPSHOT_KEY),
       );
-      if (snapshot && snapshot.highWatermarkRows === this.recordHighWatermarkRows
-        && snapshot.highWatermarkBytes === this.recordHighWatermarkBytes) {
+      if (snapshot && snapshot.highWatermarkBytes === this.recordHighWatermarkBytes) {
         // Preserve hysteresis across cold starts even when a new measurement is due.
         this.recordCapacityBlocked = snapshot.blocked;
       }
@@ -2572,7 +2926,6 @@ export class LiveDataDO {
 
   private invalidateRecordCapacityMemorySnapshot(): void {
     this.recordCapacityNextCheckAt = 0;
-    this.recordCapacityRows = 0;
     this.recordCapacityBytes = 0;
     this.recordCapacityBlocked = false;
   }
@@ -2591,40 +2944,31 @@ export class LiveDataDO {
     }
 
     try {
-      // DELETE frees live tuples for reuse without necessarily shrinking allocated
-      // files. Use the explicitly estimated live footprint; allocation is diagnostic.
-      const usage = await db.getHistoryStorageUsage(database);
-      this.recordCapacityRows = usage.live_rows;
-      this.recordCapacityBytes = usage.estimated_live_storage_bytes;
+      const usage = await db.getHistoryStorageBytes(database);
+      this.recordCapacityBytes = usage.allocated_bytes;
       const decision = evaluateHistoryCapacity(usage, {
-        rowLimit: this.recordHighWatermarkRows,
         byteLimit: this.recordHighWatermarkBytes,
         wasBlocked: this.recordCapacityBlocked,
       });
       this.recordCapacityBlocked = decision.blocked;
       this.recordCapacityNextCheckAt = now + this.capacityCheckDelayMs();
       await this.writeRecordCapacitySnapshot({
-        measurement: 'live-row-bytes-plus-index-estimate',
-        rows: this.recordCapacityRows,
+        measurement: 'partition-tree-bytes',
         bytes: this.recordCapacityBytes,
         blocked: this.recordCapacityBlocked,
         checkedAt: now,
         nextCheckAt: this.recordCapacityNextCheckAt,
-        highWatermarkRows: this.recordHighWatermarkRows,
         highWatermarkBytes: this.recordHighWatermarkBytes,
       });
       if (this.recordCapacityBlocked && now - this.recordCapacityLastAuditAt >= RECORD_CAPACITY_AUDIT_THROTTLE_MS) {
         this.recordCapacityLastAuditAt = now;
         // 写清楚是哪条线跳的：只报一个总数会让人对着错的旋钮调半天。
-        const trigger = decision.byteRatio >= decision.rowRatio ? 'estimated live size' : 'row count';
         await bestEffortRecordHealthEvent(
           database,
           'do_record_persistence',
           'error',
-          `record persistence paused by history ${trigger}: `
-          + `${this.recordCapacityBytes}/${this.recordHighWatermarkBytes} bytes, `
-          + `${this.recordCapacityRows}/${this.recordHighWatermarkRows} rows; `
-          + `${usage.allocated_bytes} allocated bytes (diagnostic only); `
+          `record persistence paused by history partition allocation: `
+          + `${this.recordCapacityBytes}/${this.recordHighWatermarkBytes} bytes; `
           + 'live data continues without history writes',
           { auditAction: 'do_record_capacity_high_watermark' },
         );
@@ -2655,45 +2999,6 @@ export class LiveDataDO {
     });
   }
 
-  private gpuSnapshotSignature(gpus: unknown): string | null {
-    if (!Array.isArray(gpus) || gpus.length === 0) return null;
-    const devices = gpus
-      .map((device, index) => {
-        const value = isObjectPayload(device) ? device : {};
-        const memTotal = Number(value.mem_total || 0);
-        const memBucketSize = Math.max(memTotal * GPU_MEMORY_BUCKET_RATIO, GPU_MEMORY_BUCKET_MIN_UNITS);
-        return {
-          i: Number(value.device_index ?? index),
-          n: String(value.device_name || '').slice(0, 64),
-          mt: Math.round(memTotal / GPU_MEMORY_BUCKET_MIN_UNITS),
-          mu: Math.round(Number(value.mem_used || 0) / memBucketSize),
-          u: Math.round(Number(value.utilization || 0) / GPU_UTILIZATION_BUCKET_PERCENT),
-          t: Math.round(Number(value.temperature || 0) / GPU_TEMPERATURE_BUCKET_C),
-        };
-      })
-      .sort((a, b) => a.i - b.i || a.n.localeCompare(b.n));
-    return JSON.stringify(devices);
-  }
-
-  private async shouldPersistGPUSnapshot(clientId: string, gpus: unknown, nowMs: number): Promise<{ persist: boolean; signature: string | null }> {
-    const signature = this.gpuSnapshotSignature(gpus);
-    if (!signature) return { persist: false, signature: null };
-
-    const key = `${GPU_SNAPSHOT_META_PREFIX}${clientId}`;
-    const previous = await this.state.storage.get<GPUSnapshotMeta>(key);
-    if (!previous || previous.signature !== signature || nowMs - Number(previous.persistedAt || 0) >= GPU_SNAPSHOT_UNCHANGED_HEARTBEAT_MS) {
-      return { persist: true, signature };
-    }
-    return { persist: false, signature };
-  }
-
-  private async markGPUSnapshotPersisted(clientId: string, signature: string, nowMs: number): Promise<void> {
-    await this.state.storage.put(`${GPU_SNAPSHOT_META_PREFIX}${clientId}`, {
-      signature,
-      persistedAt: nowMs,
-    } satisfies GPUSnapshotMeta);
-  }
-
   private pingResultStateKey(clientId: string, taskId: number): string {
     return `${PING_RESULT_STORAGE_PREFIX}${clientId}:${taskId}`;
   }
@@ -2707,14 +3012,7 @@ export class LiveDataDO {
     }
     const value = raw as Partial<PingResultState>;
     const lastAcceptedMs = Number(value.lastAcceptedMs || 0);
-    const state: PingResultState = {
-      lastAcceptedMs: Number.isFinite(lastAcceptedMs) ? lastAcceptedMs : 0,
-    };
-    const persistedValue = Number(value.value);
-    const persistedAt = Number(value.persistedAt || 0);
-    if (Number.isFinite(persistedValue)) state.value = persistedValue;
-    if (Number.isFinite(persistedAt) && persistedAt > 0) state.persistedAt = persistedAt;
-    return state;
+    return { lastAcceptedMs: Number.isFinite(lastAcceptedMs) ? lastAcceptedMs : 0 };
   }
 
   private async readPingResultState(key: string): Promise<PingResultState> {
@@ -2726,36 +3024,15 @@ export class LiveDataDO {
     return state;
   }
 
-  private async writePingResultState(key: string, state: PingResultState): Promise<void> {
-    await this.state.storage.put(key, state);
-    this.pingResultStateCache.set(key, state);
-  }
-
-  private shouldPersistPingResult(result: PingPersistenceResult, state: PingResultState, nowMs: number): boolean {
-    const previousValue = Number(state.value);
-    const previousPersistedAt = Number(state.persistedAt || 0);
-    if (!Number.isFinite(previousValue) || !Number.isFinite(previousPersistedAt) || previousPersistedAt <= 0) {
-      return true;
-    }
-
-    const currentLost = result.value === PING_LOSS_VALUE;
-    const previousLost = previousValue === PING_LOSS_VALUE;
-    if (currentLost !== previousLost) return true;
-    if (currentLost) return nowMs - previousPersistedAt >= PING_UNCHANGED_HEARTBEAT_MS;
-    if (Math.abs(result.value - previousValue) >= PING_VALUE_CHANGE_THRESHOLD_MS) return true;
-    return nowMs - previousPersistedAt >= PING_UNCHANGED_HEARTBEAT_MS;
-  }
-
   private async markPingResultsPersisted(clientId: string, results: PingPersistenceResult[], nowMs: number): Promise<void> {
     const updates: Record<string, PingResultState> = {};
     for (const result of results) {
       const key = this.pingResultStateKey(clientId, result.taskId);
-      const previous = this.pingResultStateCache.get(key) || { lastAcceptedMs: nowMs };
+      const acceptedAtMs = result.observedAtMs ?? nowMs;
+      const previous = this.pingResultStateCache.get(key) || { lastAcceptedMs: acceptedAtMs };
       updates[key] = {
         ...previous,
-        lastAcceptedMs: Math.max(previous.lastAcceptedMs, nowMs),
-        value: result.value,
-        persistedAt: nowMs,
+        lastAcceptedMs: Math.max(previous.lastAcceptedMs, acceptedAtMs),
       };
     }
     // At most 50 results. Commit their interval state together so a failed
@@ -2801,11 +3078,6 @@ export class LiveDataDO {
       await db.insertRecord(database, record);
       if (!force) await this.markPersistSuccess(clientId, nowMs);
 
-      const gpuDecision = await this.shouldPersistGPUSnapshot(clientId, normalizedReport.gpus, nowMs);
-      if (gpuDecision.persist && gpuDecision.signature) {
-        await db.insertGPURecords(database, clientId, time, normalizedReport.gpus);
-        await this.markGPUSnapshotPersisted(clientId, gpuDecision.signature, nowMs);
-      }
       await this.recordHotPathHealthOk(
         'do_record_persistence',
         `record persisted for ${clientId}`,
@@ -2836,31 +3108,64 @@ export class LiveDataDO {
     }
   }
 
-  private persistPingResult(clientId: string, result: unknown, nowMs: number): Promise<void> {
-    return this.runPingWrite(clientId, () => this.persistQueuedPingResult(clientId, result, nowMs));
-  }
-
-  private async persistQueuedPingResult(clientId: string, result: unknown, nowMs: number): Promise<void> {
+  /**
+   * Persist all Ping results collected from one report batch. A SQL snapshot is
+   * keyed by (client, time), so reports at the same timestamp must be merged
+   * before calling the upsert RPC or later reports overwrite earlier task keys.
+   * Interval state stays pending in memory until every SQL upsert succeeds.
+   */
+  private async persistQueuedPingRounds(
+    clientId: string,
+    reports: Array<{ report: JsonObject; reportTime: number }>,
+    nowMs: number,
+    lifecycle?: ReportLifecycle,
+  ): Promise<void> {
     const database = this.getQueryDatabase();
     if (!database) return;
 
     try {
       if (!(await this.isRecordPersistenceEnabled(nowMs))) return;
       if (!(await this.canPersistWithinCapacity(nowMs))) return;
+      if (lifecycle) this.assertReportCurrent(lifecycle);
 
       const tasks = await this.getPingTasks(nowMs);
-      const validated = validatePingResults(result, tasks, clientId);
-      if (!validated.ok) return;
+      const pending = new Map<string, number>();
+      const rounds = new Map<number, Map<number, PingPersistenceResult>>();
+      const acceptedForState: PingPersistenceResult[] = [];
 
-      const accepted = await this.filterPingResultsByInterval(clientId, validated.results, tasks, nowMs);
-      if (accepted.length === 0) return;
+      for (const { report, reportTime } of reports) {
+        const rawResults = this.pingResultsFromReport(report);
+        if (rawResults.length === 0) continue;
+        const validated = validatePingResults({ results: rawResults }, tasks, clientId);
+        if (!validated.ok) continue;
+        const normalized = this.normalizePingObservedAt(validated.results, reportTime);
+        const accepted = await this.filterPingResultsByInterval(clientId, normalized, tasks, reportTime, pending);
+        if (accepted.length === 0) continue;
 
-      const time = new Date(nowMs).toISOString();
-      await db.insertPingSnapshot(database, clientId, time, accepted);
-      await this.markPingResultsPersisted(clientId, accepted, nowMs);
+        for (const result of accepted) {
+          // Agent backlog queues need not have equal lengths. Each task owns
+          // its probe time; the latest item in a report is not a shared round.
+          const roundTime = result.observedAtMs ?? reportTime;
+          let byTask = rounds.get(roundTime);
+          if (!byTask) {
+            byTask = new Map();
+            rounds.set(roundTime, byTask);
+          }
+          byTask.set(result.taskId, result);
+          acceptedForState.push(result);
+        }
+      }
+
+      if (acceptedForState.length === 0) return;
+      for (const [roundTime, byTask] of rounds) {
+        if (lifecycle) this.assertReportCurrent(lifecycle);
+        await db.insertPingSnapshot(database, clientId, new Date(roundTime).toISOString(), [...byTask.values()]);
+      }
+      if (lifecycle) this.assertReportCurrent(lifecycle);
+      await this.markPingResultsPersisted(clientId, acceptedForState, nowMs);
       await this.recordHotPathHealthOk(
         'ping_persistence',
-        `ping result persisted for ${clientId}`,
+        `ping batch persisted for ${clientId}`,
         nowMs,
       );
     } catch (error) {
@@ -2868,72 +3173,11 @@ export class LiveDataDO {
         database,
         'ping_persistence',
         'error',
-        `ping persist failed for ${clientId}: ${errorDetail(error)}`,
+        `ping batch persist failed for ${clientId}: ${errorDetail(error)}`,
         { auditAction: 'ping_persistence_error' },
       );
       throw error;
     }
-  }
-
-  private async updateHttpPingResult(request: Request): Promise<Response> {
-    const parsed = await parseJsonRequestWithLimit(request, HTTP_PING_RESULT_MAX_BODY_BYTES);
-    if ('response' in parsed) return parsed.response;
-    const payload = parsed.body;
-    if (!isObjectPayload(payload) || typeof payload.client_id !== 'string' || !Array.isArray(payload.results)) {
-      return Response.json({ error: 'Invalid ping result payload' }, { status: 400 });
-    }
-    const database = this.getQueryDatabase();
-    if (!database) {
-      return Response.json({ error: 'Database is unavailable' }, { status: 500 });
-    }
-
-    const clientId = payload.client_id;
-    return this.runPingWrite(clientId, async () => {
-      try {
-        const nowMs = Number.isFinite(Number(payload.timestamp)) ? Number(payload.timestamp) : Date.now();
-        if (!(await this.isRecordPersistenceEnabled(nowMs))) {
-          return Response.json({ success: true, accepted: 0, disabled: true });
-        }
-        if (!(await this.canPersistWithinCapacity(nowMs))) {
-          return Response.json({ success: true, accepted: 0, capacity_limited: true });
-        }
-
-        let accepted: PingPersistenceResult[] = [];
-        const trustedResults = this.trustedPingResults(payload.results);
-        if (trustedResults) {
-          accepted = await this.filterTrustedPingResultsByInterval(clientId, trustedResults, nowMs);
-        } else {
-          const tasks = await this.getPingTasks(nowMs);
-          const validated = validatePingResults(payload.results, tasks, clientId);
-          if (!validated.ok) {
-            return Response.json({ error: validated.error }, { status: validated.status });
-          }
-          accepted = await this.filterPingResultsByInterval(clientId, validated.results, tasks, nowMs);
-        }
-        if (accepted.length === 0) {
-          return Response.json({ success: true, accepted: 0, rate_limited: true });
-        }
-
-        const time = new Date(nowMs).toISOString();
-        await db.insertPingSnapshot(database, clientId, time, accepted);
-        await this.markPingResultsPersisted(clientId, accepted, nowMs);
-        await this.recordHotPathHealthOk(
-          'ping_persistence',
-          `ping result persisted for ${clientId}`,
-          nowMs,
-        );
-        return Response.json({ success: true, accepted: accepted.length });
-      } catch (error) {
-        await bestEffortRecordHealthEvent(
-          database,
-          'ping_persistence',
-          'error',
-          `ping persist failed: ${errorDetail(error)}`,
-          { auditAction: 'ping_persistence_error' },
-        );
-        return Response.json({ error: 'Ping persist failed' }, { status: 500 });
-      }
-    });
   }
 
   private pingResultIntervalMs(intervalSec?: number): number {
@@ -2944,38 +3188,12 @@ export class LiveDataDO {
     return this.pingRecordPersistIntervalMs;
   }
 
-  private trustedPingResults(input: unknown): PingPersistenceResult[] | null {
-    if (!Array.isArray(input) || input.length === 0 || input.length > MAX_PING_RESULTS_PER_REPORT) return null;
-    const results: PingPersistenceResult[] = [];
-    for (const raw of input) {
-      if (!raw || typeof raw !== 'object') return null;
-      const item = raw as Record<string, unknown>;
-      const taskId = Number(item.task_id);
-      const value = Number(item.value);
-      const intervalSec = Number(item.interval_sec);
-      if (
-        !Number.isInteger(taskId) ||
-        taskId <= 0 ||
-        !Number.isFinite(value) ||
-        (value !== PING_LOSS_VALUE && (value < 0 || value > MAX_PING_VALUE_MS)) ||
-        !Number.isFinite(intervalSec)
-      ) {
-        return null;
-      }
-      results.push({
-        taskId,
-        value,
-        intervalSec,
-      });
-    }
-    return results;
-  }
-
   private async filterPingResultsByInterval(
     clientId: string,
     results: PingPersistenceResult[],
     tasks: db.PingTask[],
     nowMs: number,
+    pending?: Map<string, number>,
   ): Promise<PingPersistenceResult[]> {
     const taskMap = new Map<number, db.PingTask>();
     for (const task of tasks) {
@@ -2985,37 +3203,50 @@ export class LiveDataDO {
     return this.filterTrustedPingResultsByInterval(clientId, results.map(result => ({
       ...result,
       intervalSec: result.intervalSec ?? taskMap.get(result.taskId)?.interval_sec,
-    })), nowMs);
+    })), nowMs, pending);
+  }
+
+  /**
+   * Agent 会把探测结果先积压在本地、随下一次上报一起发来，所以带探测时间的结果
+   * 应按它自己的探测时间记录。晚于收到时间的略微钳到收到时间；早于保留期的直接丢弃
+   * （写进去也会马上被清理）。老版本 Agent 不带时间，保持原样。
+   */
+  private normalizePingObservedAt(results: PingPersistenceResult[], nowMs: number): PingPersistenceResult[] {
+    const oldestMs = nowMs - this.pingObservedMaxAgeMs;
+    const normalized: PingPersistenceResult[] = [];
+    for (const result of results) {
+      if (result.observedAtMs === undefined) {
+        normalized.push(result);
+        continue;
+      }
+      if (result.observedAtMs < oldestMs) continue;
+      normalized.push({ ...result, observedAtMs: Math.min(result.observedAtMs, nowMs) });
+    }
+    return normalized;
   }
 
   private async filterTrustedPingResultsByInterval(
     clientId: string,
     results: PingPersistenceResult[],
     nowMs: number,
+    pending?: Map<string, number>,
   ): Promise<PingPersistenceResult[]> {
     const accepted: PingPersistenceResult[] = [];
-    const dueResults: PingPersistenceResult[] = [];
     for (const result of results) {
       const minIntervalMs = this.pingResultIntervalMs(result.intervalSec);
       const key = this.pingResultStateKey(clientId, result.taskId);
       const state = await this.readPingResultState(key);
-      if (state.lastAcceptedMs && nowMs - state.lastAcceptedMs < minIntervalMs) {
-        continue;
-      }
-      const shouldPersist = this.shouldPersistPingResult(result, state, nowMs);
-      dueResults.push(result);
-      if (!shouldPersist) {
+      const lastAcceptedMs = Math.max(state.lastAcceptedMs, pending?.get(key) || 0);
+      // 按探测时间比较时，相邻两次的间隔等于 Agent 的探测间隔，抖动几毫秒就会被零容差误判为过密，
+      // 所以与监控落库一样留一点提前量。
+      const atMs = result.observedAtMs ?? nowMs;
+      const thresholdMs = result.observedAtMs === undefined ? minIntervalMs : recordPersistThresholdMs(minIntervalMs);
+      if (lastAcceptedMs && atMs - lastAcceptedMs < thresholdMs) {
         continue;
       }
       accepted.push(result);
+      pending?.set(key, Math.max(lastAcceptedMs, atMs));
     }
-    if (accepted.length > 0) return dueResults;
-    // Intentional unchanged-value compression has no SQL write to await.
-    for (const result of dueResults) {
-      const key = this.pingResultStateKey(clientId, result.taskId);
-      const state = await this.readPingResultState(key);
-      await this.writePingResultState(key, { ...state, lastAcceptedMs: nowMs });
-    }
-    return [];
+    return accepted;
   }
 }

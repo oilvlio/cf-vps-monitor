@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 
-const { getExpiryInfo } = await import('./billing.ts');
+const { getExpiryInfo, getExpiryRemaining } = await import('./billing.ts');
 
 const now = Date.parse('2026-07-09T00:00:00Z');
 
@@ -11,3 +11,10 @@ assert.deepEqual(getExpiryInfo('2026-07-15T00:00:00Z', now), { label: '剩 6天'
 assert.deepEqual(getExpiryInfo('2026-07-09T00:00:00Z', now), { label: '已到期', color: 'red' });
 assert.deepEqual(getExpiryInfo('', now), { label: '', color: 'gray' });
 assert.deepEqual(getExpiryInfo('not-a-date', now), { label: '', color: 'gray' });
+
+assert.deepEqual(getExpiryRemaining('2026-08-09T00:00:00Z', now), { value: '31天', color: 'green' });
+assert.deepEqual(getExpiryRemaining('2026-07-16T00:00:00Z', now), { value: '7天', color: 'yellow' });
+assert.deepEqual(getExpiryRemaining('2026-07-15T00:00:00Z', now), { value: '6天', color: 'red' });
+assert.deepEqual(getExpiryRemaining('2026-07-09T00:00:00Z', now), { value: '已到期', color: 'red' });
+assert.deepEqual(getExpiryRemaining('2300-01-01T00:00:00Z', now), { value: '长期', color: 'green' });
+assert.deepEqual(getExpiryRemaining('', now), { value: '', color: 'gray' });

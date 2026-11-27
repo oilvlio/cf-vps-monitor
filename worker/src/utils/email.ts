@@ -194,7 +194,7 @@ export async function sendSmtpCommands(
 
   // The final 250 commits acceptance. A subsequent disconnect must not cause
   // the notification queue to resend an already accepted message.
-  try { void io.writeLine('QUIT').catch(() => {}); } catch {}
+  try { void io.writeLine('QUIT').catch(() => {}); } catch { /* QUIT is best-effort after acceptance. */ }
   return { ok: true };
 }
 
@@ -240,7 +240,7 @@ export async function sendSmtpEmail(config: SmtpConfig, subject: string, body: s
 
   const timeout = new Promise<SmtpResult>((resolve, reject) => {
     timeoutId = setTimeout(() => {
-      try { void socket.close().catch(() => {}); } catch {}
+      try { void socket.close().catch(() => {}); } catch { /* Already closed by the timeout path. */ }
       if (budget && budget.remainingMs() <= 0) {
         reject(new ScheduledBudgetExceeded());
         return;
@@ -268,9 +268,9 @@ export async function sendSmtpEmail(config: SmtpConfig, subject: string, body: s
     } catch {
       return { ok: false, error: 'SMTP 连接或安全协商失败' } satisfies SmtpResult;
     } finally {
-      try { reader.releaseLock(); } catch {}
-      try { writer.releaseLock(); } catch {}
-      try { await socket.close(); } catch {}
+      try { reader.releaseLock(); } catch { /* Lock may already be released by startTls. */ }
+      try { writer.releaseLock(); } catch { /* Lock may already be released by startTls. */ }
+      try { await socket.close(); } catch { /* Closing an already-closed socket is harmless. */ }
       if (timeoutId) clearTimeout(timeoutId);
     }
   })();

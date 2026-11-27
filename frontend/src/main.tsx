@@ -4,6 +4,7 @@ import { BrowserRouter } from 'react-router-dom';
 import { Theme } from '@radix-ui/themes';
 import '@radix-ui/themes/styles.css';
 import './index.css';
+import './styles/minimal-admin.css';
 import App from './App';
 import MfaStepUpDialog from './components/MfaStepUpDialog';
 import { getLocalStorageItem } from './utils/browserStorage';
@@ -47,7 +48,7 @@ const Root = () => {
 
   // 暴露 setter 给全局
   React.useEffect(() => {
-    (window as any).__setThemeAppearance = (theme: ThemeMode) => {
+    window.__setThemeAppearance = (theme: ThemeMode) => {
       const explicitAppearance = getExplicitThemeAppearance(theme);
       if (!explicitAppearance) {
         document.documentElement.removeAttribute('data-theme-appearance');
@@ -56,7 +57,7 @@ const Root = () => {
       }
       setAppearance(explicitAppearance);
     };
-    (window as any).__setRadixAccentColor = (theme: DisplayTheme) => {
+    window.__setRadixAccentColor = (theme: DisplayTheme) => {
       setAccentColor(accentColorForDisplayTheme(theme));
     };
   }, []);

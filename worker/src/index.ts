@@ -6,7 +6,7 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { APP_VERSION } from './utils/app-version';
-import { shortGitSha } from './utils/update-check';
+import { shortGitSha } from './utils/git-sha';
 
 // 路由模块
 import { publicRoutes } from './routes/public';
@@ -15,13 +15,15 @@ import { adminThemeRoutes, publicThemeRoutes } from './routes/theme';
 import { clientRoutes } from './routes/client';
 import { wsRoutes } from './routes/websocket';
 import { setupRoutes } from './routes/setup';
+import { monitorCompatRoutes } from './routes/monitor-compat';
+import { thirdPartyThemeRoutes } from './routes/third-party-theme';
 import * as db from './db/queries';
 import { DatabaseConfigurationError, getDatabase, withDatabase } from './db/provider';
 import { validateAdminSession } from './auth/admin-session';
 import { AuthConfigurationError, verifyAdminToken, type AdminJwtPayload } from './auth/jwt';
 import { isMfaStepUpProtectedRequest } from './auth/mfa-policy';
 import { verifyMfaToken } from './auth/mfa-token';
-import { getAdminSessionToken, getMfaStepUpToken, verifyAdminCsrfToken } from './auth/session';
+import { getAdminSessionToken, getMfaStepUpToken, verifyAdminWriteRequest } from './auth/session';
 import { buildAdminSettings } from './settings/schema';
 import { bestEffortRecordHealthEvent, errorDetail, type StoredHealthComponent } from './utils/observability';
 import { NOTIFICATION_DISPATCH_SETTING_KEYS, deliverNotification, dispatchNotification } from './utils/notification-dispatch';
@@ -29,18 +31,16 @@ import { currentScheduledBudget, rotateScheduledItems, scheduledItems, Scheduled
 import { clearScheduledDatabaseStartupFailure, recordScheduledDatabaseStartupFailure } from './utils/scheduled-observability';
 import { sanitizeSetupDiagnosticDetail } from './utils/setup-diagnostics';
 import { getCloudflareClientIp } from './utils/request-ip';
+import { liveDataStub } from './utils/live-data-object';
 import {
-  checkWebsiteMonitorHttp,
-  shouldNotifyWebsiteDown,
-  shouldNotifyWebsiteRecovery,
-} from './utils/website-monitor';
-import {
+  beijingMonthKey,
+  beijingMonthStartMs,
   buildExpiryNotification,
   buildLoadNotification,
   buildNodeRecoveryNotification,
   buildOfflineNotification,
-  buildWebsiteAlertNotification,
-  buildWebsiteRecoveryNotification,
+  formatNotificationTime,
+  formatOfflineDuration,
   type NotificationMessage,
 } from './utils/notification-templates';
 import { evaluateOfflineNotificationEvent, DEFAULT_OFFLINE_GRACE_PERIOD_SEC, DEFAULT_OFFLINE_CONFIRM_ROUNDS } from './utils/offline-notification';
@@ -59,6 +59,7 @@ type RuntimeBindings = {
   JWT_SECRET?: string;
   SETUP_DIAGNOSTICS_ENABLED?: string;
   CURRENT_GIT_COMMIT?: string;
+  CF_MONITOR_AGENT_REPOSITORY?: string;
 };
 
 // Wrangler owns configured bindings; this adds runtime-only optional values.
@@ -145,13 +146,12 @@ function canServeWithoutDatabaseStartup(pathname: string): boolean {
     pathname === '/favicon-16x16.png' ||
     pathname === '/favicon-32x32.png' ||
     pathname === '/apple-touch-icon.png' ||
-    pathname === '/app-icon.png' ||
+    pathname === '/app-icon.webp' ||
     pathname === '/ping' ||
     pathname === '/api/setup/status' ||
     pathname === '/api/setup/database/init' ||
     pathname === '/api/version' ||
     pathname === '/agent/install.sh' ||
-    pathname === '/agent/install-linux.sh' ||
     pathname === '/agent/install-windows.ps1' ||
     pathname === '/api/login' ||
     pathname === '/api/login/mfa' ||
@@ -166,8 +166,6 @@ function canServeWithoutDatabaseStartup(pathname: string): boolean {
     pathname === '/api/task/ping' ||
     pathname.startsWith('/api/records/') ||
     pathname.startsWith('/api/recent/') ||
-    pathname === '/api/websites' ||
-    pathname.startsWith('/api/websites/') ||
     pathname === '/api/theme/active.css' ||
     pathname.startsWith('/api/theme/assets/') ||
     pathname.startsWith('/api/theme/manifest/') ||
@@ -299,6 +297,8 @@ app.use('*', async (c, next) => {
   await next();
   if (c.res.status === 101) return;
   for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
+    // 第三方主题的 index.html 带有按内联脚本哈希生成的 CSP，不要覆盖。
+    if (name === 'Content-Security-Policy' && c.res.headers.has(name)) continue;
     c.header(name, value);
   }
 });
@@ -310,13 +310,20 @@ app.use('/api/*', async (c, next) => {
   return undefined;
 });
 
-app.get('/agent/install.sh', (c) => c.redirect('https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/agent/install.sh', 302));
-app.get('/agent/install-linux.sh', (c) => c.redirect('https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/agent/install-linux.sh', 302));
-app.get('/agent/install-windows.ps1', (c) => c.redirect('https://raw.githubusercontent.com/kadidalax/cf-vps-monitor/main/agent/install-windows.ps1', 302));
+for (const file of ['install.sh', 'install-windows.ps1']) {
+  app.get(`/agent/${file}`, (c) => {
+    const repository = c.env.CF_MONITOR_AGENT_REPOSITORY || 'oilvlio/cf-vps-monitor';
+    if (!/^[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+$/.test(repository)) return c.text('Invalid Agent repository', 503);
+    return c.redirect(`https://raw.githubusercontent.com/${repository}/main/agent/${file}`, 302);
+  });
+}
 
 // 公开 API，无认证
 app.route('/api/setup', setupRoutes);
 app.route('/api/theme', publicThemeRoutes);
+// monitor 主题契约（/api/nodes、/api/nodes/:id/metrics、/api/themes/:short/config）
+// 必须在 publicRoutes 之前挂载，才能拿到 /api/nodes 这条路径。
+app.route('/api', monitorCompatRoutes);
 app.route('/api', publicRoutes);
 
 // Agent 上报 API，Token 认证
@@ -351,7 +358,7 @@ app.use('/api/admin/*', async (c, next): Promise<Response | undefined> => {
   if (await getAdminSessionEdgeCache(payload)) {
     c.set('userId', payload.userId);
     c.set('username', payload.username);
-    if (!safeMethod && !verifyAdminCsrfToken(c)) {
+    if (!safeMethod && !verifyAdminWriteRequest(c)) {
       return c.json({ error: 'CSRF token 无效，请刷新页面后重试' }, 403);
     }
     if (!safeMethod) {
@@ -375,7 +382,7 @@ app.use('/api/admin/*', async (c, next): Promise<Response | undefined> => {
     c.set('userId', sessionUser.uuid);
     c.set('username', sessionUser.username);
     putAdminSessionEdgeCache(c, payload);
-    if (!safeMethod && !verifyAdminCsrfToken(c)) {
+    if (!safeMethod && !verifyAdminWriteRequest(c)) {
       try {
         const path = new URL(c.req.url).pathname;
         await auditCsrfRejection(database, sessionUser.username, requestIp(c), path);
@@ -396,12 +403,6 @@ app.use('/api/admin/*', async (c, next): Promise<Response | undefined> => {
 app.route('/api/admin/themes', adminThemeRoutes);
 app.route('/api/admin', adminRoutes);
 
-// 管理员手动触发维护任务，用于本地开发和部署后自检。
-app.post('/api/admin/cron/run', async (c) => {
-  await runScheduled(c.env);
-  return c.json({ success: true });
-});
-
 // 健康检查
 app.get('/ping', (c) => c.text('pong'));
 
@@ -416,6 +417,10 @@ app.get('/api/version', (c) => {
     build: gitCommit || `release-${appVersion}`,
   });
 });
+
+// 第三方主题托管：内部有一条 `*` 兜底路由，必须挂在所有具体路由之后，
+// 否则会先于 /api/version 之类的后注册路由命中。
+app.route('/', thirdPartyThemeRoutes);
 
 // 404 处理
 // 前端静态资源由 wrangler.toml 的 [assets] 托管；
@@ -435,6 +440,7 @@ const SCHEDULED_SETTING_KEYS = [
   ...NOTIFICATION_DISPATCH_SETTING_KEYS,
   'record_preserve_time',
   'ping_record_preserve_time',
+  'rollup_preserve_time',
   'audit_log_preserve_time',
   'offline_notify_never_reported',
   'offline_confirm_rounds',
@@ -561,48 +567,43 @@ async function runRecordCleanup(context: ScheduledRunContext, now: Date): Promis
   if (Number.isFinite(lastCleanupAt) && now.getTime() - lastCleanupAt < RECORD_CLEANUP_INTERVAL_MS) {
     return;
   }
-  const recordHours = Math.min(72, Math.max(1, Number(settings['record_preserve_time'] || 72)));
-  const pingHours = Math.min(72, Math.max(1, Number(settings['ping_record_preserve_time'] || recordHours)));
   const auditHours = Math.max(24, Number(settings['audit_log_preserve_time'] || 2160));
 
-  const recordBefore = new Date(now.getTime() - recordHours * 60 * 60 * 1000).toISOString();
-  const pingBefore = new Date(now.getTime() - pingHours * 60 * 60 * 1000).toISOString();
   const auditBefore = new Date(now.getTime() - auditHours * 60 * 60 * 1000).toISOString();
 
-  const recordDeleted = await db.deleteOldRecords(context.database, recordBefore);
-  const websiteDeleted = await db.deleteOldWebsiteChecks(context.database, recordBefore);
-  const pingDeleted = await db.deleteOldPingRecords(context.database, pingBefore);
   const auditDeleted = await db.deleteOldAuditLogs(context.database, auditBefore);
+  const maintenance = await db.maintainHistory(context.database, now.toISOString());
   const deliveryDeleted = await db.cleanupNotificationDeliveryState(context.database, now.toISOString(), {
     batchSize: 1000, maxBatches: 1,
   });
-  const hasMore = recordDeleted.has_more || websiteDeleted.has_more || pingDeleted.has_more || auditDeleted.has_more || deliveryDeleted.has_more;
+  const hasMore = maintenance.pending > 0 || maintenance.locked || auditDeleted.has_more || deliveryDeleted.has_more;
   const deleted = {
-    records: recordDeleted.records,
-    gpu_records: recordDeleted.gpu_records,
-    gpu_snapshots: recordDeleted.gpu_snapshots,
-    website_checks: websiteDeleted.website_checks,
-    ping_records: pingDeleted.ping_records,
-    ping_snapshots: pingDeleted.ping_snapshots,
+    records: 0,
+    ping_records: 0,
+    ping_snapshots: 0,
+    ping_rollup: 0,
     audit_logs: auditDeleted.audit_logs,
     notification_delivery_state: deliveryDeleted.notification_delivery_state,
   };
+  const droppedPartitions = {
+    records: maintenance.dropped_by_parent?.['public.records'] || 0,
+    ping_snapshots: maintenance.dropped_by_parent?.['public.ping_snapshots'] || 0,
+    ping_rollup: maintenance.dropped_by_parent?.['public.ping_rollup'] || 0,
+  };
+  const droppedPartitionCount = Object.values(droppedPartitions).reduce((sum, value) => sum + value, 0);
   // A capped batch is progress, not completion. Keep the old timestamp so the
   // next two-minute Cron continues draining instead of skipping another day.
   if (!hasMore) {
     await db.setSetting(context.database, RECORD_CLEANUP_LAST_RUN_KEY, now.toISOString());
   }
   const deletedRows = Object.values(deleted).reduce((sum, value) => sum + Number(value || 0), 0);
-  if (deletedRows === 0) {
+  if (deletedRows === 0 && droppedPartitionCount === 0) {
     return;
   }
   await db.insertAuditLog(context.database, 'system', 'cron_cleanup', `分批清理${hasMore ? '待续' : '完成'}: ${JSON.stringify({
-    before: {
-      records: recordBefore,
-      ping_records: pingBefore,
-      audit_logs: auditBefore,
-    },
+      before: { audit_logs: auditBefore },
     deleted,
+    dropped_partitions: droppedPartitions,
     has_more: hasMore,
   })}`);
 }
@@ -619,7 +620,7 @@ async function fetchOfflineLiveness(
 ): Promise<Record<string, { lastSeen: number | null; offline: boolean; streak: number }> | null> {
   if (items.length === 0) return {};
   try {
-    const stub = env.LIVE_DATA.get(env.LIVE_DATA.idFromName('global'));
+    const stub = liveDataStub(env.LIVE_DATA);
     const response = await stub.fetch('https://do/offline-evaluate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -702,27 +703,70 @@ async function runOfflineCheck(context: ScheduledRunContext, now: Date): Promise
     if (event.type === 'offline' && (live?.streak ?? 0) < streakThreshold) continue;
 
     if (event.type === 'offline') {
-      const sent = await sendNotification(context, buildOfflineNotification({
+      // 通知文案和审计日志共用同一个分钟数，保证两处看到的离线时长一致。
+      const offlineMinutes = Math.floor(event.offlineMs / 60000);
+      // 记录本次离线起点：优先用断线前的最后一次上报；从未上报的节点用创建时间。
+      const offlineSinceMs = event.neverReported
+        ? Date.parse(event.createdAt || '')
+        : Date.parse(event.lastSeenLabel);
+      const offlineSince = new Date(
+        Number.isFinite(offlineSinceMs) ? offlineSinceMs : now.getTime(),
+      ).toISOString();
+      const message = buildOfflineNotification({
         nodeName: client.name || client.uuid,
-        offlineMinutes: Math.floor(event.offlineMs / 60000),
+        offlineMinutes,
         lastSeen: event.lastSeenLabel,
         createdAt: event.createdAt,
         eventTime: now,
-      }), { key: `offline:${item.client}`, eventId: `offline:${lastTime || client.created_at || 'never'}` }, now,
-      token => db.markOfflineNotificationSent(context.database, item.client, now.toISOString(), token));
+      });
+      const sent = await sendNotification(context, message, { key: `offline:${item.client}`, eventId: `offline:${lastTime || client.created_at || 'never'}` }, now,
+      token => db.recordOfflineTransition(context.database, item.client, {
+        phase: 'offline',
+        time: now.toISOString(),
+        since: offlineSince,
+        token,
+      }));
       if (!sent) continue;
-      await db.insertAuditLog(context.database, 'system', 'offline_notify', `${sent ? '已发送' : '已记录'}离线告警: ${client.name || client.uuid}${event.neverReported ? ' (从未上报)' : ''}`);
+      const lastSeenLabel = event.lastSeenLabel === '从未上报'
+        ? '从未上报'
+        : formatNotificationTime(event.lastSeenLabel);
+      await db.insertAuditLog(context.database, 'system', 'offline_notify', `已发送离线告警: ${client.name || client.uuid}，离线 ${offlineMinutes} 分钟，最后上报 ${lastSeenLabel}`);
       continue;
     }
 
-    const sent = await sendNotification(context, buildNodeRecoveryNotification({
+    const recoveredMs = Date.parse(event.recoveredAt);
+    const recoveredAtMs = Number.isFinite(recoveredMs) ? recoveredMs : now.getTime();
+    const offlineSinceMs = Date.parse(item.offline_since || item.last_notified || '');
+    const fullOfflineMs = Number.isFinite(offlineSinceMs)
+      ? Math.max(0, recoveredAtMs - offlineSinceMs)
+      : 0;
+    const offlineMinutes = Math.max(1, Math.round(fullOfflineMs / 60000));
+    const monthKey = beijingMonthKey(now);
+    const monthStartMs = beijingMonthStartMs(now);
+    // 跨月恢复时只把「本月」那部分计入本月累计，避免把上个月的离线算进来。
+    const offlineInMonthMs = Number.isFinite(offlineSinceMs)
+      ? Math.max(0, recoveredAtMs - Math.max(offlineSinceMs, monthStartMs))
+      : 0;
+    const previousMonthMs = item.month_key === monthKey
+      ? Number(item.month_offline_ms || 0)
+      : 0;
+    const monthOfflineMs = previousMonthMs + offlineInMonthMs;
+    const message = buildNodeRecoveryNotification({
       nodeName: client.name || client.uuid,
       recoveredAt: event.recoveredAt,
+      offlineMinutes,
+      monthOfflineMs,
       eventTime: now,
-    }), { key: `offline:${item.client}`, eventId: `recovery:${item.last_notified}` }, now,
-    token => db.markOfflineNotificationSent(context.database, item.client, null, token));
+    });
+    const sent = await sendNotification(context, message, { key: `offline:${item.client}`, eventId: `recovery:${item.last_notified}` }, now,
+    token => db.recordOfflineTransition(context.database, item.client, {
+      phase: 'recovery',
+      monthKey,
+      monthOfflineMs,
+      token,
+    }));
     if (!sent) continue;
-    await db.insertAuditLog(context.database, 'system', 'online_notify', `${sent ? '已发送' : '已记录'}恢复上线: ${client.name || client.uuid}`);
+    await db.insertAuditLog(context.database, 'system', 'online_notify', `已发送恢复上线: ${client.name || client.uuid}，离线 ${offlineMinutes} 分钟后恢复上线，本月累计离线 ${formatOfflineDuration(monthOfflineMs)}，最新上报 ${formatNotificationTime(event.recoveredAt)}`);
   }
 }
 
@@ -910,58 +954,21 @@ async function runLoadCheck(context: ScheduledRunContext, now: Date): Promise<vo
   }
 }
 
-async function runWebsiteMonitorChecks(context: ScheduledRunContext, now: Date): Promise<void> {
-  const monitors = await db.listDueWebsiteMonitors(context.database, now.toISOString(), 50);
-  for await (const monitor of scheduledItems(context, 'websites', monitors, monitor => String(monitor.id))) {
-    const check = await checkWebsiteMonitorHttp(monitor);
-    const updated = await db.recordWebsiteCheck(context.database, check);
-    if (!updated) continue;
-
-    if (shouldNotifyWebsiteDown(updated, now)) {
-      const downSince = updated.down_since ? new Date(updated.down_since).getTime() : now.getTime();
-      const downMinutes = Math.max(0, Math.floor((now.getTime() - downSince) / 60000));
-      const lastStatus = updated.last_error || (updated.last_status_code ? `HTTP ${updated.last_status_code}` : 'network_error');
-      const sent = await sendNotification(context, buildWebsiteAlertNotification({
-        name: updated.name,
-        url: updated.url,
-        downMinutes,
-        lastStatus,
-        checkedAt: check.checked_at,
-      }), { key: `website:${updated.id}`, eventId: `down:${updated.config_revision}:${updated.down_since}` }, now);
-      if (!sent) continue;
-      if (!(await db.markWebsiteMonitorNotified(context.database, updated.id, now.toISOString(), updated))) continue;
-      await db.insertAuditLog(context.database, 'system', 'website_down', `${sent ? '已发送' : '已记录'}网站告警: ${updated.name}`);
-    }
-
-    if (shouldNotifyWebsiteRecovery(updated)) {
-      const downSince = monitor.down_since ? new Date(monitor.down_since).getTime() : now.getTime();
-      const downMinutes = Math.max(0, Math.floor((now.getTime() - downSince) / 60000));
-      const sent = await sendNotification(context, buildWebsiteRecoveryNotification({
-        name: updated.name,
-        url: updated.url,
-        downMinutes,
-        statusCode: updated.last_status_code,
-        latencyMs: updated.last_latency_ms,
-        eventTime: now,
-      }), { key: `website:${updated.id}`, eventId: `recovery:${updated.config_revision}:${updated.last_notified_at}` }, now);
-      if (!sent) continue;
-      if (!(await db.markWebsiteMonitorNotified(context.database, updated.id, null, updated))) continue;
-      await db.insertAuditLog(context.database, 'system', 'website_recovery', `${sent ? '已发送' : '已记录'}网站恢复: ${updated.name}`);
-    }
-  }
-}
 
 async function runScheduledStep(
   context: ScheduledRunContext,
   component: StoredHealthComponent,
   action: string,
   label: string,
-  step: () => Promise<void>,
+  step: () => Promise<unknown>,
 ): Promise<void> {
   try {
-    await step();
+    const result = await step();
     if (context.budget && !context.budget.canStart(4)) return;
-    await bestEffortRecordHealthEvent(context.database, component, 'ok', `${label} completed`, {
+    const detail = result && typeof result === 'object' && 'lag_seconds' in result
+      ? `${label} completed; watermark lag ${String(result.lag_seconds)} seconds`
+      : `${label} completed`;
+    await bestEffortRecordHealthEvent(context.database, component, 'ok', detail, {
       successThrottleMs: 60 * 60 * 1000,
     });
   } catch (error) {
@@ -985,11 +992,45 @@ async function runScheduled(env: Bindings): Promise<void> {
     const now = new Date();
     const context = createScheduledRunContext(env);
     const steps = [
+      ['cron_rollup', 'cron_rollup_error', '历史分桶', async () => {
+        // One builder for every family: cfm_build_rollup advances
+        // cfm_internal.rollup_state and drains rollup_dirty. Callers must not
+        // keep a second watermark table per family.
+        const results: Partial<Record<db.RollupFamily, Record<string, unknown>>> = {};
+        const failures: string[] = [];
+        for (const family of ['host', 'ping'] as const) {
+          if (!budget.canStart(4)) throw new ScheduledBudgetExceeded();
+          try {
+            results[family] = await db.buildRollup(
+              context.database, family, new Date(now.getTime() - 2 * 60 * 1000).toISOString(), 48,
+            );
+          } catch (error) {
+            if (error instanceof ScheduledBudgetExceeded || budget.remainingMs() === 0) throw new ScheduledBudgetExceeded();
+            failures.push(`${family}: ${errorDetail(error)}`);
+          }
+        }
+        if (failures.length > 0) throw new Error(failures.join('; '));
+        // A degraded pass retains failed buckets for retry. Record failures
+        // once per cron so repeated retry failures remain visible.
+        const failedBuckets = Object.values(results).reduce(
+          (sum, value) => sum + (Number((value as { failed_buckets?: unknown })?.failed_buckets) || 0),
+          0,
+        );
+        if (failedBuckets > 0) {
+          await db.insertAuditLog(
+            context.database,
+            'system',
+            'cron_rollup_degraded',
+            `历史分桶跳过 ${failedBuckets} 个损坏桶，水位线继续推进`,
+            'warning',
+          );
+        }
+        return results;
+      }],
       ['cron_cleanup', 'cron_cleanup_error', '记录清理', () => runRecordCleanup(context, now)],
       ['cron_load', 'cron_load_error', '负载告警检查', () => runLoadCheck(context, now)],
       ['cron_offline', 'cron_offline_error', '离线告警检查', () => runOfflineCheck(context, now)],
       ['cron_expiry', 'cron_expiry_error', '到期提醒检查', () => runExpiryCheck(context, now)],
-      ['cron_website', 'cron_website_error', '网站监控检查', () => runWebsiteMonitorChecks(context, now)],
     ] as const;
     try {
       for (const [component, action, label, step] of rotateScheduledItems(steps, Math.floor(now.getTime() / 120_000))) {

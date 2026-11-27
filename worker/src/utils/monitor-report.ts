@@ -10,15 +10,17 @@ export type MonitorReportPayload = JsonObject & {
   swap: number;
   swap_total: number;
   load: number | null;
+  load5: number | null;
+  load15: number | null;
   temp: number | null;
   disk: number | null;
   disk_total: number | null;
-  disk_source?: 'directory';
-  disk_sampled_at?: number;
   net_in: number;
   net_out: number;
   net_total_up: number;
   net_total_down: number;
+  /** Server-computed billing period for net_total_*; never accepted from an Agent. */
+  traffic_period_start?: string;
   process_count: number;
   connections: number;
   connections_udp: number;
@@ -131,6 +133,8 @@ export function normalizeMonitorReport(input: unknown): MonitorReportPayload {
     swap: boundedNumber(0, MAX_COUNTER_VALUE, report.swap, swap.used),
     swap_total: boundedNumber(0, MAX_COUNTER_VALUE, report.swap_total, swap.total),
     load: boundedNullableNumber(0, MAX_LOAD_VALUE, report.load, load.load1),
+    load5: boundedNullableNumber(0, MAX_LOAD_VALUE, report.load5),
+    load15: boundedNullableNumber(0, MAX_LOAD_VALUE, report.load15),
     temp: measuredTemperature(report.temp),
     disk: boundedNullableNumber(0, MAX_COUNTER_VALUE, report.disk, disk.used),
     disk_total: boundedNullableNumber(0, MAX_COUNTER_VALUE, report.disk_total, disk.total),
@@ -145,31 +149,16 @@ export function normalizeMonitorReport(input: unknown): MonitorReportPayload {
     version: boundedString(report.version, 64),
     gpus,
   };
-  // Cached measurements carry their own sampling clock, independent of the
-  // Agent report/Worker receipt clocks. An invalid pair must not look native.
+  // Older Agents could attach directory-scan estimate metadata. The main
+  // service now reports statfs only, so drop the legacy fields while keeping
+  // the measured disk bytes unchanged.
   delete normalized.disk_source;
   delete normalized.disk_sampled_at;
-  if (report.disk_source !== undefined || report.disk_sampled_at !== undefined) {
-    const sampledAt = report.disk_sampled_at;
-    const measuredUsed = numberFrom(report.disk) ?? numberFrom(disk.used);
-    if (report.disk_source === 'directory' && normalized.disk !== null && measuredUsed !== undefined
-        && measuredUsed >= 0 && measuredUsed <= MAX_COUNTER_VALUE && typeof sampledAt === 'number'
-        && Number.isSafeInteger(sampledAt) && sampledAt > 0 && sampledAt <= 8_640_000_000_000_000) {
-      normalized.disk_source = 'directory';
-      normalized.disk_sampled_at = sampledAt;
-    } else {
-      normalized.disk = null;
-    }
-  }
   return normalized;
 }
 
 export function toMonitorRecord(client: string, time: string, input: unknown): MonitorRecord {
   const report = normalizeMonitorReport(input);
-  // Keep measured bytes independently. The numeric schema uses a zero total
-  // to leave the percentage unavailable when either input is unknown.
-  const diskAvailable = report.disk !== null && report.disk_total !== null;
-
   return {
     client,
     time,
@@ -180,9 +169,11 @@ export function toMonitorRecord(client: string, time: string, input: unknown): M
     swap: report.swap || 0,
     swap_total: report.swap_total || 0,
     load: report.load ?? null,
+    load5: report.load5 ?? null,
+    load15: report.load15 ?? null,
     temp: report.temp,
-    disk: report.disk ?? 0,
-    disk_total: diskAvailable ? report.disk_total || 0 : 0,
+    disk: report.disk,
+    disk_total: report.disk_total,
     net_in: report.net_in || 0,
     net_out: report.net_out || 0,
     net_total_up: report.net_total_up || 0,
@@ -190,6 +181,6 @@ export function toMonitorRecord(client: string, time: string, input: unknown): M
     process_count: report.process_count || 0,
     connections: report.connections || 0,
     connections_udp: report.connections_udp || 0,
-    uptime: report.uptime || 0,
+    uptime: report.uptime,
   };
 }

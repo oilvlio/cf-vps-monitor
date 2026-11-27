@@ -1,7 +1,7 @@
 /**
  * 跨标签页事件广播。
  *
- * 此前 publicDataEvents / websiteMonitorEvents / themeEvents 三个模块各自复制了同一段逻辑：
+ * 此前 publicDataEvents / themeEvents 两个模块各自复制了同一段逻辑：
  * 发送时**同时**写 localStorage 和 BroadcastChannel，接收时两条都监听。二者本意是互为
  * 降级备份，但现代浏览器两条都支持，于是同一条通知被投递两次、订阅回调被执行两遍。
  *

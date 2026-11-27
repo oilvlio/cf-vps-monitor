@@ -13,41 +13,27 @@ import { buildTotpUri, generateTotpSecret, verifyTotpCode } from '../auth/totp';
 import { invalidateAdminSessionCache } from '../auth/admin-session';
 import { hashPassword, validateAdminPasswordStrength, verifyPassword } from '../auth/password';
 import { clearMfaStepUpCookie, setAdminSessionCookie, setMfaStepUpCookie } from '../auth/session';
-import { SETTING_SCHEMA, buildAdminSettings, sanitizeSettingsForStorage } from '../settings/schema';
-import {
-  BACKUP_ENCRYPTION_ALGORITHM,
-  ENCRYPTED_BACKUP_SCHEMA_ID,
-  BACKUP_SCOPE,
-  MAX_BACKUP_BYTES,
-  decryptBackup,
-  encryptBackup,
-  summarizeBackup,
-  validateBackup,
-} from '../utils/backup';
-import { buildBackupSnapshot } from '../utils/backup-snapshot';
-import { measureRestoredClientSnapshot } from '../utils/restore-client-snapshot';
+import { SETTING_SCHEMA, buildAdminSettings, sanitizeSettingsForStorage, validateHistoryRetentionInvariant } from '../settings/schema';
 import { getCloudflareClientIp } from '../utils/request-ip';
-import { validatePingTaskInput } from '../utils/ping-task';
+import {
+  MAX_PING_TIMEOUT_MS,
+  MIN_PING_TIMEOUT_MS,
+  validatePingTaskInput,
+} from '../utils/ping-task';
 import { generateAgentToken, validateClientCreateInput, validateClientUpdateInput } from '../utils/client';
-import { validateExpiryNotificationInput, validateLoadNotificationInput, validateOfflineNotificationInput } from '../utils/notification';
+import { validateExpiryNotificationInput, validateIpChangeNotificationInput, validateLoadNotificationInput, validateOfflineNotificationInput } from '../utils/notification';
 import { NOTIFICATION_DISPATCH_SETTING_KEYS, dispatchNotification, pickNotificationSettingOverrides } from '../utils/notification-dispatch';
-import { maskSecretPreview, isMaskedSecretPreview } from '../utils/secret-preview';
+import { isMaskedSecretPreview } from '../utils/secret-preview';
+import { redactAdminSettings } from '../settings/response';
 import { TELEGRAM_MESSAGE_MAX_CHARS } from '../utils/telegram';
 import { EMAIL_MESSAGE_MAX_CHARS } from '../utils/email';
 import { WEBHOOK_MESSAGE_MAX_CHARS } from '../utils/webhook';
 import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
-import { checkWebsiteMonitorHttp, validateWebsiteMonitorInput } from '../utils/website-monitor';
-import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
+import { readLiveSnapshot } from '../utils/do-response';
 import { readJsonWithLimit, readRequestBytesWithLimit } from '../utils/request-body';
+import { liveDataStub as liveDataObjectStub } from '../utils/live-data-object';
+import { RATE_LIMIT_OBJECT_NAMES, rateLimitStub } from '../utils/rate-limit-object';
 import { bytesToBase64 } from '../utils/theme-package';
-import { APP_VERSION } from '../utils/app-version';
-import {
-  formatAppVersion,
-  repositoryUrlFromRepositoryUrl,
-  normalizeGitSha,
-  shortGitSha,
-  type UpdateCheckResult,
-} from '../utils/update-check';
 import {
   auditLoginFailure,
   clearLoginFailures,
@@ -59,8 +45,21 @@ import {
   purgePublicMetadataEdgeCache,
   recordLoginFailure,
 } from './public';
-import { invalidateAgentClientAuthCache, invalidateAgentPingTaskCache } from './client';
 import { invalidateLiveViewerSettingsCache } from './websocket';
+import { invalidateAgentClientAuthCache } from './client';
+import {
+  THIRD_PARTY_THEME_SETTING_KEY,
+  normalizeThemeUrl,
+  clearPublishedThemeCache,
+  parseThirdPartyThemeSettings,
+  parseThemeUrl,
+  probeTheme,
+  serializeThirdPartyThemeSettings,
+} from '../utils/third-party-theme';
+import { invalidateThirdPartyThemeCache } from './third-party-theme';
+import { clearMetricsMetaCache } from '../monitor/services/metrics';
+import { clearMonitorHistoryCache } from './monitor-compat';
+import { estimateHistoryRetention } from '../utils/history-retention-estimate';
 import { getDatabase, type AppDatabase } from '../db/provider';
 import {
   bestEffortRecordHealthEvent,
@@ -71,31 +70,17 @@ import {
   type HealthEvent,
 } from '../utils/observability';
 import { readScheduledDatabaseStartupHealth } from '../utils/scheduled-observability';
-import {
-  ESTIMATED_GPU_SNAPSHOT_BYTES,
-  ESTIMATED_MONITOR_RECORD_BYTES,
-  ESTIMATED_PING_SNAPSHOT_BYTES,
-  buildQuotaReference,
-} from '../utils/quota';
-import { buildResourceEstimates } from '../utils/capacity-estimate';
 
 const adminRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 type AdminContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 const MAX_ADMIN_USERNAME_BYTES = 64;
 const MIN_JWT_SECRET_BYTES = 32;
-const CAPACITY_ESTIMATE_CACHE_MS = 30_000;
-const CAPACITY_ROW_COUNT_CACHE_MS = 60_000;
-const CAPACITY_ROW_COUNT_LIMIT = 100_000;
 const ADMIN_CLIENTS_CACHE_MS = 5_000;
 const ADMIN_PING_TASKS_CACHE_MS = 5_000;
 const ADMIN_PING_TASKS_EDGE_CACHE_SECONDS = 15;
 const ADMIN_SETTINGS_SCOPE_CACHE_MS = 10_000;
 const HEALTH_CACHE_MS = 30_000;
 const ALLOWED_CLIENT_IDS_CACHE_MS = 30_000;
-const OFFICIAL_UPDATE_REPOSITORY = 'kadidalax/cf-vps-monitor';
-const OFFICIAL_UPDATE_BRANCH = 'main';
-const UPDATE_CHECK_CACHE_MS = 10 * 60 * 1000;
-const updateCheckCache = new Map<string, { expiresAt: number; value: UpdateCheckResult }>();
 const LIVE_POLICY_SETTING_KEYS = new Set([
   'live_poll_active_interval_sec',
   'live_poll_idle_interval_sec',
@@ -105,23 +90,9 @@ const RECORD_PERSISTENCE_SETTING_KEYS = new Set([
   'record_enabled',
   'record_persist_interval_sec',
   'ping_record_persist_interval_sec',
-  'record_high_watermark_rows',
   'record_high_watermark_bytes',
 ]);
-const CAPACITY_ESTIMATE_SETTING_KEYS = [
-  'record_enabled',
-  'record_preserve_time',
-  'ping_record_preserve_time',
-  'live_poll_active_interval_sec',
-  'live_poll_idle_interval_sec',
-  'record_persist_interval_sec',
-  'ping_record_persist_interval_sec',
-  'record_high_watermark_rows',
-  'record_high_watermark_bytes',
-  'audit_log_preserve_time',
-  'capacity_daily_view_minutes',
-];
-const CAPACITY_ESTIMATE_SETTING_KEY_SET = new Set(CAPACITY_ESTIMATE_SETTING_KEYS);
+const HISTORY_RETENTION_SETTING_KEYS = new Set(['record_preserve_time', 'ping_record_preserve_time', 'rollup_preserve_time']);
 const SETTINGS_SCOPE_KEYS = {
   site: [
     'site_title',
@@ -135,14 +106,13 @@ const SETTINGS_SCOPE_KEYS = {
     'record_enabled',
     'record_preserve_time',
     'ping_record_preserve_time',
+    'rollup_preserve_time',
     'live_poll_active_interval_sec',
     'live_poll_idle_interval_sec',
     'live_poll_active_max_duration_sec',
     'record_persist_interval_sec',
     'ping_record_persist_interval_sec',
-    'record_high_watermark_rows',
     'record_high_watermark_bytes',
-    'capacity_daily_view_minutes',
     'offline_confirm_rounds',
   ],
   notification: [
@@ -171,29 +141,10 @@ const SETTINGS_SCOPE_KEYS = {
     'enable_ip_change_notification',
     'offline_notify_never_reported',
   ],
-  update: [
-    'update_repository_url',
-  ],
 } as const satisfies Record<string, readonly (keyof typeof SETTING_SCHEMA)[]>;
 const MAINTENANCE_CLEANUP_SETTING_KEYS = [
-  'record_preserve_time',
-  'ping_record_preserve_time',
   'audit_log_preserve_time',
 ];
-const EMPTY_AGENT_PING_TASK_POLL_SEC = 600;
-const DEFAULT_UNIFIED_PING_INTERVAL_SEC = 120;
-const MIN_UNIFIED_PING_INTERVAL_SEC = 60;
-const MAX_UNIFIED_PING_INTERVAL_SEC = 3600;
-const AGENT_BASIC_INFO_REPORTS_PER_DAY = 48;
-// 与 wrangler.toml 的 crons 配置保持一致（每 2 分钟一次）。
-const WORKER_CRON_INTERVAL_SEC = 120;
-// Cloudflare 对入站 WebSocket 消息按 20:1 折算计费（出站消息与协议 ping 免费）。
-const WEBSOCKET_MESSAGE_BILLING_RATIO = 20;
-// 实测：走遍所有后台页面一轮的 Worker 请求数。
-const ADMIN_TOUR_WORKER_REQUESTS = 23;
-const CAPACITY_COUNT_FAR_CHECK_SEC = 6 * 60 * 60;
-const CAPACITY_COUNT_NEAR_CHECK_SEC = 10 * 60;
-const CAPACITY_COUNT_CRITICAL_CHECK_SEC = 60;
 const AGENT_TOKEN_ROTATION_WARNING_MS = 180 * 24 * 60 * 60 * 1000;
 const AGENT_TOKEN_UNUSED_WARNING_MS = 7 * 24 * 60 * 60 * 1000;
 const AGENT_TOKEN_STALE_USE_WARNING_MS = 30 * 24 * 60 * 60 * 1000;
@@ -214,6 +165,7 @@ type HealthCheckBody = {
   cache: 'hit' | 'miss' | 'refresh';
   deep: boolean;
   components: Record<string, HealthEvent | null>;
+  history_maintenance: db.HistoryMaintenanceStatus | null;
 };
 type HealthCheckCacheEntry = {
   value: HealthCheckBody;
@@ -269,14 +221,6 @@ function isUploadedFile(value: unknown): value is { arrayBuffer(): Promise<Array
   return !!value && typeof value === 'object' && 'arrayBuffer' in value && typeof value.arrayBuffer === 'function';
 }
 
-function webhookUrlHost(value: string): string {
-  try {
-    return value ? new URL(value).hostname.toLowerCase() : '';
-  } catch {
-    return '';
-  }
-}
-
 function detectSiteLogoType(bytes: Uint8Array): string | null {
   if (bytes.length >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png';
   if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
@@ -327,16 +271,6 @@ async function readAdminJsonObjectOrArray(c: AdminContext): Promise<JsonObjectOr
     { invalidJson: '请求 JSON 格式错误', invalidShape: '请求内容必须是 JSON 对象或对象数组' },
     (body): body is Record<string, unknown> | Record<string, unknown>[] =>
       isJsonObjectBody(body) || isJsonObjectArrayBody(body),
-  );
-  return result.ok ? { ok: true, body: result.body } : result;
-}
-
-async function readAdminBackupJsonObject(c: AdminContext): Promise<JsonObjectBodyResult> {
-  const result = await readAdminJsonBody(
-    c,
-    { invalidJson: '备份 JSON 格式错误', invalidShape: '备份内容无效' },
-    isJsonObjectBody,
-    MAX_BACKUP_BYTES,
   );
   return result.ok ? { ok: true, body: result.body } : result;
 }
@@ -421,7 +355,7 @@ function hideAdminClientToken(client: db.Client): Omit<db.Client, 'token' | 'tok
 }
 
 function liveDataStub(c: AdminContext) {
-  return c.env.LIVE_DATA.get(c.env.LIVE_DATA.idFromName('global'));
+  return liveDataObjectStub(c.env.LIVE_DATA);
 }
 
 async function readAdminClientsSnapshot(c: AdminContext): Promise<AdminClientsSnapshot | null> {
@@ -483,17 +417,45 @@ async function listAdminClientsCached(database: db.QueryDatabase, force = false)
   return clients;
 }
 
+/** 把节点级超时覆盖挂到任务上，供管理界面直接读取。 */
+function withPingTaskClientTimeouts(
+  tasks: db.PingTask[],
+  rows: db.PingTaskClientTimeout[],
+): db.PingTask[] {
+  const byTask = new Map<number, Record<string, number>>();
+  for (const row of rows) {
+    let perClient = byTask.get(row.task_id);
+    if (!perClient) {
+      perClient = {};
+      byTask.set(row.task_id, perClient);
+    }
+    perClient[row.client] = row.timeout_ms;
+  }
+  return tasks.map(task => ({
+    ...task,
+    client_timeouts: typeof task.id === 'number' ? (byTask.get(task.id) ?? {}) : {},
+  }));
+}
+
 async function listAdminPingTasksCached(database: db.QueryDatabase, force = false): Promise<db.PingTask[]> {
   const now = Date.now();
   if (!force && adminPingTasksCache && adminPingTasksCache.expiresAt > now) {
     return adminPingTasksCache.value;
   }
-  const tasks = await db.listPingTasks(database, force);
+  // 部分路由测试只替换了用到的 db 方法；缺少节点覆盖读取时按无覆盖处理。
+  const timeoutsPromise = typeof db.listPingTaskClientTimeouts === 'function'
+    ? db.listPingTaskClientTimeouts(database)
+    : Promise.resolve([]);
+  const [tasks, timeouts] = await Promise.all([
+    db.listPingTasks(database, force),
+    timeoutsPromise,
+  ]);
+  const merged = withPingTaskClientTimeouts(tasks, timeouts);
   adminPingTasksCache = {
-    value: tasks,
+    value: merged,
     expiresAt: Date.now() + ADMIN_PING_TASKS_CACHE_MS,
   };
-  return tasks;
+  return merged;
 }
 
 async function syncLiveClientMeta(c: AdminContext, client: LiveClientMeta): Promise<void> {
@@ -514,11 +476,12 @@ async function syncAgentAuthClient(c: AdminContext, client: db.Client): Promise<
   if (!client.token_hash) return;
   const { token: _token, ...safeClient } = client;
   const stub = liveDataStub(c);
-  await stub.fetch(new Request('https://do/agent-auth', {
+  const response = await stub.fetch(new Request('https://do/agent-auth', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ client: { ...safeClient, token: '' } }),
   }));
+  if (!response.ok) throw new Error('Agent auth snapshot was not acknowledged');
 }
 
 async function removeLiveClient(c: AdminContext, uuid: string): Promise<void> {
@@ -532,11 +495,12 @@ async function removeLiveClient(c: AdminContext, uuid: string): Promise<void> {
 
 async function disconnectLiveClient(c: AdminContext, uuid: string): Promise<void> {
   const stub = liveDataStub(c);
-  await stub.fetch(new Request('https://do/client-remove', {
+  const response = await stub.fetch(new Request('https://do/client-remove', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ uuid, keepMetadata: true }),
   }));
+  if (!response.ok) throw new Error('Agent disconnect was not acknowledged');
 }
 
 export async function getClientCreateConflict(database: db.QueryDatabase, uuid: string, token: string): Promise<'uuid' | 'token' | null> {
@@ -567,28 +531,16 @@ async function getInstallToken(database: db.QueryDatabase, uuid: string): Promis
 
 async function refreshLivePingTasks(c: AdminContext): Promise<void> {
   try {
-    const doId = c.env.LIVE_DATA.idFromName('global');
-    const stub = c.env.LIVE_DATA.get(doId);
+    const stub = liveDataObjectStub(c.env.LIVE_DATA);
     await stub.fetch(new Request('https://do/ping-tasks-refresh', { method: 'POST' }));
   } catch {
     // The DO cache is short-lived; admin writes should not fail if refresh signalling is unavailable.
   }
 }
 
-async function refreshLiveAgentPolicy(c: AdminContext): Promise<void> {
-  try {
-    const doId = c.env.LIVE_DATA.idFromName('global');
-    const stub = c.env.LIVE_DATA.get(doId);
-    await stub.fetch(new Request('https://do/policy-refresh', { method: 'POST' }));
-  } catch {
-    // Agent policy caches are short-lived; admin writes should not fail if refresh signalling is unavailable.
-  }
-}
-
 async function broadcastLiveMetadataChanged(c: AdminContext, detail: Record<string, unknown>): Promise<void> {
   try {
-    const doId = c.env.LIVE_DATA.idFromName('global');
-    const stub = c.env.LIVE_DATA.get(doId);
+    const stub = liveDataObjectStub(c.env.LIVE_DATA);
     await stub.fetch(new Request('https://do/metadata-refresh', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -599,55 +551,7 @@ async function broadcastLiveMetadataChanged(c: AdminContext, detail: Record<stri
   }
 }
 
-type WebsiteMonitorMetadataDetail = true | {
-  upsert?: unknown[];
-  remove?: number[];
-  reorder?: number[];
-};
-
-/**
- * 网站监控的公开广播载荷。
- *
- * 广播默认投递给**所有**观众（含游客），而管理端写操作推的是完整 monitor 记录，
- * 因此必须在此裁剪，否则「对游客隐藏」只是前端不渲染、数据仍在 WebSocket 帧里。
- * - 勾了「对游客隐藏此监控」：整条不进公开载荷
- * - 勾了「对游客隐藏地址」：url 置为 null
- */
-function publicWebsiteMetadataDetail(detail: WebsiteMonitorMetadataDetail): WebsiteMonitorMetadataDetail {
-  if (detail === true) return true;
-  if (!Array.isArray(detail.upsert)) return detail;
-  const isRecord = (v: unknown): v is Record<string, unknown> =>
-    Boolean(v) && typeof v === 'object' && !Array.isArray(v);
-  const upsert = detail.upsert
-    .filter(item => !(isRecord(item) && item.hidden === true))
-    .map(item => (isRecord(item) && item.hide_url === true ? { ...item, url: null } : item));
-  return { ...detail, upsert };
-}
-const WEBSITE_MONITOR_REQUIRED_EDIT_FIELDS = [
-  'name',
-  'url',
-  'method',
-  'expected_status_min',
-  'expected_status_max',
-  'interval_sec',
-  'timeout_sec',
-  'grace_period_sec',
-  'enabled',
-  'hidden',
-];
-
-function invalidateWebsiteMonitorPublicState(c: AdminContext, websites: WebsiteMonitorMetadataDetail = true): void {
-  invalidateAdminPublicMetadata(c);
-  // 分两份投递：管理员收完整记录，游客收裁剪后的载荷
-  runAdminBackground(c, broadcastLiveMetadataChanged(c, { websites, audience: 'admin' }));
-  runAdminBackground(c, broadcastLiveMetadataChanged(c, {
-    websites: publicWebsiteMetadataDetail(websites),
-    audience: 'public',
-  }));
-  runAdminBackground(c, refreshLiveAgentPolicy(c));
-}
-
-type PingTaskAuditSource = Pick<db.PingTask, 'name' | 'type' | 'target' | 'all_clients' | 'clients' | 'interval_sec'>;
+type PingTaskAuditSource = Pick<db.PingTask, 'name' | 'type' | 'target' | 'all_clients' | 'clients' | 'interval_sec' | 'timeout_ms'>;
 
 function pingTaskAuditSnapshot(task: PingTaskAuditSource) {
   const scope = task.all_clients ? 'all_clients' : `clients=${Array.isArray(task.clients) ? task.clients.length : 0}`;
@@ -656,6 +560,7 @@ function pingTaskAuditSnapshot(task: PingTaskAuditSource) {
     type: task.type,
     target: task.target,
     interval_sec: task.interval_sec,
+    timeout_ms: task.timeout_ms,
     scope,
   };
 }
@@ -664,7 +569,7 @@ function pingTaskAuditDetail(event: string, task: PingTaskAuditSource, previous?
   const current = pingTaskAuditSnapshot(task);
   return JSON.stringify({
     event,
-    summary: `${event}: ${current.name}; type=${current.type}; target=${current.target}; interval=${current.interval_sec}s; scope=${current.scope}`,
+    summary: `${event}: ${current.name}; type=${current.type}; target=${current.target}; interval=${current.interval_sec}s; timeout=${current.timeout_ms}ms; scope=${current.scope}`,
     task: current,
     ...(previous ? { previous: pingTaskAuditSnapshot(previous) } : {}),
   });
@@ -672,44 +577,6 @@ function pingTaskAuditDetail(event: string, task: PingTaskAuditSource, previous?
 
 function isQueryFlagEnabled(value: string | undefined): boolean {
   return value === '1' || value === 'true';
-}
-
-function isBodyFlagEnabled(body: unknown, key: string): boolean {
-  return !!body && typeof body === 'object' && (body as Record<string, unknown>)[key] === true;
-}
-
-function getRequestIp(c: AdminContext): string {
-  return getCloudflareClientIp(c);
-}
-
-function getRestoreConfirmationState(c: AdminContext, body: unknown): {
-  confirmed: boolean;
-  confirmRestore: boolean;
-  acknowledgeOverwrite: boolean;
-} {
-  const confirmRestore =
-    isQueryFlagEnabled(c.req.query('confirm_restore')) ||
-    isBodyFlagEnabled(body, 'confirm_restore');
-  const acknowledgeOverwrite =
-    isQueryFlagEnabled(c.req.query('acknowledge_overwrite')) ||
-    isBodyFlagEnabled(body, 'acknowledge_overwrite');
-
-  return {
-    confirmed: confirmRestore && acknowledgeOverwrite,
-    confirmRestore,
-    acknowledgeOverwrite,
-  };
-}
-
-function jsonSizeBytes(value: unknown): number {
-  return new TextEncoder().encode(JSON.stringify(value)).length;
-}
-
-function isEncryptedBackupEnvelope(value: unknown): boolean {
-  return !!value &&
-    typeof value === 'object' &&
-    ((value as Record<string, unknown>).schema === ENCRYPTED_BACKUP_SCHEMA_ID ||
-      (value as Record<string, unknown>).encrypted === true);
 }
 
 export async function getAllowedClientIds(database: db.QueryDatabase): Promise<Set<string>> {
@@ -856,8 +723,7 @@ async function runAgentTokenHygieneProbe(database: AppDatabase, checkedAt: strin
 
 async function runDoProbe(c: AdminContext, checkedAt: string): Promise<HealthEvent> {
   try {
-    const doId = c.env.LIVE_DATA.idFromName('global');
-    const stub = c.env.LIVE_DATA.get(doId);
+    const stub = liveDataObjectStub(c.env.LIVE_DATA);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort('durable object fetch timed out'), 3_000);
     const response = await (async () => {
@@ -886,37 +752,26 @@ async function runDoProbe(c: AdminContext, checkedAt: string): Promise<HealthEve
 async function runRateLimitProbe(c: AdminContext, checkedAt: string): Promise<HealthEvent> {
   const namespace = c.env.RATE_LIMIT;
   if (!namespace) {
-    return healthEvent('rate_limit_probe', 'error', 'RATE_LIMIT binding is missing; falling back to per-isolate limits', checkedAt);
+    return healthEvent('rate_limit_probe', 'error', 'RATE_LIMIT binding is missing; sensitive routes are using per-isolate limits', checkedAt);
   }
   try {
-    const doId = namespace.idFromName('admin-health');
-    const stub = namespace.get(doId);
+    // 只读探针：不写入限流计数，避免健康检查本身消耗 DO 额度。
+    const stub = rateLimitStub(namespace, RATE_LIMIT_OBJECT_NAMES.healthProbe);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort('rate limit durable object fetch timed out'), 3_000);
     const response = await (async () => {
       try {
-        return await stub.fetch(new Request('https://do/rate-limit', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+        return await stub.fetch(new Request('https://do/health', {
+          method: 'GET',
           signal: controller.signal,
-          body: JSON.stringify({
-            bucket: 'admin-health',
-            ip: 'probe',
-            max: 1000,
-            windowMs: 60_000,
-          }),
         }));
       } finally {
         clearTimeout(timeoutId);
       }
     })();
-    if (!response.ok) {
-      return healthEvent('rate_limit_probe', 'error', `RATE_LIMIT probe returned HTTP ${response.status}`, checkedAt);
-    }
-    const result = await readRateLimitResult(response, { limit: 1000, remaining: 1000 });
-    return result
+    return response.ok
       ? healthEvent('rate_limit_probe', 'ok', 'RATE_LIMIT binding responded', checkedAt)
-      : healthEvent('rate_limit_probe', 'error', 'RATE_LIMIT probe returned an invalid response', checkedAt);
+      : healthEvent('rate_limit_probe', 'error', `RATE_LIMIT probe returned HTTP ${response.status}`, checkedAt);
   } catch (error) {
     return healthEvent('rate_limit_probe', 'error', `RATE_LIMIT probe failed: ${errorDetail(error)}`, checkedAt);
   }
@@ -937,7 +792,6 @@ function runSecretProbe(env: Bindings, checkedAt: string): HealthEvent {
 }
 
 async function buildHealthCheck(c: AdminContext, deep: boolean, cacheState: HealthCheckBody['cache']): Promise<{ body: HealthCheckBody; status: 200 | 503 }> {
-  void deep;
   const checkedAt = new Date().toISOString();
   const database = getDatabase(c.env);
   const components: Record<string, HealthEvent | null> = {};
@@ -960,6 +814,9 @@ async function buildHealthCheck(c: AdminContext, deep: boolean, cacheState: Heal
   components.do_binding_probe = await runDoProbe(c, checkedAt);
   components.rate_limit_probe = await runRateLimitProbe(c, checkedAt);
   components.secret_probe = runSecretProbe(c.env, checkedAt);
+  const historyMaintenance = deep
+    ? await db.getHistoryMaintenanceStatus(database).catch(() => null)
+    : null;
   // status 保持原样（陈旧不等于没发生过，详情页仍要看得到），
   // 只是不再让它拉红整个端点。
   const ok = databaseProbe.status !== 'error' && healthComponentsOk(components);
@@ -972,32 +829,10 @@ async function buildHealthCheck(c: AdminContext, deep: boolean, cacheState: Heal
       cache: cacheState,
       deep,
       components,
+      history_maintenance: historyMaintenance,
     },
     status: ok ? 200 : 503,
   };
-}
-
-function parsePositiveNumber(value: unknown, fallback: number): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function parseBoundedNumber(value: unknown, fallback: number, min: number, max: number): number {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(Math.max(parsed, min), max);
-}
-
-function parseJsonArray(value: unknown): unknown[] {
-  if (Array.isArray(value)) return value;
-  if (typeof value !== 'string') return [];
-  if (!value) return [];
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
 }
 
 function parseUniqueStringList(value: unknown, maxItems = 100): { ok: true; values: string[] } | { ok: false; error: string } {
@@ -1018,440 +853,35 @@ function parseUniqueStringList(value: unknown, maxItems = 100): { ok: true; valu
   return { ok: true, values };
 }
 
-function estimatePingSnapshotRowsPerDay(
-  clientCount: number,
-  pingTasks: db.PingTaskEstimateRow[],
-  pingIntervalSec: number = DEFAULT_UNIFIED_PING_INTERVAL_SEC,
-): number {
-  let hasAllClientTask = false;
-  const targetedClients = new Set<string>();
-  const boundedPingIntervalSec = Math.max(1, Math.floor(pingIntervalSec));
-
-  for (const task of pingTasks) {
-    if (task.all_clients) {
-      hasAllClientTask = true;
-      continue;
-    }
-    for (const uuid of parseJsonArray(task.clients).filter((item): item is string => typeof item === 'string')) {
-      targetedClients.add(uuid);
-    }
-  }
-
-  const coveredClientCount = hasAllClientTask ? clientCount : targetedClients.size;
-  const rowsPerClient = pingTasks.length > 0 ? Math.ceil(86400 / boundedPingIntervalSec) : 0;
-  const rowsPerDay = coveredClientCount * rowsPerClient;
-
-  return rowsPerDay;
-}
-
-function estimateAgentPingTaskPullsPerDay(
-  clientCount: number,
-  pingTasks: db.PingTaskEstimateRow[],
-  pingIntervalSec: number,
-): number {
-  if (pingTasks.length === 0) {
-    return Math.ceil(clientCount * 86400 / EMPTY_AGENT_PING_TASK_POLL_SEC);
-  }
-
-  const pollIntervalSec = Math.max(1, Math.floor(pingIntervalSec));
-  return Math.ceil(clientCount * 86400 / pollIntervalSec);
-}
-
-function estimateCapacityCountCheckIntervalSec(estimatedRows: number, highWatermarkRows: number): number {
-  if (highWatermarkRows <= 0) return CAPACITY_COUNT_NEAR_CHECK_SEC;
-  const ratio = estimatedRows / highWatermarkRows;
-  if (ratio >= 0.95) return CAPACITY_COUNT_CRITICAL_CHECK_SEC;
-  if (ratio >= 0.8) return CAPACITY_COUNT_NEAR_CHECK_SEC;
-  return CAPACITY_COUNT_FAR_CHECK_SEC;
-}
-
-type CapacityRowCountSnapshot = {
-  bounded_row_counts: Awaited<ReturnType<typeof db.getBoundedStorageRowCounts>> | null;
-  expired_row_counts: Awaited<ReturnType<typeof db.getExpiredRowCounts>> | null;
-  checked_at: string;
-  cache_key: string;
-};
-
-let capacityRowCountCache: { value: CapacityRowCountSnapshot; expiresAt: number } | null = null;
-let capacityEstimateCache: { value: Record<string, unknown>; expiresAt: number } | null = null;
-
-function invalidateCapacityEstimateCache(): void {
-  capacityRowCountCache = null;
-  capacityEstimateCache = null;
-}
-
-async function getCapacityRowCounts(
-  database: db.QueryDatabase,
-  settings: Record<string, string>,
-  forceRefresh = false,
-): Promise<CapacityRowCountSnapshot> {
-  const recordHours = Math.min(72, parsePositiveNumber(settings.record_preserve_time, 72));
-  const pingHours = Math.min(72, parsePositiveNumber(settings.ping_record_preserve_time, recordHours));
-  const auditHours = Math.max(24, parsePositiveNumber(settings.audit_log_preserve_time, 2160));
-  const cacheKey = `${recordHours}:${pingHours}:${auditHours}`;
-  const nowMs = Date.now();
-  if (
-    !forceRefresh &&
-    capacityRowCountCache &&
-    capacityRowCountCache.expiresAt > nowMs &&
-    capacityRowCountCache.value.cache_key === cacheKey
-  ) {
-    return capacityRowCountCache.value;
-  }
-
-  let boundedRowCounts: Awaited<ReturnType<typeof db.getBoundedStorageRowCounts>> | null = null;
-  let expiredRowCounts: Awaited<ReturnType<typeof db.getExpiredRowCounts>> | null = null;
-  try {
-    boundedRowCounts = await db.getBoundedStorageRowCounts(database, CAPACITY_ROW_COUNT_LIMIT);
-  } catch {
-    boundedRowCounts = null;
-  }
-  try {
-    expiredRowCounts = await db.getExpiredRowCounts(database, {
-      records: new Date(nowMs - recordHours * 60 * 60 * 1000).toISOString(),
-      ping_records: new Date(nowMs - pingHours * 60 * 60 * 1000).toISOString(),
-      audit_logs: new Date(nowMs - auditHours * 60 * 60 * 1000).toISOString(),
-    });
-  } catch {
-    expiredRowCounts = null;
-  }
-
-  const value = {
-    bounded_row_counts: boundedRowCounts,
-    expired_row_counts: expiredRowCounts,
-    checked_at: new Date(nowMs).toISOString(),
-    cache_key: cacheKey,
-  };
-  capacityRowCountCache = {
-    value,
-    expiresAt: nowMs + CAPACITY_ROW_COUNT_CACHE_MS,
-  };
-  return value;
-}
-
-export async function buildCapacityEstimate(database: db.QueryDatabase, options: { forceCounts?: boolean } = {}) {
-  const nowMs = Date.now();
-  if (!options.forceCounts && capacityEstimateCache && capacityEstimateCache.expiresAt > nowMs) {
-    return {
-      ...capacityEstimateCache.value,
-      capacity_estimate_cache: 'hit',
-      capacity_estimate_cache_seconds: CAPACITY_ESTIMATE_CACHE_MS / 1000,
-    };
-  }
-
-  const [clientCapacityCounts, rawSettings, pingTasks, historyByteSizes, historyStorageUsage] = await Promise.all([
-    db.countClientCapacityTargets(database),
-    db.getSettingsByKeys(database, CAPACITY_ESTIMATE_SETTING_KEYS),
-    db.listPingTaskEstimateRows(database),
-    // Physical allocation is a diagnostic; live usage is the recoverable budget.
-    // The latter scans visible tuples, so the complete response is cached for 30s.
-    db.getHistoryStorageBytes(database).catch(() => null),
-    db.getHistoryStorageUsage(database).catch(() => null),
-  ]);
-  const clientCount = clientCapacityCounts.clients;
-  const gpuClientCount = clientCapacityCounts.gpu_clients;
-  const settings = buildAdminSettings(rawSettings);
-  const recordEnabled = settings.record_enabled !== 'false';
-  const recordPreserveHours = Math.min(72, parsePositiveNumber(settings.record_preserve_time, 72));
-  const pingPreserveHours = Math.min(72, parsePositiveNumber(settings.ping_record_preserve_time, recordPreserveHours));
-  const sampleIntervalSec = Math.max(3, parsePositiveNumber(settings.live_poll_active_interval_sec, 3));
-  const idleIntervalSec = Math.max(60, parsePositiveNumber(settings.live_poll_idle_interval_sec, 120));
-  const persistIntervalSec = Math.max(3, parsePositiveNumber(settings.record_persist_interval_sec, 120));
-  const unifiedPingIntervalSec = Math.min(
-    MAX_UNIFIED_PING_INTERVAL_SEC,
-    Math.max(MIN_UNIFIED_PING_INTERVAL_SEC, parsePositiveNumber(settings.ping_record_persist_interval_sec, DEFAULT_UNIFIED_PING_INTERVAL_SEC)),
-  );
-  const highWatermarkRows = Math.min(10_000_000, Math.max(1_000, parsePositiveNumber(settings.record_high_watermark_rows, 700_000)));
-  // 字节熔断线：与 DO 侧 RECORD_HIGH_WATERMARK_{MIN,MAX}_BYTES 用同一组边界，
-  // 面板显示的阈值必须等于真正生效的那个值，否则用户照着面板调也调不到点上。
-  const highWatermarkBytes = Math.min(549_755_813_888, Math.max(16_777_216, parsePositiveNumber(settings.record_high_watermark_bytes, 419_430_400)));
-  const auditPreserveHours = Math.max(24, parsePositiveNumber(settings.audit_log_preserve_time, 2160));
-  const effectiveActiveIntervalSec = Math.max(sampleIntervalSec, persistIntervalSec);
-  const effectiveIdleIntervalSec = Math.max(idleIntervalSec, persistIntervalSec);
-  const dailyViewMinutes = parseBoundedNumber(settings.capacity_daily_view_minutes, 60, 0, 1440);
-  const activeSecondsPerDay = Math.floor(dailyViewMinutes * 60);
-  const idleSecondsPerDay = Math.max(0, 86400 - activeSecondsPerDay);
-  const activeMonitorRecordsPerDay = recordEnabled && activeSecondsPerDay > 0
-    ? Math.ceil(clientCount * activeSecondsPerDay / effectiveActiveIntervalSec)
-    : 0;
-  const idleMonitorRecordsPerDay = recordEnabled && idleSecondsPerDay > 0
-    ? Math.ceil(clientCount * idleSecondsPerDay / effectiveIdleIntervalSec)
-    : 0;
-  const monitorRecordsPerDay = activeMonitorRecordsPerDay + idleMonitorRecordsPerDay;
-  const activeGpuSnapshotsPerDay = recordEnabled && activeSecondsPerDay > 0
-    ? Math.ceil(gpuClientCount * activeSecondsPerDay / effectiveActiveIntervalSec)
-    : 0;
-  const idleGpuSnapshotsPerDay = recordEnabled && idleSecondsPerDay > 0
-    ? Math.ceil(gpuClientCount * idleSecondsPerDay / effectiveIdleIntervalSec)
-    : 0;
-  const gpuSnapshotsPerDay = activeGpuSnapshotsPerDay + idleGpuSnapshotsPerDay;
-  let legacyPingRecordsPerDay = 0;
-  let pingTaskStateWritesPerDay = 0;
-
-  const pingTasksWithEstimates = pingTasks.map((task) => {
-    const targetClientCount = task.all_clients
-      ? clientCount
-      : parseJsonArray(task.clients).filter((uuid): uuid is string => typeof uuid === 'string').length;
-    const writesPerDay = recordEnabled ? Math.ceil(targetClientCount * 86400 / unifiedPingIntervalSec) : 0;
-    legacyPingRecordsPerDay += writesPerDay;
-    pingTaskStateWritesPerDay += writesPerDay;
-    return {
-      id: task.id,
-      name: task.name,
-      interval_sec: unifiedPingIntervalSec,
-      history_interval_sec: unifiedPingIntervalSec,
-      target_client_count: targetClientCount,
-    };
-  });
-  const pingRecordsPerDay = recordEnabled
-    ? estimatePingSnapshotRowsPerDay(clientCount, pingTasks, unifiedPingIntervalSec)
-    : 0;
-  const pingResultReportsPerDay = estimatePingSnapshotRowsPerDay(clientCount, pingTasks, unifiedPingIntervalSec);
-  const agentPingTaskPullsPerDay = estimateAgentPingTaskPullsPerDay(clientCount, pingTasks, unifiedPingIntervalSec);
-  const agentBasicInfoReportsPerDay = clientCount * AGENT_BASIC_INFO_REPORTS_PER_DAY;
-  const agentWebsocketConnectsPerDay = clientCount;
-  const cronInvocationsPerDay = Math.floor(86400 / WORKER_CRON_INTERVAL_SEC);
-  const pingRecordsSavedPerDay = Math.max(0, legacyPingRecordsPerDay - pingRecordsPerDay);
-  const totalEstimatedBusinessRowsPerDay = monitorRecordsPerDay + gpuSnapshotsPerDay + pingRecordsPerDay;
-  const estimatedMonitorRecordsRetained = Math.ceil(monitorRecordsPerDay * recordPreserveHours / 24);
-  const estimatedGpuSnapshotsRetained = Math.ceil(gpuSnapshotsPerDay * recordPreserveHours / 24);
-  const estimatedPingRecordsRetained = Math.ceil(pingRecordsPerDay * pingPreserveHours / 24);
-  const estimatedLegacyPingRecordsRetained = Math.ceil(legacyPingRecordsPerDay * pingPreserveHours / 24);
-  const estimatedRowsRetained = estimatedMonitorRecordsRetained + estimatedGpuSnapshotsRetained + estimatedPingRecordsRetained;
-  const estimatedStorageBytes = estimatedMonitorRecordsRetained * ESTIMATED_MONITOR_RECORD_BYTES
-    + estimatedGpuSnapshotsRetained * ESTIMATED_GPU_SNAPSHOT_BYTES
-    + estimatedPingRecordsRetained * ESTIMATED_PING_SNAPSHOT_BYTES;
-  const resourceModel = buildResourceEstimates({
-    clientCount, activeSecondsPerDay, sampleIntervalSec, idleIntervalSec, monitorRecordsPerDay,
-    pingTaskStateWritesPerDay, pingTaskPullsPerDay: agentPingTaskPullsPerDay,
-    pingResultReportsPerDay, basicInfoReportsPerDay: agentBasicInfoReportsPerDay,
-    connectionsPerDay: agentWebsocketConnectsPerDay, cronInvocationsPerDay,
-    estimatedSupabaseStorageBytes: estimatedStorageBytes,
-  });
-  const capacityCountCheckIntervalSec = recordEnabled
-    ? estimateCapacityCountCheckIntervalSec(estimatedRowsRetained, highWatermarkRows)
-    : 0;
-  const capacityCountChecksPerDay = recordEnabled && capacityCountCheckIntervalSec > 0
-    ? Math.ceil(86400 / capacityCountCheckIntervalSec)
-    : 0;
-  const quotaReference = buildQuotaReference();
-  const rowCounts = options.forceCounts
-    ? await getCapacityRowCounts(database, settings, true)
-    : null;
-
-  const estimate = {
-    clients: clientCount,
-    gpu_clients: gpuClientCount,
-    record_enabled: recordEnabled,
-    record_preserve_hours: recordPreserveHours,
-    ping_record_preserve_hours: pingPreserveHours,
-    audit_log_preserve_hours: auditPreserveHours,
-    record_persist_interval_sec: persistIntervalSec,
-    ping_record_persist_interval_sec: unifiedPingIntervalSec,
-    record_high_watermark_rows: highWatermarkRows,
-    record_high_watermark_bytes: highWatermarkBytes,
-    capacity_daily_view_minutes: dailyViewMinutes,
-    active_seconds_per_day: activeSecondsPerDay,
-    idle_seconds_per_day: idleSecondsPerDay,
-    active_monitor_records_per_day: activeMonitorRecordsPerDay,
-    idle_monitor_records_per_day: idleMonitorRecordsPerDay,
-    monitor_records_per_day: monitorRecordsPerDay,
-    gpu_storage_mode: 'snapshots',
-    active_gpu_snapshots_per_day: activeGpuSnapshotsPerDay,
-    idle_gpu_snapshots_per_day: idleGpuSnapshotsPerDay,
-    gpu_snapshots_per_day: gpuSnapshotsPerDay,
-    ping_storage_mode: 'snapshots',
-    ping_records_per_day: pingRecordsPerDay,
-    legacy_ping_records_per_day: legacyPingRecordsPerDay,
-    ping_records_saved_per_day: pingRecordsSavedPerDay,
-    total_estimated_business_rows_per_day: totalEstimatedBusinessRowsPerDay,
-    capacity_count_checks_per_day: capacityCountChecksPerDay,
-    capacity_count_check_interval_sec: capacityCountCheckIntervalSec,
-    ping_result_reports_per_day: pingResultReportsPerDay,
-    agent_ping_task_pulls_per_day: agentPingTaskPullsPerDay,
-    agent_basic_info_reports_per_day: agentBasicInfoReportsPerDay,
-    agent_websocket_connects_per_day: agentWebsocketConnectsPerDay,
-    ...resourceModel,
-    websocket_message_billing_ratio: WEBSOCKET_MESSAGE_BILLING_RATIO,
-    cron_invocations_per_day: cronInvocationsPerDay,
-    admin_tour_worker_requests: ADMIN_TOUR_WORKER_REQUESTS,
-    estimated_monitor_records_retained: estimatedMonitorRecordsRetained,
-    estimated_gpu_snapshots_retained: estimatedGpuSnapshotsRetained,
-    estimated_ping_records_retained: estimatedPingRecordsRetained,
-    estimated_legacy_ping_records_retained: estimatedLegacyPingRecordsRetained,
-    estimated_ping_records_saved_retained: Math.max(0, estimatedLegacyPingRecordsRetained - estimatedPingRecordsRetained),
-    estimated_rows_retained: estimatedRowsRetained,
-    estimated_storage_bytes: estimatedStorageBytes,
-    actual_row_counts: rowCounts?.bounded_row_counts?.counts ?? null,
-    row_counts_capped: rowCounts?.bounded_row_counts?.capped ?? null,
-    row_counts_limit: rowCounts?.bounded_row_counts?.limit ?? null,
-    expired_row_counts: rowCounts?.expired_row_counts ?? null,
-    // Physical diagnostics stay separate from the live data budget below.
-    history_byte_sizes: historyByteSizes ?? null,
-    history_total_bytes: historyByteSizes?.total ?? null,
-    // Allocated files can remain large after DELETE. The live estimate is the
-    // recoverable history budget; physical allocation remains a diagnostic.
-    history_storage_usage: historyStorageUsage ?? null,
-    row_counts_checked_at: rowCounts?.checked_at ?? null,
-    row_counts_cache_seconds: rowCounts ? CAPACITY_ROW_COUNT_CACHE_MS / 1000 : 0,
-    row_counts_cache_key: rowCounts?.cache_key ?? null,
-    capacity_estimate_cache: options.forceCounts ? 'refresh' : 'miss',
-    capacity_estimate_cache_seconds: CAPACITY_ESTIMATE_CACHE_MS / 1000,
-    quota_reference: quotaReference,
-    ping_tasks: pingTasksWithEstimates,
-  };
-  if (!options.forceCounts) {
-    capacityEstimateCache = {
-      value: estimate,
-      expiresAt: Date.now() + CAPACITY_ESTIMATE_CACHE_MS,
-    };
-  }
-  return estimate;
-}
-
 async function runMaintenanceCleanup(database: db.QueryDatabase, username: string, now = new Date()) {
   const settings = buildAdminSettings(await db.getSettingsByKeys(database, MAINTENANCE_CLEANUP_SETTING_KEYS));
-  const recordHours = Math.min(72, Math.max(1, Number(settings.record_preserve_time || 72)));
-  const pingHours = Math.min(72, Math.max(1, Number(settings.ping_record_preserve_time || recordHours)));
   const auditHours = Math.max(24, Number(settings.audit_log_preserve_time || 2160));
   const before = {
-    records: new Date(now.getTime() - recordHours * 60 * 60 * 1000).toISOString(),
-    ping_records: new Date(now.getTime() - pingHours * 60 * 60 * 1000).toISOString(),
     audit_logs: new Date(now.getTime() - auditHours * 60 * 60 * 1000).toISOString(),
   };
-  const expiredBacklogBefore = await db.getExpiredRowCounts(database, before);
-  const maxExpiredBacklog = Math.max(
-    expiredBacklogBefore.records,
-    expiredBacklogBefore.gpu_records,
-    expiredBacklogBefore.ping_records,
-    expiredBacklogBefore.audit_logs,
-  );
-  const cleanupOptions = {
-    maxBatches: Math.min(1000, Math.max(200, Math.ceil(maxExpiredBacklog / 100))),
-  };
-  const { has_more: recordsMore, ...recordDeleted } = await db.deleteOldRecords(database, before.records, cleanupOptions);
-  const { has_more: pingMore, ...pingDeleted } = await db.deleteOldPingRecords(database, before.ping_records, cleanupOptions);
+  const rolledUp: Record<string, unknown> = {};
+  for (const family of ['host', 'ping'] as const) {
+    rolledUp[family] = await db.buildRollup(database, family, new Date(now.getTime() - 2 * 60 * 1000).toISOString(), 96);
+  }
+  const cleanupOptions = { maxBatches: 200 };
+  const maintenance = await db.maintainHistory(database, now.toISOString());
   const { has_more: auditMore, ...auditDeleted } = await db.deleteOldAuditLogs(database, before.audit_logs, cleanupOptions);
-  const { has_more: websitesMore, ...websiteDeleted } = await db.deleteOldWebsiteChecks(database, before.records, cleanupOptions);
-  const hasMore = recordsMore || pingMore || auditMore || websitesMore;
-  const deleted = { ...recordDeleted, ...pingDeleted, ...auditDeleted, ...websiteDeleted };
+  const hasMore = maintenance.pending > 0 || maintenance.locked || auditMore;
+  const deleted = auditDeleted;
   const orphanCleanup = await db.cleanupOrphanClientData(database);
-  const expiredBacklogAfter = await db.getExpiredRowCounts(database, before);
-  invalidateCapacityEstimateCache();
   const result = {
     success: true,
     has_more: hasMore,
     before,
+    rolled_up: rolledUp,
     cleanup_options: cleanupOptions,
     deleted,
     orphan_cleanup: orphanCleanup,
-    expired_backlog_before: expiredBacklogBefore,
-    expired_backlog_after: expiredBacklogAfter,
+    partitions: maintenance,
   };
   await db.insertAuditLog(database, username, 'maintenance_cleanup', `手动维护清理${hasMore ? '已处理一批，仍有过期记录' : '完成'}: ${JSON.stringify(result)}`);
   return result;
 }
-
-type GitHubCommitInfo = {
-  sha?: unknown;
-  html_url?: unknown;
-  commit?: {
-    message?: unknown;
-    committer?: { date?: unknown };
-    author?: { date?: unknown };
-  };
-};
-
-function updateString(value: unknown): string {
-  return typeof value === 'string' ? value : '';
-}
-
-async function fetchGitHubJson<T>(path: string): Promise<T> {
-  const response = await fetch(`https://api.github.com/${path}`, {
-    headers: {
-      'Accept': 'application/vnd.github+json',
-      'User-Agent': 'cf-vps-monitor-update-check',
-    },
-  });
-  if (!response.ok) {
-    throw new Error(`GitHub API returned ${response.status}`);
-  }
-  return await response.json();
-}
-
-function fetchLatestCommit(repository: string): Promise<GitHubCommitInfo> {
-  return fetchGitHubJson<GitHubCommitInfo>(`repos/${repository}/commits/${OFFICIAL_UPDATE_BRANCH}`);
-}
-
-async function fetchLatestWorkerVersion(repository: string, commitSha: string): Promise<string> {
-  const response = await fetch(`https://raw.githubusercontent.com/${repository}/${commitSha}/worker/package.json`, {
-    headers: { 'User-Agent': 'cf-vps-monitor-update-check' },
-  });
-  if (!response.ok) return 'dev';
-  const body = await response.json().catch(() => null);
-  return body && typeof body === 'object' && typeof (body as { version?: unknown }).version === 'string'
-    ? (body as { version: string }).version
-    : 'dev';
-}
-
-async function getUpdateSettings(c: AdminContext): Promise<{ repositoryUrl: string }> {
-  const database = getDatabase(c.env);
-  const stored = await db.getSettingsByKeys(database, ['update_repository_url'], true);
-  const settings = buildAdminSettings(stored);
-  return {
-    repositoryUrl: settings.update_repository_url,
-  };
-}
-
-async function buildCommitUpdateResult(
-  repository: string,
-  deploymentRepositoryUrl: string,
-  currentCommitRaw: string | undefined,
-): Promise<UpdateCheckResult> {
-  const commit = await fetchLatestCommit(repository);
-  const latestCommit = normalizeGitSha(updateString(commit.sha));
-  const latestVersion = await fetchLatestWorkerVersion(repository, latestCommit);
-  const currentCommit = normalizeGitSha(currentCommitRaw);
-  const repositoryUrl = repositoryUrlFromRepositoryUrl(deploymentRepositoryUrl);
-  const message = updateString(commit.commit?.message);
-  return {
-    current_version: formatAppVersion(APP_VERSION),
-    latest_version: formatAppVersion(latestVersion),
-    current_commit: shortGitSha(currentCommit),
-    latest_commit: shortGitSha(latestCommit),
-    has_update: Boolean(latestCommit) && currentCommit !== latestCommit,
-    source_url: updateString(commit.html_url) || `https://github.com/${repository}/commits/${OFFICIAL_UPDATE_BRANCH}`,
-    upgrade_url: repositoryUrl,
-    repository_url: repositoryUrl,
-    title: message.split('\n')[0] || latestCommit,
-    body: message,
-    published_at: updateString(commit.commit?.committer?.date) || updateString(commit.commit?.author?.date),
-  };
-}
-
-
-adminRoutes.get('/update-check', async (c) => {
-  const now = Date.now();
-  try {
-    const { repositoryUrl } = await getUpdateSettings(c);
-    const repository = OFFICIAL_UPDATE_REPOSITORY;
-    const currentCommit = normalizeGitSha(c.env.CURRENT_GIT_COMMIT);
-    const cacheKey = `${repository}:${OFFICIAL_UPDATE_BRANCH}:commit:${repositoryUrl}:${currentCommit}`;
-    const cached = updateCheckCache.get(cacheKey);
-    if (c.req.query('refresh') !== '1' && cached && cached.expiresAt > now) {
-      return c.json(cached.value);
-    }
-
-    const result = await buildCommitUpdateResult(repository, repositoryUrl, currentCommit);
-    updateCheckCache.set(cacheKey, { expiresAt: now + UPDATE_CHECK_CACHE_MS, value: result });
-    return c.json(result);
-  } catch (error) {
-    return c.json({
-      error: 'Update check failed',
-      detail: errorDetail(error),
-    }, 502);
-  }
-});
 
 // ============ 客户端管理 ============
 
@@ -1533,7 +963,6 @@ adminRoutes.post('/clients/add', async (c) => {
     const publicMetadataPurge = invalidateAdminPublicMetadata(c);
     invalidateAgentClientAuthCache({ uuid, token });
     invalidateAllowedClientIdsCache();
-    invalidateCapacityEstimateCache();
     await timed(metrics, 'post_write_cache', async () => {
       await Promise.all([
         syncLiveClientMeta(c, safeClient).catch(() => undefined),
@@ -1576,7 +1005,6 @@ adminRoutes.post('/clients/:uuid/edit', async (c) => {
     invalidateAdminClientsCache();
     const publicMetadataPurge = invalidateAdminPublicMetadata(c);
     invalidateAgentClientAuthCache({ uuid });
-    invalidateCapacityEstimateCache();
     await timed(metrics, 'post_write_cache', async () => {
       await Promise.all([
         syncLiveClientMeta(c, safeClient).catch(() => undefined),
@@ -1591,6 +1019,68 @@ adminRoutes.post('/clients/:uuid/edit', async (c) => {
     return c.json({ success: true, changed: 1, client: safeClient });
   } catch (e) {
     return c.json({ error: '编辑失败' }, 500);
+  }
+});
+
+const HOME_PING_MIGRATION_HINT = '数据库还没有执行最新迁移（首页探测点），请打开 /db-init 页面，输入 Supabase Access Token 更新数据库后再试。';
+
+// 迁移还没跑时，PostgREST 会对不存在的函数返回 404（PGRST202）。
+// 按 status / message 鸭子类型判断，不依赖 instanceof（模块被重复加载时 instanceof 会失效）。
+function isMissingHomePingSchema(e: unknown): boolean {
+  const err = e as { status?: unknown; message?: unknown } | null;
+  const message = typeof err?.message === 'string' ? err.message : '';
+  return Number(err?.status) === 404 || /PGRST20\d|could not find the function/i.test(message);
+}
+
+// 首页探测点：节点 -> ping 任务 id。后台编辑节点时用它回填下拉框。
+adminRoutes.get('/home-ping', async (c) => {
+  try {
+    const assignments = await db.getHomePingAssignments(getDatabase(c.env));
+    return c.json({ assignments: assignments || {} });
+  } catch (e) {
+    if (isMissingHomePingSchema(e)) return c.json({ error: HOME_PING_MIGRATION_HINT, code: 'migration_required' }, 503);
+    return c.json({ error: '读取首页探测点失败' }, 500);
+  }
+});
+
+// 设置 / 取消某个节点的首页探测点。task_id 传 null 表示取消。
+adminRoutes.post('/clients/:uuid/home-ping', async (c) => {
+  try {
+    const uuid = c.req.param('uuid');
+    const parsed = await readAdminJsonObject(c);
+    if (!parsed.ok) return parsed.response;
+    const rawTaskId = parsed.body.task_id;
+    const taskId = rawTaskId === null || rawTaskId === undefined || rawTaskId === '' ? null : Number(rawTaskId);
+    if (taskId !== null && (!Number.isInteger(taskId) || taskId <= 0)) {
+      return c.json({ error: 'task_id 必须是正整数或 null' }, 400);
+    }
+
+    const database = getDatabase(c.env);
+    if (taskId !== null) {
+      const tasks = await db.listPingTasks(database, true);
+      const task = tasks.find(item => Number(item.id) === taskId);
+      if (!task) return c.json({ error: '探测任务不存在' }, 404);
+      if (!task.all_clients && !task.clients.includes(uuid)) {
+        return c.json({ error: '该探测任务没有应用到这个节点，请先在探测任务里选择该节点' }, 400);
+      }
+    }
+
+    await db.setHomePingTask(database, uuid, taskId);
+    // 首页色块接口自带 30 秒缓存，设置后清掉，让首页尽快看到变化。
+    await invalidateAdminPublicMetadata(c).catch(() => undefined);
+    runAdminBackground(c, db.insertAuditLog(
+      database,
+      c.get('username')!,
+      'client_edit',
+      taskId === null ? `取消首页探测点: ${uuid}` : `设置首页探测点: ${uuid} -> 任务 ${taskId}`,
+    ));
+    return c.json({ success: true, client: uuid, task_id: taskId });
+  } catch (e) {
+    if (isMissingHomePingSchema(e)) return c.json({ error: HOME_PING_MIGRATION_HINT, code: 'migration_required' }, 503);
+    const detail = String((e as { detail?: unknown; message?: unknown })?.detail ?? (e as Error)?.message ?? '');
+    if (detail.includes('client_not_found')) return c.json({ error: '客户端不存在' }, 404);
+    if (detail.includes('task_not_applicable')) return c.json({ error: '该探测任务没有应用到这个节点' }, 400);
+    return c.json({ error: '设置首页探测点失败' }, 500);
   }
 });
 
@@ -1615,9 +1105,7 @@ adminRoutes.post('/clients/:uuid/remove', async (c) => {
   invalidateAdminClientsCache();
   const publicMetadataPurge = invalidateAdminPublicMetadata(c);
   invalidateAgentClientAuthCache({ uuid });
-  invalidateAgentPingTaskCache();
   invalidateAllowedClientIdsCache();
-  invalidateCapacityEstimateCache();
   await timed(metrics, 'post_write_cache', async () => {
     await Promise.all([
       removeLiveClient(c, uuid).catch(() => undefined),
@@ -1682,11 +1170,11 @@ adminRoutes.post('/clients/:uuid/token/rotate', async (c) => {
 
   const updatedClient = await db.rotateClientToken(database, uuid, token);
   invalidateAdminClientsCache();
-  invalidateAdminPublicMetadata(c);
+  void invalidateAdminPublicMetadata(c);
   invalidateAgentClientAuthCache(client);
   invalidateAgentClientAuthCache({ uuid, token });
+  await disconnectLiveClient(c, uuid);
   await Promise.all([
-    disconnectLiveClient(c, uuid).catch(() => undefined),
     updatedClient ? syncAgentAuthClient(c, updatedClient) : Promise.resolve(),
     purgeAdminClientsEdgeCache(c),
   ]);
@@ -1727,8 +1215,7 @@ adminRoutes.post('/clients/reorder', async (c) => {
         }),
       ]);
     }
-    invalidateAdminPublicMetadata(c);
-    invalidateCapacityEstimateCache();
+    void invalidateAdminPublicMetadata(c);
     await db.insertAuditLog(database, c.get('username')!, 'client_reorder', `调整客户端排序: ${existingUuids.join(',')}; missing=${missing.join(',')}`);
     return c.json({ success: true, updated, missing });
   } catch (error) {
@@ -1761,8 +1248,7 @@ adminRoutes.post('/clients/batch-hide', async (c) => {
     if (updated > 0) {
       invalidateAdminClientsCache();
       await purgeAdminClientsEdgeCache(c);
-      invalidateAdminPublicMetadata(c);
-      invalidateCapacityEstimateCache();
+      void invalidateAdminPublicMetadata(c);
     }
     await db.insertAuditLog(database, c.get('username')!, 'client_batch_hide', `批量隐藏客户端: ${uuids.join(',')}; updated=${updated}; missing=${missing.join(',')}`);
     return c.json({ success: true, updated, changed, missing });
@@ -1796,11 +1282,9 @@ adminRoutes.post('/clients/batch-remove', async (c) => {
     if (removed > 0) {
       invalidateAdminClientsCache();
       await purgeAdminClientsEdgeCache(c);
-      invalidateAdminPublicMetadata(c);
+      void invalidateAdminPublicMetadata(c);
       invalidateAgentClientAuthCache();
-      invalidateAgentPingTaskCache();
       invalidateAllowedClientIdsCache();
-      invalidateCapacityEstimateCache();
       await refreshLivePingTasks(c);
     }
     await db.insertAuditLog(database, c.get('username')!, 'client_batch_remove', `批量删除客户端: ${uuids.join(',')}; removed=${removed}; missing=${missing.join(',')}; 清理引用: ${JSON.stringify(cleanup)}`);
@@ -1808,50 +1292,6 @@ adminRoutes.post('/clients/batch-remove', async (c) => {
   } catch {
     return c.json({ error: '批量删除失败' }, 500);
   }
-});
-
-// ============ 数据记录管理 ============
-
-// 清除指定客户端记录
-adminRoutes.post('/record/clear', async (c) => {
-  try {
-    const parsed = await readAdminJsonObject(c);
-    if (!parsed.ok) return parsed.response;
-    const body = parsed.body;
-    const uuid = typeof body.uuid === 'string' ? body.uuid.trim() : '';
-    const database = getDatabase(c.env);
-    if (uuid) {
-      await db.clearClientRecords(database, uuid);
-      invalidateCapacityEstimateCache();
-    }
-    await db.insertAuditLog(database, c.get('username')!, 'record_clear', `清除记录: ${uuid}`);
-    return c.json({ success: true });
-  } catch {
-    return c.json({ error: '清除失败' }, 500);
-  }
-});
-
-// 清除所有记录
-adminRoutes.post('/record/clear/all', async (c) => {
-  const parsed = await readAdminJsonObject(c);
-  if (!parsed.ok) return parsed.response;
-  const database = getDatabase(c.env);
-  const result = await db.clearAllRecords(database);
-  invalidateCapacityEstimateCache();
-  await db.insertAuditLog(
-    database,
-    c.get('username')!,
-    'record_clear_all',
-    `清除所有记录: ${JSON.stringify(result)}`,
-    result.has_more ? 'warning' : 'info',
-  );
-  return c.json({
-    success: true,
-    complete: !result.has_more,
-    has_more: result.has_more,
-    deleted: result.deleted,
-    remaining: result.remaining,
-  });
 });
 
 // ============ Ping 任务管理 ============
@@ -1898,9 +1338,7 @@ adminRoutes.post('/ping/add', async (c) => {
     const task = await timed(metrics, 'db_create_ping', () => db.createPingTask(database, validated.task));
     invalidateAdminPingTasksCache();
     purgeAdminPingTasksEdgeCache(c);
-    invalidateAdminPublicMetadata(c);
-    invalidateAgentPingTaskCache();
-    invalidateCapacityEstimateCache();
+    void invalidateAdminPublicMetadata(c);
     runAdminBackground(c, refreshLivePingTasks(c));
     runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'ping_add', pingTaskAuditDetail('添加 Ping 任务', task)));
     setServerTiming(c, metrics);
@@ -1938,9 +1376,7 @@ adminRoutes.post('/ping/edit', async (c) => {
     if (!task) return c.json({ error: 'Ping 任务不存在' }, 404);
     invalidateAdminPingTasksCache();
     purgeAdminPingTasksEdgeCache(c);
-    invalidateAdminPublicMetadata(c);
-    invalidateAgentPingTaskCache();
-    invalidateCapacityEstimateCache();
+    void invalidateAdminPublicMetadata(c);
     runAdminBackground(c, refreshLivePingTasks(c));
     runAdminBackground(c, db.insertAuditLog(
       database,
@@ -1952,6 +1388,81 @@ adminRoutes.post('/ping/edit', async (c) => {
     return c.json({ success: true, changed: 1, task });
   } catch {
     return c.json({ error: '编辑失败' }, 500);
+  }
+});
+
+// 按服务器勾选 Ping 任务：只应用 base 到 tasks 的差量，与任务侧编辑互不覆盖
+adminRoutes.post('/ping/assign', async (c) => {
+  const metrics: TimingMetric[] = [];
+  try {
+    const parsed = await timed(metrics, 'parse_body', () => readAdminJsonObject(c));
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.body;
+
+    const client = typeof body.client === 'string' ? body.client.trim() : '';
+    if (!client) return c.json({ error: '服务器 ID 无效' }, 400);
+
+    const readIds = (value: unknown): number[] | null => {
+      if (!Array.isArray(value)) return null;
+      const ids: number[] = [];
+      for (const item of value) {
+        const id = Number(item);
+        if (!Number.isInteger(id) || id <= 0) return null;
+        ids.push(id);
+      }
+      return [...new Set(ids)];
+    };
+    const desired = readIds(body.tasks);
+    const base = readIds(body.base);
+    if (!desired || !base) return c.json({ error: '任务列表格式不对' }, 400);
+
+    // 节点级超时覆盖：只提交改动项；timeout_ms 为 null 表示删除覆盖、回退任务默认值。
+    const readTimeouts = (value: unknown): Array<{ taskId: number; timeoutMs: number | null }> | null => {
+      if (value === undefined) return [];
+      if (!Array.isArray(value)) return null;
+      const items = new Map<number, number | null>();
+      for (const raw of value) {
+        if (raw === null || typeof raw !== 'object') return null;
+        const item = raw as Record<string, unknown>;
+        const taskId = Number(item.task_id);
+        if (!Number.isInteger(taskId) || taskId <= 0) return null;
+        if (item.timeout_ms === null) {
+          items.set(taskId, null);
+          continue;
+        }
+        const timeoutMs = Number(item.timeout_ms);
+        if (!Number.isInteger(timeoutMs) || timeoutMs < MIN_PING_TIMEOUT_MS || timeoutMs > MAX_PING_TIMEOUT_MS) {
+          return null;
+        }
+        items.set(taskId, timeoutMs);
+      }
+      return Array.from(items, ([taskId, timeoutMs]) => ({ taskId, timeoutMs }));
+    };
+    const timeoutUpdates = readTimeouts(body.timeouts);
+    if (!timeoutUpdates) return c.json({ error: '超时设置格式不对' }, 400);
+
+    const database = getDatabase(c.env);
+    const result = await timed(metrics, 'db_assign_ping', () => db.setClientPingAssignment(database, client, desired, base, timeoutUpdates));
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    const updated = result.tasks;
+    const timeoutChanged = result.timeouts;
+
+    if (updated.length > 0 || timeoutChanged > 0) {
+      invalidateAdminPingTasksCache();
+      purgeAdminPingTasksEdgeCache(c);
+      void invalidateAdminPublicMetadata(c);
+      runAdminBackground(c, refreshLivePingTasks(c));
+      runAdminBackground(c, db.insertAuditLog(
+        database,
+        c.get('username')!,
+        'ping_assign',
+        `调整服务器 ${client} 的 Ping 任务: ${updated.map(task => `${task.name}${task.clients.includes(client) ? '(+)' : '(-)'}`).join(', ')}${timeoutChanged > 0 ? `; 超时覆盖 ${timeoutChanged} 项` : ''}`,
+      ));
+    }
+    setServerTiming(c, metrics);
+    return c.json({ success: true, changed: updated.length + timeoutChanged, tasks: updated, timeouts: timeoutChanged });
+  } catch {
+    return c.json({ error: '保存失败' }, 500);
   }
 });
 
@@ -1977,9 +1488,7 @@ adminRoutes.post('/ping/reorder', async (c) => {
     const updated = await timed(metrics, 'db_reorder_ping', () => db.reorderPingTasks(database, ids));
     invalidateAdminPingTasksCache();
     purgeAdminPingTasksEdgeCache(c);
-    invalidateAdminPublicMetadata(c);
-    invalidateAgentPingTaskCache();
-    invalidateCapacityEstimateCache();
+    void invalidateAdminPublicMetadata(c);
     runAdminBackground(c, refreshLivePingTasks(c));
     runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'ping_reorder', `调整 Ping 任务排序: ${ids.join(',')}`));
     setServerTiming(c, metrics);
@@ -2005,194 +1514,13 @@ adminRoutes.post('/ping/delete', async (c) => {
     if (!deleted) return c.json({ error: 'Ping 任务不存在' }, 404);
     invalidateAdminPingTasksCache();
     purgeAdminPingTasksEdgeCache(c);
-    invalidateAdminPublicMetadata(c);
-    invalidateAgentPingTaskCache();
-    invalidateCapacityEstimateCache();
+    void invalidateAdminPublicMetadata(c);
     runAdminBackground(c, refreshLivePingTasks(c));
     runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'ping_delete', pingTaskAuditDetail(`删除 Ping 任务 ${id}`, deleted)));
     setServerTiming(c, metrics);
     return c.json({ success: true, id });
   } catch {
     return c.json({ error: '删除失败' }, 500);
-  }
-});
-
-// ============ 网站监控 ============
-
-adminRoutes.get('/websites', async (c) => {
-  const database = getDatabase(c.env);
-  return c.json(await db.listWebsiteMonitors(database, true));
-});
-
-adminRoutes.get('/websites/:id/checks', async (c) => {
-  const id = Number(c.req.param('id'));
-  if (!Number.isInteger(id) || id <= 0) {
-    return c.json({ error: '网站监控 ID 无效' }, 400);
-  }
-  const limit = Math.min(500, Math.max(1, Number(c.req.query('limit') || 120)));
-  const database = getDatabase(c.env);
-  return c.json(await db.listWebsiteChecks(database, id, limit));
-});
-
-adminRoutes.post('/websites/add', async (c) => {
-  try {
-    const parsed = await readAdminJsonObject(c);
-    if (!parsed.ok) return parsed.response;
-    const body = parsed.body;
-    const validated = validateWebsiteMonitorInput(body);
-    if (!validated.ok) return c.json({ error: '网站监控校验失败', code: validated.error }, 400);
-
-    const database = getDatabase(c.env);
-    const monitor = await db.createWebsiteMonitor(database, validated.value);
-    invalidateWebsiteMonitorPublicState(c, { upsert: [monitor] });
-    runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'website_add', `添加网站监控: ${monitor.name} ${monitor.url}`));
-    return c.json({ success: true, monitor });
-  } catch (error) {
-    console.error('[admin] website add failed:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '添加失败' }, 500);
-  }
-});
-
-adminRoutes.post('/websites/edit', async (c) => {
-  try {
-    const parsed = await readAdminJsonObject(c);
-    if (!parsed.ok) return parsed.response;
-    const body = parsed.body;
-    const id = Number(body.id);
-    if (!Number.isInteger(id) || id <= 0) {
-      return c.json({ error: '网站监控 ID 无效' }, 400);
-    }
-
-    const database = getDatabase(c.env);
-    const hasFullPayload = WEBSITE_MONITOR_REQUIRED_EDIT_FIELDS.every((field) => Object.prototype.hasOwnProperty.call(body, field));
-    const existing = hasFullPayload ? null : await db.getWebsiteMonitor(database, id);
-    if (!hasFullPayload && !existing) return c.json({ error: '网站监控不存在' }, 404);
-
-    const candidate = hasFullPayload ? body : { ...existing, ...body };
-    const validated = validateWebsiteMonitorInput(candidate);
-    if (!validated.ok) return c.json({ error: '网站监控校验失败', code: validated.error }, 400);
-
-    const monitor = await db.updateWebsiteMonitorAndReturn(database, id, validated.value);
-    if (!monitor) return c.json({ error: '网站监控不存在' }, 404);
-    invalidateWebsiteMonitorPublicState(c, { upsert: [monitor] });
-    runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'website_edit', `编辑网站监控: ${existing?.name || id} -> ${monitor.name}`));
-    return c.json({ success: true, changed: 1, monitor });
-  } catch (error) {
-    console.error('[admin] website edit failed:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '编辑失败' }, 500);
-  }
-});
-
-adminRoutes.post('/websites/visibility', async (c) => {
-  try {
-    const parsed = await readAdminJsonObject(c);
-    if (!parsed.ok) return parsed.response;
-    const body = parsed.body;
-    const id = Number(body.id);
-    const hidden = body.hidden;
-    if (!Number.isInteger(id) || id <= 0 || typeof hidden !== 'boolean') {
-      return c.json({ error: '网站监控显隐参数无效' }, 400);
-    }
-    const database = getDatabase(c.env);
-    const changed = await db.setWebsiteMonitorVisibility(database, id, hidden);
-    const monitor = await db.getWebsiteMonitor(database, id);
-    invalidateWebsiteMonitorPublicState(c, monitor ? {
-      upsert: [monitor],
-      remove: hidden ? [id] : undefined,
-    } : true);
-    runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'website_visibility', `网站监控 ${id} ${hidden ? '隐藏' : '显示'}`));
-    return c.json({ success: true, changed: changed ? 1 : 0 });
-  } catch (error) {
-    console.error('[admin] website visibility failed:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '设置失败' }, 500);
-  }
-});
-
-adminRoutes.post('/websites/enabled', async (c) => {
-  try {
-    const parsed = await readAdminJsonObject(c);
-    if (!parsed.ok) return parsed.response;
-    const body = parsed.body;
-    const id = Number(body.id);
-    const enabled = body.enabled;
-    if (!Number.isInteger(id) || id <= 0 || typeof enabled !== 'boolean') {
-      return c.json({ error: '网站监控启停参数无效' }, 400);
-    }
-    const database = getDatabase(c.env);
-    const changed = await db.setWebsiteMonitorEnabled(database, id, enabled);
-    const monitor = await db.getWebsiteMonitor(database, id);
-    invalidateWebsiteMonitorPublicState(c, monitor ? { upsert: [monitor] } : true);
-    runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'website_enabled', `网站监控 ${id} ${enabled ? '启用' : '停用'}`));
-    return c.json({ success: true, changed: changed ? 1 : 0 });
-  } catch (error) {
-    console.error('[admin] website enabled failed:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '设置失败' }, 500);
-  }
-});
-
-adminRoutes.post('/websites/reorder', async (c) => {
-  try {
-    const parsed = await readAdminJsonObject(c);
-    if (!parsed.ok) return parsed.response;
-    const body = parsed.body;
-    const ids = Array.isArray(body.ids)
-      ? body.ids.map((id: unknown) => Number(id)).filter((id: number) => Number.isInteger(id) && id > 0)
-      : [];
-    if (ids.length === 0) return c.json({ error: '网站监控排序列表不能为空' }, 400);
-    if (new Set(ids).size !== ids.length) return c.json({ error: '网站监控排序列表不能包含重复 ID' }, 400);
-
-    const database = getDatabase(c.env);
-    const updated = await db.reorderWebsiteMonitors(database, ids);
-    invalidateWebsiteMonitorPublicState(c, { reorder: ids });
-    runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'website_reorder', `调整网站监控排序: ${ids.join(',')}`));
-    return c.json({ success: true, updated });
-  } catch (error) {
-    console.error('[admin] website reorder failed:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '排序失败' }, 400);
-  }
-});
-
-adminRoutes.post('/websites/delete', async (c) => {
-  try {
-    const parsed = await readAdminJsonObject(c);
-    if (!parsed.ok) return parsed.response;
-    const body = parsed.body;
-    const database = getDatabase(c.env);
-    const id = Number(body.id);
-    if (!Number.isInteger(id) || id <= 0) {
-      return c.json({ error: '网站监控 ID 无效' }, 400);
-    }
-    const existing = await db.getWebsiteMonitor(database, id);
-    if (!existing) return c.json({ error: '网站监控不存在' }, 404);
-    await db.deleteWebsiteMonitor(database, id);
-    invalidateWebsiteMonitorPublicState(c, { remove: [id] });
-    runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'website_delete', `删除网站监控: ${existing.name} ${existing.url}`));
-    return c.json({ success: true });
-  } catch (error) {
-    console.error('[admin] website delete failed:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '删除失败' }, 500);
-  }
-});
-
-adminRoutes.post('/websites/:id/check', async (c) => {
-  try {
-    const parsed = await readAdminJsonObject(c);
-    if (!parsed.ok) return parsed.response;
-    const id = Number(c.req.param('id'));
-    if (!Number.isInteger(id) || id <= 0) {
-      return c.json({ error: '网站监控 ID 无效' }, 400);
-    }
-    const database = getDatabase(c.env);
-    const monitor = await db.getWebsiteMonitor(database, id);
-    if (!monitor) return c.json({ error: '网站监控不存在' }, 404);
-    const check = await checkWebsiteMonitorHttp(monitor);
-    const updated = await db.recordWebsiteCheck(database, check);
-    invalidateWebsiteMonitorPublicState(c, updated ? { upsert: [updated] } : true);
-    runAdminBackground(c, db.insertAuditLog(database, c.get('username')!, 'website_check', `手动检测网站监控: ${monitor.name}`));
-    return c.json({ success: true, monitor: updated, check });
-  } catch (error) {
-    console.error('[admin] website check failed:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '检测失败' }, 500);
   }
 });
 
@@ -2249,6 +1577,7 @@ adminRoutes.post('/site-logo/reset', async (c) => {
 
 // 获取所有设置
 adminRoutes.get('/settings', async (c) => {
+  c.header('Cache-Control', 'no-store');
   const database = getDatabase(c.env);
   const scope = c.req.query('scope');
   if (scope) {
@@ -2263,38 +1592,34 @@ adminRoutes.get('/settings', async (c) => {
     const keys = [...SETTINGS_SCOPE_KEYS[scope as keyof typeof SETTINGS_SCOPE_KEYS]];
     const settings = buildAdminSettings(await db.getSettingsByKeys(database, keys, fresh));
     const scoped = Object.fromEntries(keys.map((key) => [key, settings[key]]));
-    if (scope === 'notification') {
-      scoped.email_smtp_password_set = settings.email_smtp_password ? 'true' : 'false';
-      scoped.webhook_url_set = settings.webhook_url ? 'true' : 'false';
-      scoped.webhook_secret_set = settings.webhook_secret ? 'true' : 'false';
-      scoped.webhook_headers_set = settings.webhook_headers_json ? 'true' : 'false';
-      scoped.webhook_password_set = settings.webhook_password ? 'true' : 'false';
-      scoped.telegram_bot_token_set = settings.telegram_bot_token ? 'true' : 'false';
-      scoped.telegram_chat_id_set = settings.telegram_chat_id ? 'true' : 'false';
-      scoped.webhook_url_host = webhookUrlHost(settings.webhook_url);
-      // 敏感项一律只下发掩码预览（两头明文、中间星号），原文不进 API 响应——
-      // 否则前端再怎么显示成星号，开发者工具里照样能看到原文。
-      scoped.telegram_bot_token_preview = maskSecretPreview(settings.telegram_bot_token);
-      // chat id 虽是标识符而非凭据，但它足以定位到具体的接收会话，
-      // 与 bot token 同等对待。个人 chat id 通常不足 12 位，会被整串打码。
-      scoped.telegram_chat_id_preview = maskSecretPreview(settings.telegram_chat_id);
-      scoped.email_smtp_password_preview = maskSecretPreview(settings.email_smtp_password);
-      scoped.webhook_secret_preview = maskSecretPreview(settings.webhook_secret);
-      scoped.webhook_password_preview = maskSecretPreview(settings.webhook_password);
-      delete scoped['telegram_bot_token'];
-      delete scoped['telegram_chat_id'];
-      delete scoped['email_smtp_password'];
-      delete scoped['webhook_url'];
-      delete scoped['webhook_secret'];
-      delete scoped['webhook_headers_json'];
-      delete scoped['webhook_password'];
+    if (scope === 'general') {
+      const [storage, clients] = await Promise.all([
+        db.getHistoryStorageBytes(database).catch(() => null),
+        db.listClientIds(database).catch(() => []),
+      ]);
+      scoped.history_retention_capacity = storage ? JSON.stringify(estimateHistoryRetention(
+        storage,
+        {
+          record_preserve_time: Number(settings.record_preserve_time),
+          ping_record_preserve_time: Number(settings.ping_record_preserve_time),
+          rollup_preserve_time: Number(settings.rollup_preserve_time),
+        },
+        {
+          record_preserve_time: Number(settings.record_preserve_time),
+          ping_record_preserve_time: Number(settings.ping_record_preserve_time),
+          rollup_preserve_time: Number(settings.rollup_preserve_time),
+        },
+        clients.length,
+        Number(settings.record_high_watermark_bytes),
+      )) : '';
     }
-    if (!fresh) adminSettingsScopeCache.set(scope, { value: scoped, expiresAt: Date.now() + ADMIN_SETTINGS_SCOPE_CACHE_MS });
-    return c.json(scoped);
+    const response = redactAdminSettings(scoped);
+    if (!fresh) adminSettingsScopeCache.set(scope, { value: response, expiresAt: Date.now() + ADMIN_SETTINGS_SCOPE_CACHE_MS });
+    return c.json(response);
   }
 
   const settings = await db.getAllSettings(database, isQueryFlagEnabled(c.req.query('refresh')));
-  return c.json(buildAdminSettings(settings));
+  return c.json(redactAdminSettings(buildAdminSettings(settings)));
 });
 
 // 修改设置
@@ -2305,6 +1630,13 @@ adminRoutes.post('/settings', async (c) => {
     const body = parsed.body;
     const database = getDatabase(c.env);
     const settingsBody = { ...body };
+    for (const [key, definition] of Object.entries(SETTING_SCHEMA)) {
+      if (!('sensitive' in definition) || !definition.sensitive) continue;
+      delete settingsBody[`${key}_set`];
+      delete settingsBody[`${key}_preview`];
+      if (isMaskedSecretPreview(settingsBody[key])) delete settingsBody[key];
+    }
+    if (settingsBody.email_smtp_username === '') delete settingsBody.email_smtp_username;
     delete settingsBody.email_smtp_password_set;
     delete settingsBody.webhook_url_set;
     delete settingsBody.webhook_secret_set;
@@ -2354,6 +1686,48 @@ adminRoutes.post('/settings', async (c) => {
       return c.json({ error: '设置校验失败', details: normalized.errors }, 400);
     }
 
+    if (['record_preserve_time', 'ping_record_preserve_time', 'rollup_preserve_time']
+      .some(key => key in normalized.settings)) {
+      const currentHistoryRetention = await db.getSettingsByKeys(database, [
+        'record_preserve_time', 'ping_record_preserve_time', 'rollup_preserve_time',
+      ], true);
+      const retentionInvariant = validateHistoryRetentionInvariant({ ...currentHistoryRetention, ...normalized.settings });
+      if (retentionInvariant) return c.json({ error: retentionInvariant }, 400);
+
+      try {
+        const [stored, storage, clients] = await Promise.all([
+          db.getSettingsByKeys(database, ['record_preserve_time', 'ping_record_preserve_time', 'rollup_preserve_time', 'record_high_watermark_bytes'], true),
+          db.getHistoryStorageBytes(database),
+          db.listClientIds(database),
+        ]);
+        const current = buildAdminSettings(stored);
+        const target = buildAdminSettings({ ...stored, ...normalized.settings });
+        const estimate = estimateHistoryRetention(storage,
+          {
+            record_preserve_time: Number(current.record_preserve_time),
+            ping_record_preserve_time: Number(current.ping_record_preserve_time),
+            rollup_preserve_time: Number(current.rollup_preserve_time),
+          },
+          {
+            record_preserve_time: Number(target.record_preserve_time),
+            ping_record_preserve_time: Number(target.ping_record_preserve_time),
+            rollup_preserve_time: Number(target.rollup_preserve_time),
+          },
+          clients.length,
+          Number(target.record_high_watermark_bytes),
+        );
+        if (estimate.capacity_risk && estimate.projected_bytes > Number(target.record_high_watermark_bytes)) {
+          return c.json({
+            error: '保留期调整后的历史容量估算超过写入预算，请先提高预算或缩短保留期',
+            retention_estimate: estimate,
+          }, 409);
+        }
+      } catch {
+        // If estimation dependencies are unavailable, keep the existing save path;
+        // the UI cannot rely on an estimate as a transactional quota guarantee.
+      }
+    }
+
     const currentSettings = buildAdminSettings(
       await db.getSettingsByKeys(database, Object.keys(normalized.settings), true),
     );
@@ -2375,14 +1749,13 @@ adminRoutes.post('/settings', async (c) => {
     await db.setSettings(database, changedSettings);
     invalidateAdminSettingsCache();
     const background: Promise<unknown>[] = [];
-    if (changedKeys.some((key) => CAPACITY_ESTIMATE_SETTING_KEY_SET.has(key))) {
-      invalidateCapacityEstimateCache();
+    if (changedKeys.some((key) => SETTING_SCHEMA[key as keyof typeof SETTING_SCHEMA]?.public)
+      || changedKeys.some(key => HISTORY_RETENTION_SETTING_KEYS.has(key))) {
+      void invalidateAdminPublicMetadata(c);
     }
-    if (changedKeys.some((key) => SETTING_SCHEMA[key as keyof typeof SETTING_SCHEMA]?.public)) {
-      invalidateAdminPublicMetadata(c);
-    }
-    if (changedKeys.includes('ping_record_persist_interval_sec')) {
-      invalidateAgentPingTaskCache();
+    if (changedKeys.some(key => HISTORY_RETENTION_SETTING_KEYS.has(key))) {
+      clearMetricsMetaCache();
+      clearMonitorHistoryCache();
     }
     const livePolicySettingsChanged =
       changedKeys.some((key) => LIVE_POLICY_SETTING_KEYS.has(key));
@@ -2392,8 +1765,7 @@ adminRoutes.post('/settings', async (c) => {
       livePolicySettingsChanged ||
       recordPersistenceSettingsChanged
     ) {
-      const doId = c.env.LIVE_DATA.idFromName('global');
-      const stub = c.env.LIVE_DATA.get(doId);
+      const stub = liveDataObjectStub(c.env.LIVE_DATA);
       if (livePolicySettingsChanged) {
         invalidateLiveViewerSettingsCache();
         background.push(stub.fetch(new Request('https://do/policy-refresh', { method: 'POST' })));
@@ -2453,9 +1825,44 @@ adminRoutes.post('/notification/offline/edit', async (c) => {
   }
 });
 
-// 到期通知列表
-adminRoutes.get('/notification/expiry', async (c) => {
+// 公网 IP 变更通知（服务器层级开关）列表
+adminRoutes.get('/notification/ipchange', async (c) => {
   const database = getDatabase(c.env);
+  const notifications = await db.listIpChangeNotifications(database, true);
+  return c.json(notifications);
+});
+
+// 编辑公网 IP 变更通知（支持单个和批量）
+adminRoutes.post('/notification/ipchange/edit', async (c) => {
+  try {
+    const parsed = await readAdminJsonObjectOrArray(c);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.body;
+    const database = getDatabase(c.env);
+    const allowedClientIds = await getAllowedClientIds(database);
+    const items = Array.isArray(body) ? body : [body];
+    const normalized = [];
+    const errors: string[] = [];
+    for (const [index, item] of items.entries()) {
+      const validated = validateIpChangeNotificationInput(item, allowedClientIds);
+      if (!validated.ok) {
+        errors.push(...validated.errors.map(error => `${index}: ${error}`));
+      } else {
+        normalized.push(validated.item);
+      }
+    }
+    if (errors.length > 0) {
+      return c.json({ error: 'IP 变更通知校验失败', details: errors }, 400);
+    }
+    const changed = await db.setIpChangeNotifications(database, normalized);
+    return c.json({ success: true, updated: normalized.length, changed, noop: changed === 0 });
+  } catch {
+    return c.json({ error: '保存失败' }, 500);
+  }
+});
+
+// 到期通知列表
+adminRoutes.get('/notification/expiry', async (c) => {  const database = getDatabase(c.env);
   const notifications = await db.listExpiryNotifications(database, true);
   return c.json(notifications);
 });
@@ -2514,22 +1921,50 @@ adminRoutes.post('/notification/load/add', async (c) => {
   }
 });
 
+// 负载通知更新/删除的核心实现：新版路径参数与旧版 body 兼容入口都转发到这里，
+// 兼容路径只负责把 id 从 body 里取出来，不再各存一份校验/落库逻辑。
+function validLoadNotificationId(value: unknown): number | null {
+  const id = typeof value === 'number' ? value : Number(value);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+async function deleteLoadNotificationById(c: AdminContext, id: number): Promise<Response> {
+  const database = getDatabase(c.env);
+  await db.deleteLoadNotification(database, id);
+  return c.json({ success: true });
+}
+
+async function updateLoadNotificationById(
+  c: AdminContext,
+  id: number,
+  body: Record<string, unknown>,
+): Promise<Response> {
+  const database = getDatabase(c.env);
+  const validated = validateLoadNotificationInput(
+    { ...body, id },
+    await getAllowedClientIdsForLoadNotification(database, body),
+    { requireId: true },
+  );
+  if (!validated.ok) {
+    return c.json({ error: '负载通知校验失败', details: validated.errors }, 400);
+  }
+  const { id: _id, ...data } = validated.item;
+  const existing = await db.getLoadNotification(database, id, true);
+  if (!existing) return c.json({ error: '负载通知不存在' }, 404);
+  const changed = await db.updateLoadNotification(database, id, data);
+  return c.json({ success: true, changed: changed ? 1 : 0, noop: !changed });
+}
+
 // 编辑负载通知
 adminRoutes.post('/notification/load/edit', async (c) => {
   try {
     const parsed = await readAdminJsonObject(c);
     if (!parsed.ok) return parsed.response;
-    const body = parsed.body;
-    const database = getDatabase(c.env);
-    const validated = validateLoadNotificationInput(body, await getAllowedClientIdsForLoadNotification(database, body), { requireId: true });
-    if (!validated.ok) {
-      return c.json({ error: '负载通知校验失败', details: validated.errors }, 400);
+    const id = validLoadNotificationId(parsed.body.id);
+    if (id === null) {
+      return c.json({ error: '负载通知校验失败', details: ['通知规则 ID 无效'] }, 400);
     }
-    const { id, ...data } = validated.item;
-    const existing = await db.getLoadNotification(database, id!, true);
-    if (!existing) return c.json({ error: '负载通知不存在' }, 404);
-    const changed = await db.updateLoadNotification(database, id!, data);
-    return c.json({ success: true, changed: changed ? 1 : 0, noop: !changed });
+    return await updateLoadNotificationById(c, id, parsed.body);
   } catch {
     return c.json({ error: '编辑失败' }, 500);
   }
@@ -2537,28 +1972,23 @@ adminRoutes.post('/notification/load/edit', async (c) => {
 
 // 删除负载通知 (DELETE /:id)
 adminRoutes.delete('/notification/load/:id', async (c) => {
-  const id = parseInt(c.req.param('id'));
-  if (!Number.isInteger(id) || id <= 0) {
+  const id = validLoadNotificationId(c.req.param('id'));
+  if (id === null) {
     return c.json({ error: '负载通知 ID 无效' }, 400);
   }
-  const database = getDatabase(c.env);
-  await db.deleteLoadNotification(database, id);
-  return c.json({ success: true });
+  return deleteLoadNotificationById(c, id);
 });
 
-// 删除负载通知 (legacy)
+// 删除负载通知 (legacy)：body 里带 id，薄转发到同一份删除实现。
 adminRoutes.post('/notification/load/delete', async (c) => {
   try {
     const parsed = await readAdminJsonObject(c);
     if (!parsed.ok) return parsed.response;
-    const body = parsed.body;
-    const id = Number(body.id);
-    if (!Number.isInteger(id) || id <= 0) {
+    const id = validLoadNotificationId(parsed.body.id);
+    if (id === null) {
       return c.json({ error: '负载通知 ID 无效' }, 400);
     }
-    const database = getDatabase(c.env);
-    await db.deleteLoadNotification(database, id);
-    return c.json({ success: true });
+    return await deleteLoadNotificationById(c, id);
   } catch {
     return c.json({ error: '删除失败' }, 500);
   }
@@ -2567,24 +1997,13 @@ adminRoutes.post('/notification/load/delete', async (c) => {
 // 编辑负载通知 (POST /:id)
 adminRoutes.post('/notification/load/:id', async (c) => {
   try {
-    const id = parseInt(c.req.param('id'));
+    const id = validLoadNotificationId(c.req.param('id'));
+    if (id === null) {
+      return c.json({ error: '负载通知 ID 无效' }, 400);
+    }
     const parsed = await readAdminJsonObject(c);
     if (!parsed.ok) return parsed.response;
-    const body = parsed.body;
-    const database = getDatabase(c.env);
-    const validated = validateLoadNotificationInput(
-      { ...body, id },
-      await getAllowedClientIdsForLoadNotification(database, body),
-      { requireId: true },
-    );
-    if (!validated.ok) {
-      return c.json({ error: '负载通知校验失败', details: validated.errors }, 400);
-    }
-    const { id: _id, ...data } = validated.item;
-    const existing = await db.getLoadNotification(database, id, true);
-    if (!existing) return c.json({ error: '负载通知不存在' }, 404);
-    const changed = await db.updateLoadNotification(database, id, data);
-    return c.json({ success: true, changed: changed ? 1 : 0, noop: !changed });
+    return await updateLoadNotificationById(c, id, parsed.body);
   } catch {
     return c.json({ error: '编辑失败' }, 500);
   }
@@ -2608,7 +2027,7 @@ async function verifyUserMfaFactor(
   if (!user.totp_enabled_at || !user.totp_secret_enc) return false;
   if (method === 'recovery_code') {
     try {
-      return db.consumeRecoveryCode(database, user.uuid, await hashRecoveryCode(code, env));
+      return await db.consumeRecoveryCode(database, user.uuid, await hashRecoveryCode(code, env));
     } catch (error) {
       if (error instanceof AuthConfigurationError) throw error;
       return false;
@@ -2950,12 +2369,16 @@ adminRoutes.post('/account/chpasswd', async (c) => {
 adminRoutes.get('/logs', async (c) => {
   const limit = parseInt(c.req.query('limit') || '100');
   const page = parseInt(c.req.query('page') || '1');
+  // 动作 / 关键词筛选在数据库里做：这样每一页都是「符合条件的记录」，而不是在已取回的一页里再过滤。
+  const action = (c.req.query('action') || '').trim().slice(0, 100);
+  const search = (c.req.query('search') || '').trim().slice(0, 200);
   const database = getDatabase(c.env);
-  const logs = await db.listAuditLogsPaged(database, page, Math.min(limit, 500));
+  const logs = await db.listAuditLogsPaged(database, page, Math.min(limit, 500), { action, search });
   return c.json({
     data: logs.logs,
     total: logs.total,
     has_more: logs.has_more,
+    actions: logs.actions ?? [],
     page: Math.max(1, page),
     limit: Math.min(limit, 500),
   });
@@ -2980,213 +2403,17 @@ adminRoutes.get('/health', async (c) => {
   return c.json(result.body, result.status);
 });
 
-adminRoutes.get('/capacity', async (c) => {
-  const forceCounts = c.req.query('refresh_counts') === 'true' || c.req.query('refresh_counts') === '1';
-  const database = getDatabase(c.env);
-  return c.json(await buildCapacityEstimate(database, { forceCounts }));
-});
-
 adminRoutes.post('/maintenance/cleanup', async (c) => {
   try {
     const database = getDatabase(c.env);
     const parsed = await readAdminJsonObject(c);
     if (!parsed.ok) return parsed.response;
     const result = await runMaintenanceCleanup(database, c.get('username')!);
-    invalidateCapacityEstimateCache();
     return c.json(result);
   } catch (error) {
     const database = getDatabase(c.env);
     await db.insertAuditLog(database, c.get('username')!, 'maintenance_cleanup_error', `手动维护清理失败: ${errorDetail(error)}`, 'error');
     return c.json({ error: '维护清理失败' }, 500);
-  }
-});
-
-// ============ 备份相关 ============
-
-// 下载加密完整备份（包含配置和 token，不包含账号、审计和历史记录）
-adminRoutes.post('/download/backup', async (c) => {
-  try {
-    const parsed = await readAdminJsonObject(c);
-    if (!parsed.ok) return parsed.response;
-    const body = parsed.body;
-    const backupPassword = typeof body.backup_password === 'string' ? body.backup_password : '';
-    const database = getDatabase(c.env);
-    const backup = await buildBackupSnapshot(database);
-    const encrypted = await encryptBackup(backup, backupPassword);
-    if (!encrypted.ok) {
-      return c.json({ error: encrypted.error }, 400);
-    }
-
-    await db.insertAuditLog(
-      database,
-      c.get('username')!,
-      'backup_download',
-      `下载加密完整备份: ${JSON.stringify({
-        ...summarizeBackup(backup),
-        encrypted: true,
-        contains_sensitive_fields_after_decrypt: true,
-        encryption: BACKUP_ENCRYPTION_ALGORITHM,
-      })}`,
-    );
-
-    const date = new Date().toISOString().slice(0, 10);
-    return new Response(JSON.stringify(encrypted.encryptedBackup, null, 2), {
-      headers: {
-        'Content-Type': 'application/json',
-        'Cache-Control': 'no-store',
-        'Content-Disposition': `attachment; filename="cf-monitor-encrypted-backup-${date}.json"`,
-        'X-CF-VPS-Monitor-Backup-Schema': ENCRYPTED_BACKUP_SCHEMA_ID,
-        'X-CF-VPS-Monitor-Backup-Scope': BACKUP_SCOPE,
-        'X-CF-VPS-Monitor-Backup-Encrypted': 'true',
-      },
-    });
-  } catch (error) {
-    console.error('[backup] download failed:', sanitizeSetupDiagnosticDetail(error));
-    return c.json({ error: '备份失败' }, 500);
-  }
-});
-
-// 上传备份恢复
-adminRoutes.post('/upload/backup', async (c) => {
-  let databaseRestored = false;
-  let realtimeSynchronized = false;
-  try {
-    const contentLength = Number(c.req.header('Content-Length') || '0');
-    if (Number.isFinite(contentLength) && contentLength > MAX_BACKUP_BYTES) {
-      return c.json({ error: `备份文件不能超过 ${MAX_BACKUP_BYTES} 字节` }, 413);
-    }
-
-    const bodyResult = await readAdminBackupJsonObject(c);
-    if (!bodyResult.ok) return bodyResult.response;
-    const { body } = bodyResult;
-
-    if (jsonSizeBytes(body) > MAX_BACKUP_BYTES) {
-      return c.json({ error: `备份文件不能超过 ${MAX_BACKUP_BYTES} 字节` }, 413);
-    }
-
-    const dryRun = isQueryFlagEnabled(c.req.query('dry_run'));
-    const confirmation = getRestoreConfirmationState(c, body);
-    if (!dryRun && !confirmation.confirmed) {
-      return c.json({
-        error: '恢复备份需要同时确认 confirm_restore=true 和 acknowledge_overwrite=true',
-        required: {
-          confirm_restore: true,
-          acknowledge_overwrite: true,
-        },
-        received: {
-          confirm_restore: confirmation.confirmRestore,
-          acknowledge_overwrite: confirmation.acknowledgeOverwrite,
-        },
-      }, 400);
-    }
-    let backupInput: unknown = body;
-    const wrappedBackup = body.backup;
-    const encryptedBackup = isEncryptedBackupEnvelope(wrappedBackup) ? wrappedBackup : body;
-    if (!isEncryptedBackupEnvelope(encryptedBackup)) {
-      return c.json({ error: '只支持导入加密完整备份，不支持明文备份文件' }, 400);
-    }
-    const backupPassword = typeof body.backup_password === 'string'
-      ? body.backup_password
-      : c.req.header('X-Backup-Password') || '';
-    const decrypted = await decryptBackup(encryptedBackup, backupPassword);
-    if (!decrypted.ok) {
-      return c.json({ error: decrypted.error }, 400);
-    }
-    backupInput = decrypted.backup;
-
-    const validated = validateBackup(backupInput);
-    if (!validated.ok) {
-      return c.json({ error: '备份校验失败', details: validated.errors }, 400);
-    }
-
-    if (validated.backup.clients !== undefined) {
-      const snapshotSize = measureRestoredClientSnapshot(validated.backup.clients);
-      if (!snapshotSize.fits) {
-        return c.json({
-          error: '节点配置过大，无法安全恢复实时节点列表；请缩短备注、硬件描述或减少节点后重试。数据库未修改。',
-          database_restored: false,
-          estimated_snapshot_bytes: snapshotSize.estimatedBytes,
-          maximum_snapshot_bytes: snapshotSize.maximumBytes,
-        }, 413);
-      }
-    }
-    const restored = summarizeBackup(validated.backup);
-    if (dryRun) {
-      return c.json({
-        success: true,
-        dry_run: true,
-        restored,
-        warnings: validated.warnings,
-      });
-    }
-
-    const database = getDatabase(c.env);
-    const beforeRestore = await db.getBackupConfigurationSnapshot(database);
-    await db.restoreBackupData(database, validated.backup);
-    databaseRestored = true;
-    invalidateAdminClientsCache();
-    invalidateAdminPingTasksCache();
-    purgeAdminPingTasksEdgeCache(c);
-    void purgeAdminClientsEdgeCache(c);
-    invalidateAdminPublicMetadata(c);
-    invalidateAgentClientAuthCache();
-    invalidateAgentPingTaskCache();
-    invalidateAllowedClientIdsCache();
-    invalidateCapacityEstimateCache();
-    invalidateWebsiteMonitorPublicState(c);
-    if (validated.backup.clients !== undefined) {
-      const authoritativeClients = await db.listClients(database, true);
-      const synchronization = await liveDataStub(c).fetch(new Request('https://do/clients-restore', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clients: authoritativeClients.map(hideAdminClientToken) }),
-      }));
-      const result = await synchronization.json().catch(() => null);
-      if (!synchronization.ok || !result || typeof result !== 'object' || !('success' in result) || result.success !== true) {
-        throw new Error('Restored client state synchronization failed');
-      }
-    }
-    await refreshLivePingTasks(c);
-    realtimeSynchronized = true;
-    const cleanup = await db.cleanupOrphanClientData(database);
-
-    await db.insertAuditLog(
-      database,
-      c.get('username')!,
-      'backup_restore',
-      `恢复备份: ${JSON.stringify({
-        restored,
-        previous: summarizeBackup(beforeRestore),
-        cleanup,
-        warnings: validated.warnings.length,
-        operator_ip: getRequestIp(c),
-        backup_size_bytes: jsonSizeBytes(validated.backup),
-        encrypted: true,
-        plaintext_backup_supported: false,
-        confirmed: {
-          confirm_restore: confirmation.confirmRestore,
-          acknowledge_overwrite: confirmation.acknowledgeOverwrite,
-        },
-      })}`,
-    );
-    return c.json({
-      success: true,
-      restored,
-      cleanup,
-      warnings: validated.warnings,
-    });
-  } catch {
-    if (databaseRestored) {
-      return c.json({
-        error: realtimeSynchronized
-          ? '数据库配置与实时状态已恢复，但后续清理或审计未完成。请重试确认。'
-          : '数据库配置已恢复，但实时状态与 Agent 认证同步未完成。请重试恢复以完成同步。',
-        database_restored: true,
-        realtime_synchronized: realtimeSynchronized,
-        retryable: true,
-      }, 500);
-    }
-    return c.json({ error: '恢复失败' }, 500);
   }
 });
 
@@ -3255,6 +2482,82 @@ adminRoutes.post('/test/sendMessage', async (c) => {
     );
     return c.json({ error: '发送测试消息失败' }, 500);
   }
+});
+
+// ============ 第三方 Monitor 主题托管 ============
+
+async function getThirdPartyThemeSettings(database: AppDatabase) {
+  return parseThirdPartyThemeSettings(await db.getSetting(database, THIRD_PARTY_THEME_SETTING_KEY));
+}
+
+adminRoutes.get('/third-party-theme', async (c) => {
+  const database = getDatabase(c.env);
+  const settings = await getThirdPartyThemeSettings(database);
+  const theme = settings.theme_url ? parseThemeUrl(settings.theme_url) : null;
+  // 上游取不到 index.html 时首页会静默回落到内置主题，这里主动探活让后台能看出地址填错了。
+  const probe = settings.enabled && settings.theme_url ? await probeTheme(settings.theme_url) : null;
+  return c.json({
+    enabled: settings.enabled,
+    theme_url: settings.theme_url,
+    raw_base: theme?.rawBase || '',
+    is_commit: theme?.isCommit || false,
+    probe,
+  });
+});
+
+adminRoutes.post('/third-party-theme', async (c) => {
+  const parsed = await readAdminJsonObject(c);
+  if (!parsed.ok) return parsed.response;
+
+  const enabled = parsed.body.enabled === true;
+  const themeUrl = normalizeThemeUrl(parsed.body.theme_url);
+  if (enabled && !themeUrl) {
+    return c.json({ error: '主题地址必须是 GitHub 仓库，例如 https://github.com/owner/repo' }, 400);
+  }
+
+  const database = getDatabase(c.env);
+  const settings = { enabled, theme_url: themeUrl };
+  await db.setSetting(database, THIRD_PARTY_THEME_SETTING_KEY, serializeThirdPartyThemeSettings(settings));
+  invalidateThirdPartyThemeCache();
+  await db.insertAuditLog(
+    database,
+    c.get('username')!,
+    'third_party_theme_update',
+    `${enabled ? '启用' : '停用'} Monitor 第三方主题: ${themeUrl || '(未设置)'}`,
+  );
+
+  const theme = themeUrl ? parseThemeUrl(themeUrl) : null;
+  if (theme?.repository) await clearPublishedThemeCache(theme);
+  // 保存后立刻探活：地址写错（例如把分支名当成目录）时能马上提示，而不是等访客发现首页没变。
+  const probe = enabled && themeUrl ? await probeTheme(themeUrl) : null;
+  return c.json({
+    success: true,
+    ...settings,
+    raw_base: theme?.rawBase || '',
+    is_commit: theme?.isCommit || false,
+    probe,
+  });
+});
+
+adminRoutes.post('/third-party-theme/refresh', async (c) => {
+  const database = getDatabase(c.env);
+  const settings = await getThirdPartyThemeSettings(database);
+  invalidateThirdPartyThemeCache();
+
+  const theme = settings.theme_url ? parseThemeUrl(settings.theme_url) : null;
+  if (theme) {
+    if (theme.repository) await clearPublishedThemeCache(theme);
+    try {
+      await caches.default.delete(new Request(`${theme.cacheBase}/index.html`));
+      if (theme.repository) {
+        await caches.default.delete(new Request(`https://third-party-theme-cache.local/archive/${theme.owner}/${theme.repo}`));
+      }
+    } catch {
+      // Cache API 不可用时只清内存缓存。
+    }
+  }
+  const probe = settings.theme_url ? await probeTheme(settings.theme_url) : null;
+  return c.json({ success: true, probe });
 });
 
 export { adminRoutes };

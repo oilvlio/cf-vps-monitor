@@ -4,11 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strings"
@@ -16,8 +21,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/shirou/gopsutil/v3/disk"
-	gnet "github.com/shirou/gopsutil/v3/net"
+	"github.com/shirou/gopsutil/v4/disk"
+	"github.com/shirou/gopsutil/v4/load"
+	gnet "github.com/shirou/gopsutil/v4/net"
 )
 
 func TestNormalizeServerURL(t *testing.T) {
@@ -405,241 +411,6 @@ func TestPolicyDurationsKeepRealtimeAndBackgroundUploadsDistinct(t *testing.T) {
 	}
 }
 
-func TestTrafficResetPeriodKey(t *testing.T) {
-	loc := time.UTC
-	tests := []struct {
-		now      time.Time
-		resetDay int
-		want     string
-	}{
-		{now: time.Date(2026, time.June, 1, 0, 0, 0, 0, loc), resetDay: 1, want: "2026-06-01"},
-		{now: time.Date(2026, time.June, 14, 0, 0, 0, 0, loc), resetDay: 15, want: "2026-05-15"},
-		{now: time.Date(2026, time.March, 31, 0, 0, 0, 0, loc), resetDay: 31, want: "2026-03-31"},
-		{now: time.Date(2026, time.March, 30, 0, 0, 0, 0, loc), resetDay: 31, want: "2026-03-01"},
-		{now: time.Date(2026, time.February, 28, 0, 0, 0, 0, loc), resetDay: 31, want: "2026-01-31"},
-	}
-
-	for _, tc := range tests {
-		got := trafficResetPeriodKey(tc.now, tc.resetDay)
-		if got != tc.want {
-			t.Fatalf("trafficResetPeriodKey(%s, %d) = %q, want %q", tc.now.Format(time.DateOnly), tc.resetDay, got, tc.want)
-		}
-	}
-}
-
-func TestTrafficResetStatePathIsStableAcrossTokenRotation(t *testing.T) {
-	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", "")
-
-	pathA := trafficResetStatePath("token-a")
-	pathB := trafficResetStatePath("token-b")
-	if pathA != pathB {
-		t.Fatalf("trafficResetStatePath changed across token rotation: %q != %q", pathA, pathB)
-	}
-	if strings.Contains(filepath.Base(pathA), shortHash("token-a")) {
-		t.Fatalf("trafficResetStatePath(%q) = %q, must not key monthly traffic by token", "token-a", pathA)
-	}
-}
-
-func TestTrafficResetTrackerKeepsMonthlyDeltasAcrossTokenRotation(t *testing.T) {
-	statePath := filepath.Join(t.TempDir(), "traffic-state.json")
-	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", statePath)
-
-	scope := "wan"
-	first := newTrafficResetTracker(1, "token-a", scope)
-	now := time.Date(2026, time.June, 10, 12, 0, 0, 0, time.UTC)
-	bootedBeforePeriod := time.Date(2026, time.May, 10, 12, 0, 0, 0, time.UTC)
-	up, down := first.adjustSinceBoot(1000, 2000, now, bootedBeforePeriod)
-	if up != 0 || down != 0 {
-		t.Fatalf("initial monthly traffic = %d/%d, want 0/0", up, down)
-	}
-	up, down = first.adjustSinceBoot(1500, 2600, now.Add(time.Minute), bootedBeforePeriod)
-	if up != 500 || down != 600 {
-		t.Fatalf("monthly traffic after delta = %d/%d, want 500/600", up, down)
-	}
-
-	rotated := newTrafficResetTracker(1, "token-b", scope)
-	up, down = rotated.adjustSinceBoot(1700, 3000, now.Add(2*time.Minute), bootedBeforePeriod)
-	if up != 700 || down != 1000 {
-		t.Fatalf("monthly traffic after token rotation = %d/%d, want 700/1000", up, down)
-	}
-}
-
-func TestTrafficResetTrackerStartsWithSystemTotalsWhenBootedInCurrentPeriod(t *testing.T) {
-	statePath := filepath.Join(t.TempDir(), "traffic-state.json")
-	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", statePath)
-
-	tracker := newTrafficResetTracker(1, "token", "wan")
-	now := time.Date(2026, time.June, 10, 12, 0, 0, 0, time.UTC)
-	bootedInPeriod := time.Date(2026, time.June, 2, 12, 0, 0, 0, time.UTC)
-	up, down := tracker.adjustSinceBoot(1000, 2000, now, bootedInPeriod)
-	if up != 1000 || down != 2000 {
-		t.Fatalf("initial monthly traffic = %d/%d, want system totals 1000/2000", up, down)
-	}
-}
-
-func TestTrafficResetTrackerRepairsInstallBaselineWhenBootedInCurrentPeriod(t *testing.T) {
-	statePath := filepath.Join(t.TempDir(), "traffic-state.json")
-	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", statePath)
-
-	now := time.Date(2026, time.June, 10, 12, 0, 0, 0, time.UTC)
-	state := trafficResetState{
-		ResetDay:    1,
-		Period:      trafficResetPeriodKey(now, 1),
-		Scope:       "wan",
-		LastRawUp:   1000,
-		LastRawDown: 2000,
-		PeriodUp:    0,
-		PeriodDown:  0,
-	}
-	data, err := json.Marshal(state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(statePath, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	tracker := newTrafficResetTracker(1, "token", "wan")
-	bootedInPeriod := time.Date(2026, time.June, 2, 12, 0, 0, 0, time.UTC)
-	up, down := tracker.adjustSinceBoot(1500, 2600, now.Add(time.Minute), bootedInPeriod)
-	if up != 1500 || down != 2600 {
-		t.Fatalf("repaired monthly traffic = %d/%d, want system totals 1500/2600", up, down)
-	}
-}
-
-func TestTrafficResetTrackerAddsCurrentBootCountersAfterCounterReset(t *testing.T) {
-	statePath := filepath.Join(t.TempDir(), "traffic-state.json")
-	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", statePath)
-
-	now := time.Date(2026, time.June, 10, 12, 0, 0, 0, time.UTC)
-	state := trafficResetState{
-		ResetDay:    1,
-		Period:      trafficResetPeriodKey(now, 1),
-		Scope:       "wan",
-		LastRawUp:   4000,
-		LastRawDown: 10_000,
-		PeriodUp:    5000,
-		PeriodDown:  12_000,
-	}
-	data, err := json.Marshal(state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(statePath, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	tracker := newTrafficResetTracker(1, "token", "wan")
-	bootedInPeriod := time.Date(2026, time.June, 9, 12, 0, 0, 0, time.UTC)
-	up, down := tracker.adjustSinceBoot(700, 800, now.Add(time.Minute), bootedInPeriod)
-	if up != 5700 || down != 12_800 {
-		t.Fatalf("monthly traffic after counter reset = %d/%d, want previous period plus current boot 5700/12800", up, down)
-	}
-}
-
-func TestTrafficResetTrackerKeepsMonthlyTrafficAfterRebootInCurrentPeriod(t *testing.T) {
-	statePath := filepath.Join(t.TempDir(), "traffic-state.json")
-	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", statePath)
-
-	tracker := newTrafficResetTracker(1, "token", "wan")
-	now := time.Date(2026, time.June, 10, 12, 0, 0, 0, time.UTC)
-	bootedInPeriod := time.Date(2026, time.June, 2, 12, 0, 0, 0, time.UTC)
-	tracker.adjustSinceBoot(5000, 12_000, now, bootedInPeriod)
-
-	restarted := newTrafficResetTracker(1, "token", "wan")
-	bootedAfterReboot := time.Date(2026, time.June, 10, 12, 1, 0, 0, time.UTC)
-	up, down := restarted.adjustSinceBoot(700, 800, now.Add(2*time.Minute), bootedAfterReboot)
-	if up != 5700 || down != 12_800 {
-		t.Fatalf("monthly traffic after reboot = %d/%d, want previous period plus current boot 5700/12800", up, down)
-	}
-}
-
-func TestTrafficResetTrackerDetectsRebootEvenWhenOneCounterIncreases(t *testing.T) {
-	statePath := filepath.Join(t.TempDir(), "traffic-state.json")
-	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", statePath)
-
-	tracker := newTrafficResetTracker(1, "token", "wan")
-	now := time.Date(2026, time.June, 10, 12, 0, 0, 0, time.UTC)
-	bootedInPeriod := time.Date(2026, time.June, 2, 12, 0, 0, 0, time.UTC)
-	tracker.adjustSinceBoot(100, 12_000, now, bootedInPeriod)
-
-	restarted := newTrafficResetTracker(1, "token", "wan")
-	bootedAfterReboot := time.Date(2026, time.June, 10, 12, 1, 0, 0, time.UTC)
-	up, down := restarted.adjustSinceBoot(700, 800, now.Add(2*time.Minute), bootedAfterReboot)
-	if up != 800 || down != 12_800 {
-		t.Fatalf("monthly traffic after asymmetric reboot = %d/%d, want previous period plus current boot 800/12800", up, down)
-	}
-}
-
-func TestTrafficResetTrackerResetsEachDirectionIndependently(t *testing.T) {
-	statePath := filepath.Join(t.TempDir(), "traffic-state.json")
-	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", statePath)
-
-	tracker := newTrafficResetTracker(1, "token", "wan")
-	now := time.Date(2026, time.June, 10, 12, 0, 0, 0, time.UTC)
-	bootedInPeriod := time.Date(2026, time.June, 2, 12, 0, 0, 0, time.UTC)
-	tracker.adjustSinceBoot(100, 12_000, now, bootedInPeriod)
-
-	restarted := newTrafficResetTracker(1, "token", "wan")
-	up, down := restarted.adjustSinceBoot(700, 800, now.Add(2*time.Minute), bootedInPeriod)
-	if up != 700 || down != 12_800 {
-		t.Fatalf("monthly traffic after one-direction reset = %d/%d, want 700/12800 without repeating upload history", up, down)
-	}
-}
-
-func TestTrafficResetTrackerIgnoresExternalKomariNetStaticHistory(t *testing.T) {
-	dir := t.TempDir()
-	statePath := filepath.Join(dir, "traffic-state.json")
-	komariPath := filepath.Join(dir, "net_static.json")
-	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", statePath)
-	t.Setenv("CF_MONITOR_KOMARI_NET_STATIC_FILE", komariPath)
-
-	now := time.Date(2026, time.June, 10, 12, 0, 0, 0, time.UTC)
-	periodStart := lastTrafficResetDate(1, now)
-	fixture := map[string]any{
-		"interfaces": map[string]any{
-			"eth0": []map[string]uint64{
-				{"timestamp": uint64(periodStart.Add(time.Minute).Unix()), "tx": 100, "rx": 200},
-				{"timestamp": uint64(now.Add(time.Minute).Unix()), "tx": 3000, "rx": 4000},
-			},
-			"lo": []map[string]uint64{
-				{"timestamp": uint64(periodStart.Add(time.Minute).Unix()), "tx": 5000, "rx": 6000},
-			},
-		},
-	}
-	data, err := json.Marshal(fixture)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(komariPath, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	tracker := newTrafficResetTracker(1, "token", "wan")
-	bootedBeforePeriod := time.Date(2026, time.May, 10, 12, 0, 0, 0, time.UTC)
-	up, down := tracker.adjustSinceBoot(50, 70, now, bootedBeforePeriod)
-	if up != 0 || down != 0 {
-		t.Fatalf("monthly traffic = %d/%d, want 0/0 because external Komari history must not be imported", up, down)
-	}
-}
-
-func TestTrafficResetTrackerDropsPreviousMonthlyPeriod(t *testing.T) {
-	statePath := filepath.Join(t.TempDir(), "traffic-state.json")
-	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", statePath)
-
-	tracker := newTrafficResetTracker(15, "token", "wan")
-	beforeReset := time.Date(2026, time.June, 14, 23, 0, 0, 0, time.UTC)
-	bootedBeforePeriod := time.Date(2026, time.May, 10, 12, 0, 0, 0, time.UTC)
-	tracker.adjustSinceBoot(1000, 1000, beforeReset, bootedBeforePeriod)
-	tracker.adjustSinceBoot(1800, 1900, beforeReset.Add(time.Minute), bootedBeforePeriod)
-
-	afterReset := time.Date(2026, time.June, 15, 0, 1, 0, 0, time.UTC)
-	up, down := tracker.adjustSinceBoot(2000, 2200, afterReset, bootedBeforePeriod)
-	if up != 200 || down != 300 {
-		t.Fatalf("monthly traffic after reset day = %d/%d, want 200/300", up, down)
-	}
-}
-
 func selectionForTest(counters []gnet.IOCountersStat, include, exclude string, defaultRoute []string) map[string]bool {
 	names := make([]string, 0, len(counters))
 	for _, counter := range counters {
@@ -979,6 +750,36 @@ func TestReportSerializesUnavailableLoadAsNull(t *testing.T) {
 	}
 }
 
+// 负载三元组与 Load1 同门控：可信时三个值一起上报，不可信时全 nil（序列化成 null）。
+func TestApplyLoadAverageTriple(t *testing.T) {
+	stat := load.AvgStat{Load1: 1.25, Load5: 0.75, Load15: 0.5}
+
+	trusted := Report{}
+	applyLoadAverage(&trusted, stat, true)
+	if trusted.Load == nil || trusted.Load5 == nil || trusted.Load15 == nil {
+		t.Fatalf("trusted report = %+v, want all three loads set", trusted)
+	}
+	if *trusted.Load != 1.25 || *trusted.Load5 != 0.75 || *trusted.Load15 != 0.5 {
+		t.Fatalf("trusted loads = %v/%v/%v, want 1.25/0.75/0.5",
+			*trusted.Load, *trusted.Load5, *trusted.Load15)
+	}
+
+	distrusted := Report{}
+	applyLoadAverage(&distrusted, stat, false)
+	if distrusted.Load != nil || distrusted.Load5 != nil || distrusted.Load15 != nil {
+		t.Fatalf("distrusted report = %+v, want all three loads nil", distrusted)
+	}
+	payload, err := json.Marshal(distrusted)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{`"load":null`, `"load5":null`, `"load15":null`} {
+		if !strings.Contains(string(payload), key) {
+			t.Fatalf("payload = %s, want %s", payload, key)
+		}
+	}
+}
+
 func writeFileTree(t *testing.T, root string, files map[string]string) {
 	t.Helper()
 	for name, content := range files {
@@ -1054,14 +855,6 @@ func TestTrafficAndRateCallSitesUseOneSelection(t *testing.T) {
 	}
 	if trafficArg == "nicInclude" || trafficArg == "nicExclude" {
 		t.Fatalf("call sites re-filter from %q instead of a shared selection", trafficArg)
-	}
-}
-
-func TestNormalizeTrafficResetDay(t *testing.T) {
-	for input, want := range map[int]int{-1: 1, 0: 1, 1: 1, 15: 15, 31: 31, 32: 31} {
-		if got := normalizeTrafficResetDay(input); got != want {
-			t.Fatalf("normalizeTrafficResetDay(%d) = %d, want %d", input, got, want)
-		}
 	}
 }
 
@@ -1266,10 +1059,10 @@ func TestExecuteICMPPingUsesResolvedPublicIP(t *testing.T) {
 	}
 }
 
-func TestLinuxServiceAllowsIcmpPingCapability(t *testing.T) {
-	raw, err := os.ReadFile("install-linux.sh")
+func TestUniversalInstallerAllowsIcmpPingCapability(t *testing.T) {
+	raw, err := os.ReadFile("install.sh")
 	if err != nil {
-		t.Fatalf("read install-linux.sh: %v", err)
+		t.Fatalf("read install.sh: %v", err)
 	}
 	unit := string(raw)
 	for _, want := range []string{
@@ -1278,7 +1071,7 @@ func TestLinuxServiceAllowsIcmpPingCapability(t *testing.T) {
 		"NoNewPrivileges=true",
 	} {
 		if !strings.Contains(unit, want) {
-			t.Fatalf("install-linux.sh missing %s", want)
+			t.Fatalf("install.sh missing %s", want)
 		}
 	}
 }
@@ -1314,7 +1107,6 @@ func TestAgentReleasePublishesUniversalInstallerAndFreeBSD(t *testing.T) {
 	for _, want := range []string{
 		"build freebsd amd64 cf-vps-monitor-agent-freebsd-amd64",
 		"cp install.sh dist/install.sh",
-		"cp install-linux.sh dist/install-linux.sh",
 		"SHA256SUMS",
 	} {
 		if !strings.Contains(workflow, want) {
@@ -1366,6 +1158,26 @@ func TestExecuteTCPPingExcludesDNSResolutionTime(t *testing.T) {
 	}
 }
 
+func TestNormalizePingTimeout(t *testing.T) {
+	cases := []struct {
+		name string
+		in   int
+		want time.Duration
+	}{
+		{name: "zero uses default", in: 0, want: time.Duration(defaultPingTimeoutMS) * time.Millisecond},
+		{name: "below floor", in: 1, want: time.Duration(minPingTimeoutMS) * time.Millisecond},
+		{name: "above ceiling", in: maxPingTimeoutMS + 1000, want: time.Duration(maxPingTimeoutMS) * time.Millisecond},
+		{name: "in range", in: 1500, want: 1500 * time.Millisecond},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizePingTimeout(tc.in); got != tc.want {
+				t.Fatalf("normalizePingTimeout(%d) = %s, want %s", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestFetchPublicIPFromURLsKeepsOnlyRequestedPublicFamily(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("10.0.0.2 203.0.113.10 8.8.8.8 fc00::1 2001:db8::1 2606:4700:4700::1111"))
@@ -1377,29 +1189,6 @@ func TestFetchPublicIPFromURLsKeepsOnlyRequestedPublicFamily(t *testing.T) {
 	}
 	if got := fetchPublicIPFromURLs(context.Background(), server.Client(), []string{server.URL}, true); got != "2606:4700:4700::1111" {
 		t.Fatalf("fetchPublicIPFromURLs(v6) = %q, want 2606:4700:4700::1111", got)
-	}
-}
-
-func TestWebsiteHTTPProbeReportsStatusAndLatency(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer server.Close()
-
-	result := executeWebsiteHTTPProbeWithClient(WebsiteProbeTask{
-		ID:                1,
-		URL:               server.URL,
-		Method:            "GET",
-		ExpectedStatusMin: 200,
-		ExpectedStatusMax: 299,
-		TimeoutSec:        5,
-	}, server.Client())
-
-	if !result.OK || result.EffectiveStatus != "up" || result.StatusCode == nil || *result.StatusCode != http.StatusNoContent {
-		t.Fatalf("unexpected result: %+v", result)
-	}
-	if result.LatencyMS < 0 {
-		t.Fatalf("latency = %d, want non-negative", result.LatencyMS)
 	}
 }
 
@@ -1557,75 +1346,9 @@ func TestPrepareReportDoesNotSpikeOnInterfaceAppearance(t *testing.T) {
 
 // ===== 后台下发的流量重置日 =====
 
-func TestApplyTrafficResetDayPolicy(t *testing.T) {
-	statePath := filepath.Join(t.TempDir(), "traffic-state.json")
-	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", statePath)
-
-	oldDay, oldTracker := trafficResetDay, trafficTracker
-	defer func() { trafficResetDay, trafficTracker = oldDay, oldTracker }()
-
-	trafficResetDay = 1
-	trafficTracker = newTrafficResetTracker(1, "token", "scope")
-
-	day := func(v int) *int { return &v }
-
-	// 后台没有这个节点的记录 → 字段缺席 → 保留安装时指定的值
-	trafficResetDay = 15
-	trafficTracker = newTrafficResetTracker(15, "token", "scope")
-	applyTrafficResetDayPolicy(agentPolicy{Type: "policy"})
-	if trafficResetDay != 15 {
-		t.Fatalf("reset day = %d, want 15 (policy 缺字段时不得改动本地取值)", trafficResetDay)
-	}
-
-	// 后台下发 → 覆盖本地取值（优先级 policy > flag > env > 默认）
-	applyTrafficResetDayPolicy(agentPolicy{Type: "policy", TrafficResetDay: day(5)})
-	if trafficResetDay != 5 {
-		t.Fatalf("reset day = %d, want 5", trafficResetDay)
-	}
-	if got := trafficTracker.resetDay; got != 5 {
-		t.Fatalf("tracker reset day = %d, want 5", got)
-	}
-
-	// 非法值忽略而不是钳到边界：钳成 1 会把用户配置悄悄改掉
-	for _, invalid := range []int{0, -3, 32, 999} {
-		applyTrafficResetDayPolicy(agentPolicy{Type: "policy", TrafficResetDay: day(invalid)})
-		if trafficResetDay != 5 {
-			t.Fatalf("invalid policy day %d changed reset day to %d", invalid, trafficResetDay)
-		}
-	}
-}
-
-// 改重置日必须让当期累计重新起算——周期定义变了，旧累计无法换算。
-// 后台表单上的提示语就是基于这个行为，行为若变了提示语就成了假话。
-func TestChangingResetDayRestartsPeriod(t *testing.T) {
-	statePath := filepath.Join(t.TempDir(), "traffic-state.json")
-	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", statePath)
-
-	tracker := newTrafficResetTracker(1, "token", "scope")
-	now := time.Date(2026, time.August, 20, 12, 0, 0, 0, time.UTC)
-	booted := time.Date(2026, time.August, 1, 0, 0, 0, 0, time.UTC)
-	tracker.adjustSinceBoot(1_000, 2_000, now, booted)
-	up, down := tracker.adjustSinceBoot(5_000, 6_000, now.Add(time.Minute), booted)
-	if up != 5_000 || down != 6_000 {
-		t.Fatalf("period totals = %d/%d, want 5000/6000", up, down)
-	}
-
-	if !tracker.setResetDay(15) {
-		t.Fatal("setResetDay(15) 应报告发生了变化")
-	}
-	up, down = tracker.adjustSinceBoot(5_100, 6_100, now.Add(2*time.Minute), booted)
-	if up >= 5_000 || down >= 6_000 {
-		t.Fatalf("period totals = %d/%d, want a restarted period well below the old totals", up, down)
-	}
-
-	if tracker.setResetDay(15) {
-		t.Fatal("重复设置同一个值不应报告变化")
-	}
-}
-
 // 统计口径的版本必须进 scope 哈希。
-// scope 是 traffic-state.json 里判定「旧基线是否还有效」的唯一依据：口径变了而 scope 没变，
-// 升级后 raw 骤降会被 adjust 当成计数器回绕，把整块计数再加一遍到当期累计上。
+// scope 是服务端判定「上次读数是否还有效」的唯一依据：口径变了而 scope 没变，
+// 升级后 raw 骤降会被当成计数器回绕，把整块计数再加一遍到当天的流量上。
 func TestTrafficCounterScopeIncludesBasisVersion(t *testing.T) {
 	legacy := shortHash(strings.TrimSpace(nicInclude) + "\n" + strings.TrimSpace(nicExclude))
 	if trafficCounterScope() == legacy {
@@ -1634,23 +1357,494 @@ func TestTrafficCounterScopeIncludesBasisVersion(t *testing.T) {
 	}
 }
 
-// 口径变更后必须走重建分支，而不是把旧基线的负 delta 当成计数器回绕。
-// 这条锁的是真实升级路径：旧 agent 把 eth0 与隧道一起算，新 agent 只算默认路由网卡，
-// raw 因此骤降；开机时间落在本期内（rawCoversPeriod 为真）是会触发虚增的那条分支。
-func TestCounterBasisChangeRebaselinesInsteadOfInflating(t *testing.T) {
-	statePath := filepath.Join(t.TempDir(), "traffic-state.json")
-	t.Setenv("CF_MONITOR_TRAFFIC_STATE_FILE", statePath)
+func TestExplicitModePrecedence(t *testing.T) {
+	previousFlags, previousMode := flag.CommandLine, reportMode
+	previousToken, previousServer, previousName := token, serverURL, clientName
+	previousMountInclude, previousMountExclude := mountInclude, mountExclude
+	previousNICInclude, previousNICExclude := nicInclude, nicExclude
+	t.Cleanup(func() {
+		flag.CommandLine, reportMode = previousFlags, previousMode
+		token, serverURL, clientName = previousToken, previousServer, previousName
+		mountInclude, mountExclude = previousMountInclude, previousMountExclude
+		nicInclude, nicExclude = previousNICInclude, previousNICExclude
+	})
+	for _, name := range []string{"TOKEN", "SERVER", "NAME", "MOUNT_INCLUDE", "MOUNT_EXCLUDE", "NIC_INCLUDE", "NIC_EXCLUDE"} {
+		t.Setenv("CF_MONITOR_"+name, "")
+	}
+	for _, tt := range []struct {
+		name, environment, want string
+		args                    []string
+	}{
+		{"explicit websocket", "http", "websocket", []string{"--mode", "websocket"}},
+		{"explicit HTTP", "websocket", "http", []string{"--mode", "http"}},
+		{"equals syntax", "http", "websocket", []string{"--mode=websocket"}},
+		{"last explicit flag wins", "http", "websocket", []string{"--mode=http", "--mode=websocket"}},
+		{"explicit mode overrides invalid environment", "invalid", "websocket", []string{"--mode", "websocket"}},
+		{"environment only", "http", "http", nil},
+		{"default", "", "websocket", nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			flags := flag.NewFlagSet("reaudit-mode", flag.ContinueOnError)
+			flags.SetOutput(io.Discard)
+			flags.StringVar(&reportMode, "mode", "websocket", "")
+			flag.CommandLine = flags
+			t.Setenv("CF_MONITOR_MODE", tt.environment)
+			if err := flags.Parse(tt.args); err != nil {
+				t.Fatal(err)
+			}
+			applyEnvDefaults()
+			if reportMode != tt.want {
+				t.Fatalf("mode=%q, want %q (CLI=%q, env=%q)", reportMode, tt.want, tt.args, tt.environment)
+			}
+		})
+	}
+}
 
-	now := time.Date(2026, time.August, 20, 12, 0, 0, 0, time.UTC)
-	booted := time.Date(2026, time.August, 10, 0, 0, 0, 0, time.UTC)
+func TestExplicitModeRejectsInvalid(t *testing.T) {
+	if os.Getenv("REAUDIT_MODE_MAIN") == "1" {
+		flag.CommandLine = flag.NewFlagSet("reaudit-invalid-mode", flag.ExitOnError)
+		flag.StringVar(&reportMode, "mode", "websocket", "")
+		flag.StringVar(&serverURL, "server", "http://127.0.0.1:1", "")
+		flag.StringVar(&token, "token", "synthetic-token", "")
+		os.Args = []string{"reaudit-agent"}
+		if selected := os.Getenv("REAUDIT_CLI_MODE"); selected != "" {
+			os.Args = append(os.Args, "--mode", selected)
+		}
+		main()
+		return
+	}
+	for _, cli := range []string{"invalid", ""} {
+		t.Run("CLI="+cli, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestExplicitModeRejectsInvalid$")
+			command.Env = append(os.Environ(), "REAUDIT_MODE_MAIN=1", "REAUDIT_CLI_MODE="+cli, "CF_MONITOR_MODE=invalid",
+				"CF_MONITOR_TRAFFIC_STATE_FILE="+filepath.Join(t.TempDir(), "traffic-state.json"),
+				"CF_MONITOR_NAME=synthetic", "CF_MONITOR_MOUNT_INCLUDE=", "CF_MONITOR_MOUNT_EXCLUDE=",
+				"CF_MONITOR_NIC_INCLUDE=", "CF_MONITOR_NIC_EXCLUDE=")
+			output, err := command.CombinedOutput()
+			if ctx.Err() != nil || err == nil || !strings.Contains(string(output), `unsupported mode "invalid"`) {
+				t.Fatalf("invalid selected mode did not fail at validation: err=%v deadline=%v output=%s", err, ctx.Err(), output)
+			}
+		})
+	}
+}
 
-	previous := newTrafficResetTracker(1, "token", "basis-v1")
-	previous.adjustSinceBoot(20_000_000, 21_000_000, now, booted)
+func writeCgroupFixture(t *testing.T, root, name, value string) {
+	t.Helper()
+	file := filepath.Join(root, filepath.FromSlash(name))
+	if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte(value), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
 
-	upgraded := newTrafficResetTracker(1, "token", "basis-v2")
-	up, down := upgraded.adjustSinceBoot(11_000_000, 11_500_000, now.Add(time.Minute), booted)
+func TestCgroupAncestorScope(t *testing.T) {
+	for _, tc := range []struct {
+		name, leafMax, leafCurrent, parentMax, parentCurrent string
+		wantTotal, wantUsed                                  uint64
+		wantRAM                                              bool
+	}{
+		{"unlimited leaf", "max", "134217728", "536870912", "402653184", 536870912, 402653184, true},
+		{"looser leaf", "2147483648", "134217728", "536870912", "402653184", 536870912, 402653184, true},
+		{"tighter leaf", "268435456", "67108864", "536870912", "402653184", 268435456, 67108864, true},
+		{"equal limit includes parent usage", "536870912", "134217728", "536870912", "402653184", 536870912, 402653184, true},
+		{"all unlimited", "max", "134217728", "max", "402653184", 0, 0, false},
+		{"missing binding usage", "max", "134217728", "536870912", "", 0, 0, false},
+		{"zero limit is real", "0", "0", "536870912", "402653184", 0, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeCgroupFixture(t, root, "memory.max", tc.parentMax)
+			if tc.parentCurrent != "" {
+				writeCgroupFixture(t, root, "memory.current", tc.parentCurrent)
+			}
+			writeCgroupFixture(t, root, "system.slice/memory.max", "max")
+			writeCgroupFixture(t, root, "system.slice/agent.service/memory.max", tc.leafMax)
+			writeCgroupFixture(t, root, "system.slice/agent.service/memory.current", tc.leafCurrent)
+			writeCgroupFixture(t, root, "self-cgroup", "0::/system.slice/agent.service\n")
+			got := readCgroupMemory(root, filepath.Join(root, "self-cgroup"))
+			if got.hasRAM != tc.wantRAM || got.ramTotal != tc.wantTotal || got.ramUsed != tc.wantUsed {
+				t.Fatalf("effective group RAM = %+v; want available=%t total=%d used=%d", got, tc.wantRAM, tc.wantTotal, tc.wantUsed)
+			}
+		})
+	}
+}
 
-	if up > 11_000_000 || down > 11_500_000 {
-		t.Fatalf("period totals = %d/%d, 口径变更后当期累计不得超过新口径的 raw 计数（这就是一次性虚增）", up, down)
+func TestCgroupV1AncestorRAMAndSwapUseSameScope(t *testing.T) {
+	root := t.TempDir()
+	for name, value := range map[string]string{
+		"memory/memory.limit_in_bytes":               "536870912",
+		"memory/memory.usage_in_bytes":               "402653184",
+		"memory/memory.memsw.limit_in_bytes":         "805306368",
+		"memory/memory.memsw.usage_in_bytes":         "469762048",
+		"memory/memory.use_hierarchy":                "1",
+		"memory/service/memory.limit_in_bytes":       "2147483648",
+		"memory/service/memory.usage_in_bytes":       "134217728",
+		"memory/service/memory.memsw.limit_in_bytes": "3221225472",
+		"memory/service/memory.memsw.usage_in_bytes": "167772160",
+		"self-cgroup": "5:memory:/service\n",
+	} {
+		writeCgroupFixture(t, root, name, value)
+	}
+	got := readCgroupMemory(root, filepath.Join(root, "self-cgroup"))
+	if !got.hasRAM || got.ramTotal != 536870912 || got.ramUsed != 402653184 || !got.hasSwap || got.swapTotal != 268435456 || got.swapUsed != 67108864 {
+		t.Fatalf("v1 effective parent RAM/swap = %+v", got)
+	}
+}
+
+func TestCgroupMountRootMappingAndBoundary(t *testing.T) {
+	for _, processPath := range []string{"/tenant/service", "/tenant/../other/service"} {
+		t.Run(processPath, func(t *testing.T) {
+			base := t.TempDir()
+			mount := filepath.Join(base, "mounted tree")
+			writeCgroupFixture(t, base, "memory.max", "1")
+			writeCgroupFixture(t, base, "memory.current", "1")
+			writeCgroupFixture(t, mount, "memory.max", "536870912")
+			writeCgroupFixture(t, mount, "memory.current", "402653184")
+			writeCgroupFixture(t, mount, "service/memory.max", "max")
+			writeCgroupFixture(t, mount, "service/memory.current", "134217728")
+			writeCgroupFixture(t, base, "cgroup", "0::"+processPath+"\n")
+			mountField := strings.ReplaceAll(filepath.ToSlash(mount), " ", `\040`)
+			writeCgroupFixture(t, base, "mountinfo", fmt.Sprintf("29 23 0:26 /tenant %s rw,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n", mountField))
+			got := readCgroupMemory(base, filepath.Join(base, "cgroup"))
+			if processPath == "/tenant/service" {
+				if !got.hasRAM || got.ramTotal != 536870912 || got.ramUsed != 402653184 {
+					t.Fatalf("mounted subtree mapping escaped or missed parent: %+v", got)
+				}
+			} else if got.hasRAM {
+				t.Fatalf("out-of-namespace path must not use an unrelated mount: %+v", got)
+			}
+		})
+	}
+}
+
+func TestCgroupUnreadableUsageFallsBackToProc(t *testing.T) {
+	root := t.TempDir()
+	writeCgroupFixture(t, root, "memory.max", "536870912")
+	writeCgroupFixture(t, root, "service/memory.max", "2147483648")
+	writeCgroupFixture(t, root, "service/memory.current", "134217728")
+	writeCgroupFixture(t, root, "self-cgroup", "0::/service\n")
+	if err := os.Mkdir(filepath.Join(root, "memory.current"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cgroup := readCgroupMemory(root, filepath.Join(root, "self-cgroup"))
+	if cgroup.hasRAM {
+		t.Fatalf("unreadable binding usage must not become zero or leaf usage: %+v", cgroup)
+	}
+	proc := parseProcMeminfo("MemTotal: 1024 kB\nMemFree: 256 kB\n")
+	got := mergeMemorySnapshot(proc, cgroup, false)
+	if !got.hasRAM || got.ramTotal != 1048576 || got.ramUsed != 786432 {
+		t.Fatalf("unavailable cgroup must preserve proc fallback: %+v", got)
+	}
+}
+
+func TestCgroupV2InheritedSwapScope(t *testing.T) {
+	root := t.TempDir()
+	for name, value := range map[string]string{
+		"memory.swap.max": "268435456", "memory.swap.current": "67108864",
+		"service/memory.max": "536870912", "service/memory.current": "134217728",
+		"service/memory.swap.max": "max", "service/memory.swap.current": "16777216",
+		"self-cgroup": "0::/service\n",
+	} {
+		writeCgroupFixture(t, root, name, value)
+	}
+	got := readCgroupMemory(root, filepath.Join(root, "self-cgroup"))
+	if !got.hasSwap || got.swapTotal != 268435456 || got.swapUsed != 67108864 {
+		t.Fatalf("swap must use its binding parent scope: %+v", got)
+	}
+}
+
+func TestCgroupV1DisabledLegacyHierarchyDoesNotBindDescendants(t *testing.T) {
+	root := t.TempDir()
+	for name, value := range map[string]string{
+		"memory/memory.limit_in_bytes": "536870912", "memory/memory.usage_in_bytes": "402653184",
+		"memory/memory.use_hierarchy":          "0",
+		"memory/service/memory.limit_in_bytes": "2147483648", "memory/service/memory.usage_in_bytes": "134217728",
+		"self-cgroup": "5:memory:/service\n",
+	} {
+		writeCgroupFixture(t, root, name, value)
+	}
+	got := readCgroupMemory(root, filepath.Join(root, "self-cgroup"))
+	if !got.hasRAM || got.ramTotal != 2147483648 || got.ramUsed != 134217728 {
+		t.Fatalf("nonhierarchical legacy ancestor cannot constrain the child: %+v", got)
+	}
+}
+
+// Only ping-platform.test.mjs replaces runtime.GOOS within the existing ICMP
+// function. No other platform-sensitive collection or process code is replaced.
+var reauditPingPlatform = runtime.GOOS
+
+func TestICMPPlatform(t *testing.T) {
+	if os.Getenv("REAUDIT_PING_OVERLAY") != "1" {
+		t.Skip("run the real command matrix with node --test agent/ping-platform.test.mjs")
+	}
+	fixture, err := os.ReadFile(os.Getenv("REAUDIT_PING_FIXTURE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepare := func(t *testing.T, programs ...string) string {
+		t.Helper()
+		dir := t.TempDir()
+		for _, name := range programs {
+			if runtime.GOOS == "windows" {
+				name += ".exe"
+			}
+			if err := os.WriteFile(filepath.Join(dir, name), fixture, 0700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		t.Setenv("PATH", dir)
+		t.Setenv("REAUDIT_PING_ARGS", filepath.Join(dir, "args.json"))
+		t.Setenv("REAUDIT_PING_DELAY_MS", "0")
+		return dir
+	}
+	const ip4 = "8.8.8.8"
+	const ip6 = "2606:4700:4700::1111"
+	tests := []struct {
+		name, platform, target, program string
+		args                            []string
+		withoutAlias                    bool
+	}{
+		{"windows4", "windows", ip4, "ping", []string{"-4", "-n", "1", "-w", "2000", ip4}, false},
+		{"windows6", "windows", "[" + ip6 + "]", "ping", []string{"-6", "-n", "1", "-w", "2000", ip6}, false},
+		{"linux4", "linux", ip4, "ping", []string{"-4", "-n", "-c", "1", "-W", "2", ip4}, false},
+		{"linux6", "linux", ip6, "ping", []string{"-6", "-n", "-c", "1", "-W", "2", ip6}, false},
+		{"darwin4", "darwin", ip4, "ping", []string{"-n", "-c", "1", "-W", "2000", ip4}, false},
+		{"darwin6", "darwin", ip6, "ping6", []string{"-n", "-c", "1", ip6}, false},
+		{"freebsd4", "freebsd", ip4, "ping", []string{"-n", "-c", "1", "-W", "2000", ip4}, false},
+		{"freebsd6-old-or-alias", "freebsd", ip6, "ping6", []string{"-n", "-c", "1", ip6}, false},
+		{"freebsd6-merged-without-alias", "freebsd", ip6, "ping", []string{"-6", "-n", "-c", "1", "-W", "2000", ip6}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			programs := []string{"ping", "ping6"}
+			if tt.withoutAlias {
+				programs = []string{"ping"}
+			}
+			prepare(t, programs...)
+			reauditPingPlatform = tt.platform
+			if result := executeICMPPingWithContext(context.Background(), tt.target, 2000); result < 0 {
+				t.Fatalf("fake command was not successfully called: %v", result)
+			}
+			raw, err := os.ReadFile(os.Getenv("REAUDIT_PING_ARGS"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var command struct {
+				Name string   `json:"name"`
+				Args []string `json:"args"`
+			}
+			if err := json.Unmarshal(raw, &command); err != nil {
+				t.Fatal(err)
+			}
+			if command.Name != tt.program || !reflect.DeepEqual(command.Args, tt.args) {
+				t.Fatalf("executed %s %q; want %s %q", command.Name, command.Args, tt.program, tt.args)
+			}
+		})
+	}
+	t.Run("darwin IPv6 tool unavailable", func(t *testing.T) {
+		prepare(t, "ping")
+		reauditPingPlatform = "darwin"
+		if got := executeICMPPingWithContext(context.Background(), ip6, 2000); got != -1 {
+			t.Fatalf("missing ping6 must be unavailable, got %v", got)
+		}
+		if _, err := os.Stat(os.Getenv("REAUDIT_PING_ARGS")); !os.IsNotExist(err) {
+			t.Fatal("the IPv4-only command must not run as an IPv6 fallback")
+		}
+	})
+	t.Run("unknown platform unavailable", func(t *testing.T) {
+		prepare(t, "ping", "ping6")
+		reauditPingPlatform = "unsupported"
+		if got := executeICMPPingWithContext(context.Background(), ip4, 2000); got != -1 {
+			t.Fatalf("unknown platform must be unavailable, got %v", got)
+		}
+	})
+	t.Run("response beyond two milliseconds", func(t *testing.T) {
+		prepare(t, "ping")
+		reauditPingPlatform = "darwin"
+		t.Setenv("REAUDIT_PING_DELAY_MS", "120")
+		if got := executeICMPPingWithContext(context.Background(), ip4, 2000); got < 100 {
+			t.Fatalf("valid delayed child response must not be unavailable: %v", got)
+		}
+	})
+	t.Run("cancel an actual child", func(t *testing.T) {
+		prepare(t, "ping")
+		reauditPingPlatform = "windows"
+		t.Setenv("REAUDIT_PING_DELAY_MS", "5000")
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan float64, 1)
+		go func() { done <- executeICMPPingWithContext(ctx, ip4, 2000) }()
+		readyBy := time.Now().Add(time.Second)
+		for {
+			if _, err := os.Stat(os.Getenv("REAUDIT_PING_ARGS")); err == nil {
+				break
+			}
+			if time.Now().After(readyBy) {
+				t.Fatal("child failed to reach the deterministic start barrier")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		cancel()
+		select {
+		case result := <-done:
+			if result != -1 {
+				t.Fatalf("cancelled child result = %v", result)
+			}
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("ICMP command ignored parent cancellation")
+		}
+	})
+	t.Run("total two-second budget", func(t *testing.T) {
+		prepare(t, "ping6")
+		reauditPingPlatform = "darwin"
+		t.Setenv("REAUDIT_PING_DELAY_MS", "5000")
+		started := time.Now()
+		got := executeICMPPingWithContext(context.Background(), ip6, 2000)
+		elapsed := time.Since(started)
+		if got != -1 || elapsed < 1500*time.Millisecond || elapsed > 2500*time.Millisecond {
+			t.Fatalf("no-response child result=%v elapsed=%v; want unavailable within two seconds", got, elapsed)
+		}
+	})
+}
+
+func TestEnableGPUPrecedence(t *testing.T) {
+	previousFlags, previousEnable := flag.CommandLine, enableGPU
+	t.Cleanup(func() {
+		flag.CommandLine, enableGPU = previousFlags, previousEnable
+	})
+	for _, name := range []string{"TOKEN", "SERVER", "NAME", "MODE", "MOUNT_INCLUDE", "MOUNT_EXCLUDE", "NIC_INCLUDE", "NIC_EXCLUDE", "ALLOW_HOST_LOAD", "HOST_CPU_CORES", "LOG_LEVEL"} {
+		t.Setenv("CF_MONITOR_"+name, "")
+	}
+
+	for _, tt := range []struct {
+		name, environment string
+		args              []string
+		want              bool
+	}{
+		{"explicit flag wins over environment on", "1", []string{"--enable-gpu=false"}, false},
+		{"explicit flag wins over environment off", "0", []string{"--enable-gpu"}, true},
+		{"environment on", "true", nil, true},
+		{"environment numeric on", "1", nil, true},
+		{"environment off", "0", nil, false},
+		{"default off", "", nil, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			flags := flag.NewFlagSet("enable-gpu", flag.ContinueOnError)
+			flags.SetOutput(io.Discard)
+			flags.BoolVar(&enableGPU, "enable-gpu", false, "")
+			flag.CommandLine = flags
+			t.Setenv("CF_MONITOR_ENABLE_GPU", tt.environment)
+			if err := flags.Parse(tt.args); err != nil {
+				t.Fatal(err)
+			}
+			applyEnvDefaults()
+			if enableGPU != tt.want {
+				t.Fatalf("enableGPU=%v, want %v", enableGPU, tt.want)
+			}
+		})
+	}
+}
+
+func TestAllowHostLoadEnvironment(t *testing.T) {
+	previousFlags, previousAllow := flag.CommandLine, allowHostLoad
+	t.Cleanup(func() { flag.CommandLine, allowHostLoad = previousFlags, previousAllow })
+	for _, name := range []string{"TOKEN", "SERVER", "NAME", "MODE", "MOUNT_INCLUDE", "MOUNT_EXCLUDE", "NIC_INCLUDE", "NIC_EXCLUDE", "HOST_CPU_CORES", "LOG_LEVEL", "ENABLE_GPU"} {
+		t.Setenv("CF_MONITOR_"+name, "")
+	}
+	for _, tt := range []struct {
+		name, environment string
+		args              []string
+		want              bool
+	}{
+		{"default on", "", nil, true},
+		{"environment off", "0", nil, false},
+		{"environment false", "false", nil, false},
+		{"environment on", "1", nil, true},
+		{"explicit flag wins over environment", "1", []string{"--allow-host-load=false"}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			flags := flag.NewFlagSet("allow-host-load", flag.ContinueOnError)
+			flags.SetOutput(io.Discard)
+			flags.BoolVar(&allowHostLoad, "allow-host-load", true, "")
+			flag.CommandLine = flags
+			t.Setenv("CF_MONITOR_ALLOW_HOST_LOAD", tt.environment)
+			if err := flags.Parse(tt.args); err != nil {
+				t.Fatal(err)
+			}
+			applyEnvDefaults()
+			if allowHostLoad != tt.want {
+				t.Fatalf("allowHostLoad=%v, want %v", allowHostLoad, tt.want)
+			}
+		})
+	}
+}
+
+// 运维显式开启 --allow-host-load / CF_MONITOR_ALLOW_HOST_LOAD 后，
+// 即使容器内 /proc/loadavg 是宿主机口径，也必须继续上报。
+func TestLoadAverageReportableAllowHostLoadOverridesTrustCheck(t *testing.T) {
+	previous := allowHostLoad
+	allowHostLoad = true
+	t.Cleanup(func() { allowHostLoad = previous })
+	if !loadAverageReportable() {
+		t.Fatal("loadAverageReportable() = false with allowHostLoad enabled, want true")
+	}
+}
+
+func TestHostLoadScaleFactor(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		container, host int
+		want            float64
+	}{
+		{"1 core container on 64 core host", 1, 64, 1.0 / 64},
+		{"2 core container on 8 core host", 2, 8, 0.25},
+		{"host not larger than container", 4, 4, 1},
+		{"host smaller than container is a misconfiguration", 8, 4, 1},
+		{"unknown host cores", 2, 0, 1},
+		{"unknown container cores", 0, 8, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hostLoadScaleFactor(tc.container, tc.host); got != tc.want {
+				t.Fatalf("hostLoadScaleFactor(%d, %d) = %v, want %v", tc.container, tc.host, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWaitForContextHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	if waitForContext(ctx, time.Hour) {
+		t.Fatal("waitForContext() = true, want false after cancellation")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("waitForContext() took %s after cancellation, want prompt return", elapsed)
+	}
+}
+
+func TestWaitForContextWaitsForDuration(t *testing.T) {
+	if !waitForContext(context.Background(), 10*time.Millisecond) {
+		t.Fatal("waitForContext() = false, want true when the context stays live")
+	}
+}
+
+func TestAgentServerHTTPClientIsSharedAndConfigured(t *testing.T) {
+	transport, ok := agentServerHTTPClient.Transport.(*http.Transport)
+	if !ok || transport == nil {
+		t.Fatalf("agentServerHTTPClient.Transport = %T, want *http.Transport", agentServerHTTPClient.Transport)
+	}
+	if transport.MaxIdleConns == 0 || transport.MaxIdleConnsPerHost == 0 || transport.IdleConnTimeout == 0 {
+		t.Fatalf("shared transport has no idle pool limits: %+v", transport)
+	}
+	if transport.TLSHandshakeTimeout == 0 {
+		t.Fatal("shared transport has no TLS handshake timeout")
+	}
+	if agentServerHTTPClient.Timeout != agentServerRequestTimeout {
+		t.Fatalf("client timeout = %s, want %s", agentServerHTTPClient.Timeout, agentServerRequestTimeout)
 	}
 }

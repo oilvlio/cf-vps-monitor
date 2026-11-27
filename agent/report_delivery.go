@@ -1,21 +1,22 @@
 package main
 
 import (
-	"log"
+	"context"
 	"strings"
 )
 
 const maxPingResultsPerReport = 50
-const maxWebsiteResultsPerReport = 20
+
+// 单个任务最多积压多少条未确认结果。服务端长时间不可用时，超出的最旧结果会被丢弃，
+// 避免内存无限增长，也避免恢复连接后一次性补发过多历史。
+const maxBufferedPingResultsPerTask = 60
 const maxReportsPerEnvelope = 300
 
+// pingReportState.pendingPing 给每个任务保存一条先进先出的积压队列：探测不等服务端确认，
+// 结果先存在队列里，随后续上报发出，收到确认后才移除。Report.pingResultSeqs 与
+// Report.PingResults 一一对应，记录每条结果在队列里的序号，用于确认 / 重发时识别它。
 type queuedPingResult struct {
 	result   PingResult
-	sequence uint64
-	leased   bool
-}
-type queuedWebsiteResult struct {
-	result   WebsiteProbeResult
 	sequence uint64
 	leased   bool
 }
@@ -23,11 +24,8 @@ type queuedWebsiteResult struct {
 func samePingProbe(a, b PingTask) bool {
 	return strings.EqualFold(a.Type, b.Type) && a.Target == b.Target
 }
-func sameWebsiteProbe(a, b WebsiteProbeTask) bool {
-	return a.ConfigRevision == b.ConfigRevision && a.URL == b.URL && strings.EqualFold(a.Method, b.Method) && a.ExpectedStatusMin == b.ExpectedStatusMin && a.ExpectedStatusMax == b.ExpectedStatusMax && a.TimeoutSec == b.TimeoutSec
-}
 
-func (s *pingReportState) invalidateResultsForPolicyLocked(pings []PingTask, websites []WebsiteProbeTask) {
+func (s *pingReportState) invalidateResultsForPolicyLocked(pings []PingTask) {
 	pingByID := make(map[int]PingTask, len(pings))
 	for _, task := range pings {
 		pingByID[task.ID] = task
@@ -41,91 +39,52 @@ func (s *pingReportState) invalidateResultsForPolicyLocked(pings []PingTask, web
 			delete(s.scheduler.lastRunByTaskID, old.ID)
 		}
 	}
-	websiteByID := make(map[int]WebsiteProbeTask, len(websites))
-	for _, task := range websites {
-		websiteByID[task.ID] = task
-	}
-	for _, old := range s.websiteTasks {
-		if next, ok := websiteByID[old.ID]; !ok || !sameWebsiteProbe(old, next) {
-			if running := s.runningWebsites[old.ID]; running != nil {
-				running.cancel()
-			}
-			delete(s.pendingWebsites, old.ID)
-			delete(s.websiteScheduler.lastRunByTaskID, old.ID)
-		}
-	}
 	s.pruneResultOrderLocked()
 }
 
 func (s *pingReportState) pruneResultOrderLocked() {
 	pingOrder := s.pingOrder[:0]
 	for _, id := range s.pingOrder {
-		if _, ok := s.pendingPing[id]; ok {
+		if len(s.pendingPing[id]) > 0 {
 			pingOrder = append(pingOrder, id)
 		}
 	}
 	s.pingOrder = pingOrder
-	websiteOrder := s.websiteOrder[:0]
-	for _, id := range s.websiteOrder {
-		if _, ok := s.pendingWebsites[id]; ok {
-			websiteOrder = append(websiteOrder, id)
-		}
-	}
-	s.websiteOrder = websiteOrder
 }
 
 func (s *pingReportState) queuePingResultsLocked(results []PingResult) {
 	for _, result := range results {
-		if _, exists := s.pendingPing[result.TaskID]; exists {
-			continue
+		queue := s.pendingPing[result.TaskID]
+		if len(queue) == 0 {
+			s.pingOrder = append(s.pingOrder, result.TaskID)
 		}
 		s.nextResultID++
-		s.pendingPing[result.TaskID] = &queuedPingResult{result: result, sequence: s.nextResultID}
-		s.pingOrder = append(s.pingOrder, result.TaskID)
+		queue = append(queue, &queuedPingResult{result: result, sequence: s.nextResultID})
+		if len(queue) > maxBufferedPingResultsPerTask {
+			logWarnf("ping task %d: %d results are waiting for delivery; dropping the oldest", result.TaskID, len(queue))
+			queue = append(queue[:0], queue[len(queue)-maxBufferedPingResultsPerTask:]...)
+		}
+		s.pendingPing[result.TaskID] = queue
 	}
 }
 
-func (s *pingReportState) queueWebsiteResultsLocked(results []WebsiteProbeResult) {
-	for _, result := range results {
-		if _, exists := s.pendingWebsites[result.MonitorID]; exists {
-			continue
-		}
-		s.nextResultID++
-		s.pendingWebsites[result.MonitorID] = &queuedWebsiteResult{result: result, sequence: s.nextResultID}
-		s.websiteOrder = append(s.websiteOrder, result.MonitorID)
-	}
-}
-
+// appendPendingResultsLocked 给 report 附上每个任务最旧的一条尚未发出的结果。
+// 一份 report 对同一任务最多带一条，积压的更多结果由 appendPendingReports 分成后续几份发出，
+// 这样接收端每份 report 恰好对应一轮探测。
 func (s *pingReportState) appendPendingResultsLocked(report *Report) {
 	for _, id := range s.pingOrder {
 		if len(report.PingResults) >= maxPingResultsPerReport {
 			break
 		}
-		result := s.pendingPing[id]
-		if result == nil || result.leased {
-			continue
-		}
-		result.leased = true
-		if report.pingResultLeases == nil {
-			report.pingResultLeases = make(map[int]uint64)
-		}
-		report.pingResultLeases[id] = result.sequence
-		report.PingResults = append(report.PingResults, result.result)
-	}
-	for _, id := range s.websiteOrder {
-		if len(report.WebsiteProbeResults) >= maxWebsiteResultsPerReport {
+		for _, queued := range s.pendingPing[id] {
+			if queued.leased {
+				continue
+			}
+			queued.leased = true
+			report.PingResults = append(report.PingResults, queued.result)
+			report.pingResultSeqs = append(report.pingResultSeqs, queued.sequence)
 			break
 		}
-		result := s.pendingWebsites[id]
-		if result == nil || result.leased {
-			continue
-		}
-		result.leased = true
-		if report.websiteResultLeases == nil {
-			report.websiteResultLeases = make(map[int]uint64)
-		}
-		report.websiteResultLeases[id] = result.sequence
-		report.WebsiteProbeResults = append(report.WebsiteProbeResults, result.result)
 	}
 }
 
@@ -138,12 +97,12 @@ func (s *pingReportState) appendPendingReports(first Report) []Report {
 	defer s.mu.Unlock()
 	for {
 		next := first
-		next.PingResults, next.WebsiteProbeResults = nil, nil
-		next.pingResultLeases, next.websiteResultLeases = nil, nil
+		next.PingResults = nil
+		next.pingResultSeqs = nil
 		next.BasicInfo = nil
 		next.basicInfoOwner, next.basicInfoRevision = nil, 0
 		s.appendPendingResultsLocked(&next)
-		if len(next.PingResults) == 0 && len(next.WebsiteProbeResults) == 0 {
+		if len(next.PingResults) == 0 {
 			break
 		}
 		reports = append(reports, next)
@@ -151,25 +110,27 @@ func (s *pingReportState) appendPendingReports(first Report) []Report {
 	return reports
 }
 
+func (s *pingReportState) hasPendingResultLocked(taskID int, sequence uint64) bool {
+	for _, queued := range s.pendingPing[taskID] {
+		if queued.sequence == sequence {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *pingReportState) currentReportResultsLocked(report Report) Report {
 	report = currentReportBasicInfo(report)
-	if len(report.pingResultLeases) > 0 {
+	if len(report.pingResultSeqs) > 0 {
 		results := make([]PingResult, 0, len(report.PingResults))
-		for _, result := range report.PingResults {
-			if pending := s.pendingPing[result.TaskID]; pending != nil && pending.sequence == report.pingResultLeases[result.TaskID] {
+		seqs := make([]uint64, 0, len(report.pingResultSeqs))
+		for index, result := range report.PingResults {
+			if index < len(report.pingResultSeqs) && s.hasPendingResultLocked(result.TaskID, report.pingResultSeqs[index]) {
 				results = append(results, result)
+				seqs = append(seqs, report.pingResultSeqs[index])
 			}
 		}
-		report.PingResults = results
-	}
-	if len(report.websiteResultLeases) > 0 {
-		results := make([]WebsiteProbeResult, 0, len(report.WebsiteProbeResults))
-		for _, result := range report.WebsiteProbeResults {
-			if pending := s.pendingWebsites[result.MonitorID]; pending != nil && pending.sequence == report.websiteResultLeases[result.MonitorID] {
-				results = append(results, result)
-			}
-		}
-		report.WebsiteProbeResults = results
+		report.PingResults, report.pingResultSeqs = results, seqs
 	}
 	return report
 }
@@ -203,14 +164,22 @@ func (s *pingReportState) acknowledgeReports(reports []Report) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, report := range reports {
-		for id, sequence := range report.pingResultLeases {
-			if pending := s.pendingPing[id]; pending != nil && pending.sequence == sequence {
-				delete(s.pendingPing, id)
+		for index, sequence := range report.pingResultSeqs {
+			if index >= len(report.PingResults) {
+				break
 			}
-		}
-		for id, sequence := range report.websiteResultLeases {
-			if pending := s.pendingWebsites[id]; pending != nil && pending.sequence == sequence {
-				delete(s.pendingWebsites, id)
+			id := report.PingResults[index].TaskID
+			queue := s.pendingPing[id]
+			for position, queued := range queue {
+				if queued.sequence == sequence {
+					queue = append(queue[:position], queue[position+1:]...)
+					break
+				}
+			}
+			if len(queue) == 0 {
+				delete(s.pendingPing, id)
+			} else {
+				s.pendingPing[id] = queue
 			}
 		}
 	}
@@ -238,7 +207,7 @@ func (s *pingReportState) retryReports(reports []Report) {
 	defer s.mu.Unlock()
 	for _, report := range reports {
 		report = s.currentReportResultsLocked(report)
-		if len(report.PingResults) > 0 || len(report.WebsiteProbeResults) > 0 {
+		if len(report.PingResults) > 0 {
 			s.retryQueue = append(s.retryQueue, report)
 		}
 	}
@@ -253,7 +222,7 @@ func (s *pingReportState) takeRetryReports() []Report {
 	var reports []Report
 	for _, report := range s.retryQueue {
 		report = s.currentReportResultsLocked(report)
-		if len(report.PingResults) > 0 || len(report.WebsiteProbeResults) > 0 {
+		if len(report.PingResults) > 0 {
 			reports = append(reports, report)
 		}
 	}
@@ -262,11 +231,15 @@ func (s *pingReportState) takeRetryReports() []Report {
 }
 
 func deliverHTTPReports(state *pingReportState, reports []Report) error {
+	return deliverHTTPReportsContext(context.Background(), state, reports)
+}
+
+func deliverHTTPReportsContext(ctx context.Context, state *pingReportState, reports []Report) error {
 	for len(reports) > 0 {
 		count := min(len(reports), maxReportsPerEnvelope)
-		batch := state.currentReportResults(reports[:count])
-		if err := sendHTTPReports(batch); err != nil {
-			log.Printf("HTTP report not accepted; probe results retained: %v", err)
+		batch := attachTrafficImport(state.currentReportResults(reports[:count]))
+		if err := sendHTTPReports(ctx, batch); err != nil {
+			logWarnf("HTTP report not accepted; probe results retained: %v", err)
 			state.retryReports(reports)
 			return err
 		}

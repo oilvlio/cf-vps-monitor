@@ -84,6 +84,7 @@ export async function fetchWithBootstrapRetry(input: RequestInfo | URL, init?: R
   return fetch(input, init);
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- callers opt into a response type; the default stays permissive for untyped endpoints
 export async function apiFetch<T = any>(
   path: string,
   options: RequestInit = {},
@@ -99,6 +100,7 @@ export async function apiFetch<T = any>(
   return res.json();
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- callers opt into a response type; the default stays permissive for untyped endpoints
 export async function publicFetch<T = any>(path: string, options: RequestInit = {}): Promise<T> {
   const res = await fetchWithBootstrapRetry(withApiBase(path), options);
   if (!res.ok) {

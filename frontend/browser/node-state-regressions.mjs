@@ -69,7 +69,7 @@ try {
       await page.waitForFunction(() => document.querySelectorAll('.node-card').length === 4 && document.querySelector('#node-a .node-card-title-row')?.textContent.includes('Zulu'));
       const before = await cardOrder(page);
       await page.locator('#node-b .node-card-link').click();
-      await page.locator('.instance-page').waitFor();
+      await page.locator('.lp-inst-page').waitFor();
       const timestamp = Date.now();
       sockets.at(-1).send(JSON.stringify({ type: 'update', client: 'node-b', name: '香港123', data: { cpu: 77 }, timestamp }));
       await page.waitForFunction(timestamp => window.nodeStateLastMessage?.timestamp === timestamp, timestamp);
@@ -102,7 +102,7 @@ try {
     });
     await page.goto(origin + '/');
     const socket = await deadline(socketReady.promise, 'live socket opens');
-    await page.locator('#node-b .node-resource-ring-chart').getByText('47%', { exact: true }).waitFor();
+    await page.locator('#node-b .lp-metric').filter({ hasText: 'CPU' }).getByText('47%', { exact: true }).waitFor();
     const before = await page.locator('#node-b').innerText();
     const last = snapshot(data);
     socket.send(JSON.stringify({ type: 'snapshot', ...snapshot(data, ['node-a', 'node-c', 'node-d']), last_known: { 'node-b': { ...last.data['node-b'], ...last.clients.find(client => client.uuid === 'node-b') } } }));
@@ -110,7 +110,7 @@ try {
     await settleRender(page);
     const after = await page.locator('#node-b').innerText();
     data.observed = { before, after, order: await cardOrder(page) };
-    assert.equal(await page.locator('#node-b .node-resource-ring-chart').getByText('47%', { exact: true }).count(), 1, 'NODE-offline-last-values: confirmed offline does not turn the last CPU reading into zero');
+    assert.equal(await page.locator('#node-b .lp-metric').filter({ hasText: 'CPU' }).getByText('47%', { exact: true }).count(), 1, 'NODE-offline-last-values: confirmed offline does not turn the last CPU reading into zero');
     assert.match(after, /最后上报|最后状态|最后采样/);
     assert.equal((await cardOrder(page)).at(-1), 'node-b');
   });
@@ -162,22 +162,22 @@ try {
     });
     await page.goto(origin + '/');
     await page.locator('#node-b').getByText('离线', { exact: true }).waitFor();
-    await page.locator('#node-b .node-resource-ring-chart').getByText('47%', { exact: true }).waitFor();
+    await page.locator('#node-b .lp-metric').filter({ hasText: 'CPU' }).getByText('47%', { exact: true }).waitFor();
     data.observed = { gridOrder: await cardOrder(page), card: await page.locator('#node-b').innerText() };
     assert.deepEqual(data.observed.gridOrder, ['node-a', 'node-c', 'node-d', 'node-b']);
     assert.match(data.observed.card, /最后上报/);
-    assert.match(data.observed.card, /上报时网速/);
+    assert.match(data.observed.card, /上报时在线/);
     await page.getByRole('button', { name: '表格视图', exact: true }).click();
     const row = page.locator('.node-table-root a[href="/instance/node-b"]').locator('xpath=ancestor::tr');
     await row.waitFor();
     assert.match(await row.locator('.node-table-resource-cell').first().innerText(), /47\.0%/);
     assert.match(await row.innerText(), /最后上报/);
     await row.locator('a[href="/instance/node-b"]').click();
-    await page.locator('.instance-top-summary').waitFor();
-    data.observed.detail = await page.locator('.instance-top-summary').innerText();
+    await page.locator('.lp-inst-page .lp-panel').first().waitFor();
+    data.observed.detail = await page.locator('.lp-inst-page .lp-panel').first().innerText();
     assert.match(data.observed.detail, /离线/);
     assert.match(data.observed.detail, /最后上报/);
-    assert.equal(await page.locator('.instance-top-summary .rt-Badge[data-accent-color="green"]').count(), 0, 'last uptime must not make an offline node appear online');
+    assert.equal(await page.locator('.lp-inst-page .lp-pill[data-status="online"]').count(), 0, 'last uptime must not make an offline node appear online');
   });
 
   await check('NODE-initial-unknown', 'an initial pending full live read is not an offline verdict', async (page, data) => {
@@ -201,7 +201,7 @@ try {
       assert.deepEqual(data.observed.orderBefore, ['node-a', 'node-b', 'node-c', 'node-d']);
       release.resolve();
       await settleCall(page, heldCall);
-      await page.locator('#node-a').getByText('在线', { exact: true }).waitFor();
+      await page.locator('#node-a .lp-status-row').getByText('在线', { exact: true }).waitFor();
       assert.deepEqual(await cardOrder(page), data.observed.orderBefore);
     } finally { release.resolve(); }
   });
@@ -292,7 +292,7 @@ try {
       await page.goto(origin + '/');
       await page.locator('#node-a .node-card-title-row').waitFor();
       await settleRender(page);
-      const diskRing = page.locator('#node-a .node-resource-ring').filter({ hasText: 'Disk' });
+      const diskRing = page.locator('#node-a .lp-metric').filter({ hasText: '磁盘' });
       data.observed = { card: await page.locator('#node-a').innerText(), ring: await diskRing.innerText() };
       await page.getByRole('button', { name: '表格视图', exact: true }).click();
       const row = page.locator('.node-table-root a[href="/instance/node-a"]').locator('xpath=ancestor::tr');
@@ -303,33 +303,31 @@ try {
       await detail.waitFor();
       data.observed.tableDetail = await detail.innerText();
       await row.locator('a[href="/instance/node-a"]').click();
-      await page.locator('.instance-top-summary').waitFor();
-      data.observed.detail = await page.locator('.instance-top-summary').innerText();
+      await page.locator('.lp-inst-page .lp-panel').first().waitFor();
+      data.observed.detail = await page.locator('.lp-inst-page .lp-panel').first().innerText();
       assert.match(data.observed.ring, kind === 'zero' ? /0\.0%/ : /—/, 'an unknown used amount cannot produce a measured percentage');
       assert.match(data.observed.tableDisk, kind === 'zero' ? /0\.0%/ : /—/);
       assert.equal(data.observed.tableDetail.includes('983'), false, 'explicit live null/known capacity overrides stale metadata');
       assert.equal(data.observed.detail.includes('983'), false);
-      if (kind === 'zero') assert.match(data.observed.card, /0s/, 'a real uptime zero remains visible');
+      if (kind === 'zero') assert.match(data.observed.card, /0小时/, 'a real uptime zero remains visible');
       else assert.equal(/已运行 0|在线时长\n0/.test(data.observed.detail + data.observed.card), false, 'unknown uptime does not appear as a fresh restart');
       if (kind === 'capacity-only') assert.match(data.observed.tableDetail, /5\.0 GB/, 'known capacity survives an unavailable used amount');
     });
   }
   await check('NODE-history-disk', 'unknown disk history keeps CPU history and does not draw a zero disk measurement', async (page, data) => {
-    const history = [0, 1, 2].map(index => ({ time: new Date(Date.now() - (3 - index) * 60000).toISOString(), cpu: 20 + index, disk: 0, disk_total: 0, uptime: null }));
+    const history = [0, 1, 2].map(index => ({ ...snapshot(data).data['node-a'], time: new Date(Date.now() - (3 - index) * 60000).toISOString(), cpu: 20 + index, disk: 0, disk_total: 0, uptime: null }));
     data.handlers.push(async ({ path, json }) => {
       if (path !== '/api/records/load') return false;
-      await json({ data: history, has_more: false });
+      await json(history);
       return true;
     });
     await page.goto(origin + '/instance/node-a');
-    await page.getByText('3 个数据点', { exact: true }).waitFor();
-    await page.getByRole('tab', { name: '磁盘', exact: true }).click();
+    await page.getByText('采样 3 个点', { exact: true }).waitFor();
     await page.getByText('磁盘使用量数据不可用', { exact: true }).waitFor();
-    const chart = page.locator('.instance-detail-panel .rt-Card').nth(1);
-    assert.equal(await chart.locator('.recharts-line-curve').count(), 0);
-    await page.getByRole('tab', { name: 'CPU', exact: true }).click();
-    await chart.locator('.recharts-line-curve').waitFor();
-    data.observed = { preservedCpuHistory: await chart.locator('.recharts-line-curve').count(), historyCount: history.length };
+    assert.equal(await page.getByRole('region', { name: '磁盘', exact: true }).locator('.recharts-wrapper').count(), 0);
+    const chart = page.getByRole('region', { name: 'CPU', exact: true });
+    await chart.locator('.recharts-area-curve').waitFor();
+    data.observed = { preservedCpuHistory: await chart.locator('.recharts-area-curve').count(), historyCount: history.length };
   });
 } finally {
   await finish();

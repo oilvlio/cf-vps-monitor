@@ -24,7 +24,6 @@ interface NodeDisplayProps {
   liveData: LiveDataMap;
   gridRenderer: (nodes: ClientInfo[], liveData: LiveDataMap) => React.ReactNode;
   offlinePosition?: 'first' | 'keep' | 'last';
-  includeHidden?: boolean;
   loading?: boolean;
   dataAvailable?: boolean;
 }
@@ -34,7 +33,6 @@ export default function NodeDisplay({
   liveData,
   gridRenderer,
   offlinePosition = 'last',
-  includeHidden = false,
   loading = false,
   dataAvailable = true,
 }: NodeDisplayProps) {
@@ -195,7 +193,7 @@ export default function NodeDisplay({
         <>
           {viewMode === 'grid'
             ? gridRenderer(filteredNodes, liveData)
-            : <NodeTable nodes={filteredNodes} liveData={liveData} includeHidden={includeHidden} />}
+            : <NodeTable nodes={filteredNodes} liveData={liveData} />}
         </>
       )}
     </Box>

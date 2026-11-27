@@ -10,7 +10,7 @@ const { origin, check, finish } = await createHarness({
 function snapshot(clients, version) {
   const now = Date.now();
   const record = { cpu: 47, ram: 32_000_000, ram_total: 128_000_000, swap: 0, swap_total: 0,
-    disk: 300_000_000, disk_total: 1_024_000_000, disk_source: 'directory', disk_sampled_at: now - 60_000,
+    disk: 300_000_000, disk_total: 1_024_000_000,
     net_in: 0, net_out: 0, net_total_up: 0, net_total_down: 0, load: null, temp: null, uptime: 1000,
     process_count: 3, connections: 1, connections_udp: 0 };
   return { online: clients.map(client => client.uuid),
@@ -130,7 +130,11 @@ try {
         assert.ok(resumeCalls.filter(call => call.path === '/api/public/bootstrap').length <= (refreshFails ? 3 : 2),
           'resume and metadata validation must stay within the existing coalesced refresh/fallback budget');
         assert.equal(resumeCalls.filter(call => call.path === '/api/clients').length, refreshFails ? 1 : 0);
-        assert.ok(resumeCalls.length <= (refreshFails ? 7 : 5), 'recovery must not add per-card reads or another request loop');
+        assert.equal(resumeCalls.filter(call => call.path === '/api/ping/home').length, 1,
+          'visibility recovery refreshes the shared home Ping summary once for all cards');
+        assert.ok(resumeCalls.every(call => ['/api/public/bootstrap', '/api/ping/home', '/api/ws/live-token', '/api/live/clients', '/api/public', '/api/clients'].includes(call.path)),
+          'recovery uses only shared dashboard reads');
+        assert.ok(resumeCalls.length <= (refreshFails ? 8 : 6), 'recovery must not add per-card reads or another request loop');
       } finally { release.resolve(); }
     });
   }

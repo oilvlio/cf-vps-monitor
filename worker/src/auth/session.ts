@@ -1,5 +1,6 @@
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import type { Context } from 'hono';
+import { requestHasSameOrigin } from '../utils/request-origin';
 
 const ADMIN_SESSION_COOKIE = 'cf_monitor_session';
 const ADMIN_CSRF_COOKIE = 'cf_monitor_csrf';
@@ -70,6 +71,15 @@ export function verifyAdminCsrfToken(c: Context): boolean {
   const cookieToken = getAdminCsrfToken(c);
   const headerToken = c.req.header('X-CSRF-Token');
   return Boolean(cookieToken && isValidCsrfToken(headerToken) && constantTimeStringEqual(cookieToken, headerToken));
+}
+
+/** Shared write protection: the dashboard requires its token; Monitor themes
+ * use strict same-origin provenance because their clients do not send it. */
+export function verifyAdminWriteRequest(c: Context, requireCsrfToken = true): boolean {
+  if (!requireCsrfToken) return requestHasSameOrigin(c);
+  if (!verifyAdminCsrfToken(c)) return false;
+  // Non-browser API clients may use the double-submit token without Origin.
+  return !(c.req.header('Origin') || c.req.header('Referer')) || requestHasSameOrigin(c);
 }
 
 export function getMfaStepUpToken(c: Context): string | null {

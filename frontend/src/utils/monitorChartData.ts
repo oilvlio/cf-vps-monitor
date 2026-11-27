@@ -5,6 +5,9 @@ export interface MonitorHistoryRecord {
   ram_total?: number;
   disk?: number | null;
   disk_total?: number | null;
+  load?: number | null;
+  load5?: number | null;
+  load15?: number | null;
   net_in?: number;
   net_out?: number;
   temp?: number | null;
@@ -13,23 +16,34 @@ export interface MonitorHistoryRecord {
   process_count?: number;
 }
 
+function nullableLoad(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
 export interface MonitorChartPoint {
   time: number;
   cpu: number;
   ram: number;
   disk: number | null;
+  load: number | null;
+  load5: number | null;
+  load15: number | null;
   net_in: number;
   net_out: number;
   temp: number | null;
   connections: number;
   connections_udp: number;
   process_count: number;
+  cpu_min?: number; cpu_max?: number; ram_min?: number; ram_max?: number; disk_min?: number; disk_max?: number; temp_min?: number; temp_max?: number;
 }
 
 const emptyMetricValues = {
   cpu: 0,
   ram: 0,
   disk: null,
+  load: null,
+  load5: null,
+  load15: null,
   net_in: 0,
   net_out: 0,
   temp: null,
@@ -39,7 +53,9 @@ const emptyMetricValues = {
 };
 
 export function buildMonitorChartData(records: MonitorHistoryRecord[]): MonitorChartPoint[] {
-  return records.map((record) => ({
+  return records.map((record) => {
+    const raw = record as MonitorHistoryRecord & { _min?: Record<string, number>; _max?: Record<string, number> };
+    return {
     time: new Date(record.time).getTime(),
     cpu: Number((record.cpu || 0).toFixed(2)),
     ram: record.ram_total && record.ram_total > 0
@@ -48,6 +64,9 @@ export function buildMonitorChartData(records: MonitorHistoryRecord[]): MonitorC
     net_in: record.net_in || 0,
     net_out: record.net_out || 0,
     temp: typeof record.temp === 'number' && Number.isFinite(record.temp) ? record.temp : null,
+    load: nullableLoad(record.load),
+    load5: nullableLoad(record.load5),
+    load15: nullableLoad(record.load15),
     disk: typeof record.disk === 'number' && Number.isFinite(record.disk) && record.disk >= 0 &&
       typeof record.disk_total === 'number' && Number.isFinite(record.disk_total) && record.disk_total > 0
       ? Number(((record.disk / record.disk_total) * 100).toFixed(1))
@@ -55,7 +74,14 @@ export function buildMonitorChartData(records: MonitorHistoryRecord[]): MonitorC
     connections: record.connections || 0,
     connections_udp: record.connections_udp || 0,
     process_count: record.process_count || 0,
-  }));
+      cpu_min: raw._min?.cpu, cpu_max: raw._max?.cpu,
+      ram_min: raw._min?.ram !== undefined && record.ram_total ? (raw._min.ram / record.ram_total) * 100 : undefined,
+      ram_max: raw._max?.ram !== undefined && record.ram_total ? (raw._max.ram / record.ram_total) * 100 : undefined,
+      disk_min: raw._min?.disk !== undefined && record.disk_total ? (raw._min.disk / record.disk_total) * 100 : undefined,
+      disk_max: raw._max?.disk !== undefined && record.disk_total ? (raw._max.disk / record.disk_total) * 100 : undefined,
+      temp_min: raw._min?.temp, temp_max: raw._max?.temp,
+    };
+  });
 }
 
 export function buildMonitorChartAxisData(rangeMs: number, now = Date.now()): MonitorChartPoint[] {

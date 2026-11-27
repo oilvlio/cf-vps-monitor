@@ -30,7 +30,7 @@ export function useDisplayTheme() {
 
 function applyDisplayTheme(theme: DisplayTheme) {
   document.documentElement.setAttribute('data-monitor-theme', theme);
-  const setter = (window as any).__setRadixAccentColor;
+  const setter = window.__setRadixAccentColor;
   if (setter) setter(theme);
 }
 

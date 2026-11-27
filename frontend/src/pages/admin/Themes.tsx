@@ -1,18 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import {
-  Badge,
-  Box,
-  Button,
-  Card,
-  Dialog,
-  Flex,
-  Grid,
-  Select,
-  Switch,
-  Text,
-  TextArea,
-  TextField,
-} from '@radix-ui/themes';
 import { Check, Eye, Palette, Plus, RotateCcw, Settings, Trash2, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
@@ -23,6 +9,19 @@ import { normalizeDisplayTheme } from '../../utils/displayTheme';
 import { notifyThemeUpdated } from '../../utils/themeEvents';
 import { fetchPublicBootstrap, type PublicBootstrapPayload } from '../../utils/publicBootstrap';
 import ThemePreviewFrame from '../../components/ThemePreviewFrame';
+import {
+  Badge,
+  Button,
+  Card,
+  CardHeader,
+  ConfirmDialog,
+  Dialog,
+  FormInput,
+  FormSelect,
+  FormSwitch,
+  Notice,
+  Switch,
+} from '../../components/ui/minimal';
 
 type ThemeConfigItem = {
   key?: string;
@@ -72,7 +71,6 @@ function refreshActiveThemeStylesheet() {
 function configLabel(item: ThemeConfigItem) {
   return item.name || item.key || '';
 }
-
 
 const cssExampleSnippets = [
   {
@@ -126,6 +124,44 @@ const cssExampleSnippets = [
 
 const themeCssExamples = cssExampleSnippets.map(item => item.css).join('\n\n');
 
+type ThirdPartyThemeProbe = {
+  ok: boolean;
+  status: number;
+  version: string;
+  error: string;
+};
+
+type ThirdPartyThemeState = {
+  enabled: boolean;
+  theme_url: string;
+  raw_base: string;
+  probe: ThirdPartyThemeProbe | null;
+};
+
+const emptyThirdPartyTheme: ThirdPartyThemeState = { enabled: false, theme_url: '', raw_base: '', probe: null };
+
+function readThirdPartyThemeState(result: unknown): ThirdPartyThemeState {
+  if (!result || typeof result !== 'object') return emptyThirdPartyTheme;
+  const record = result as Record<string, unknown>;
+  const rawProbe = record.probe;
+  let probe: ThirdPartyThemeProbe | null = null;
+  if (rawProbe && typeof rawProbe === 'object') {
+    const value = rawProbe as Record<string, unknown>;
+    probe = {
+      ok: value.ok === true,
+      status: Number(value.status) || 0,
+      version: String(value.version || ''),
+      error: String(value.error || ''),
+    };
+  }
+  return {
+    enabled: record.enabled === true,
+    theme_url: String(record.theme_url || ''),
+    raw_base: String(record.raw_base || ''),
+    probe,
+  };
+}
+
 export default function AdminThemes() {
   const apiFetch = useApi();
   const { setDisplayTheme } = useDisplayTheme();
@@ -140,6 +176,9 @@ export default function AdminThemes() {
   const [preview, setPreview] = useState<{ bootstrap: PublicBootstrapPayload; css: string } | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const previewRequestRef = useRef(0);
+  const [thirdPartyTheme, setThirdPartyTheme] = useState<ThirdPartyThemeState>(emptyThirdPartyTheme);
+  const [thirdPartySaving, setThirdPartySaving] = useState(false);
+  const [thirdPartyRefreshing, setThirdPartyRefreshing] = useState(false);
 
   function clearPreviewCss() {
     previewRequestRef.current += 1;
@@ -160,8 +199,65 @@ export default function AdminThemes() {
     }
   }
 
+  async function loadThirdPartyTheme() {
+    try {
+      const result = await apiFetch('/admin/third-party-theme');
+      setThirdPartyTheme(readThirdPartyThemeState(result));
+    } catch {
+      // 主题管理页的其他功能不因第三方主题配置读取失败而不可用。
+    }
+  }
+
+  async function saveThirdPartyTheme() {
+    setThirdPartySaving(true);
+    try {
+      const result = await apiFetch('/admin/third-party-theme', {
+        method: 'POST',
+        body: JSON.stringify({
+          enabled: thirdPartyTheme.enabled,
+          theme_url: thirdPartyTheme.theme_url,
+        }),
+      });
+      if (result?.success) {
+        const next = readThirdPartyThemeState(result);
+        setThirdPartyTheme(next);
+        if (next.enabled && next.probe && !next.probe.ok) {
+          toast.error(`已保存，但上游不可用：${next.probe.error}`);
+        } else {
+          toast.success('第三方主题配置已保存');
+        }
+      } else {
+        toast.error(result?.error || '保存失败');
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '保存失败');
+    } finally {
+      setThirdPartySaving(false);
+    }
+  }
+
+  async function refreshThirdPartyTheme() {
+    setThirdPartyRefreshing(true);
+    try {
+      const result = await apiFetch('/admin/third-party-theme/refresh', { method: 'POST' });
+      if (result?.success) {
+        const next = readThirdPartyThemeState(result);
+        setThirdPartyTheme(current => ({ ...current, probe: next.probe }));
+        if (next.probe && !next.probe.ok) toast.error(`上游不可用：${next.probe.error}`);
+        else toast.success('已刷新第三方主题缓存');
+      } else {
+        toast.error(result?.error || '刷新失败');
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '刷新失败');
+    } finally {
+      setThirdPartyRefreshing(false);
+    }
+  }
+
   useEffect(() => {
     void loadThemes();
+    void loadThirdPartyTheme();
   }, []);
 
   useEffect(() => {
@@ -292,53 +388,59 @@ export default function AdminThemes() {
 
   function renderConfigField(item: ThemeConfigItem) {
     if (item.type === 'title') {
-      return <Text key={item.name || 'title'} size="3" weight="bold">{item.name}</Text>;
+      return <div key={item.name || 'title'} className="sa-theme-config-title">{item.name}</div>;
     }
     if (!item.key) return null;
     const value = editConfig[item.key] ?? item.default ?? '';
+
     if (item.type === 'switch') {
       return (
-        <Flex key={item.key} align="center" justify="between" gap="3">
-          <Box>
-            <Text as="div" size="2" weight="medium">{configLabel(item)}</Text>
-            {item.help ? <Text as="div" size="1" color="gray">{item.help}</Text> : null}
-          </Box>
-          <Switch checked={Boolean(value)} onCheckedChange={checked => updateConfig(item.key!, checked)} />
-        </Flex>
+        <FormSwitch
+          key={item.key}
+          label={configLabel(item)}
+          hint={item.help}
+          checked={Boolean(value)}
+          onCheckedChange={checked => updateConfig(item.key!, checked)}
+        />
       );
     }
     if (item.type === 'select') {
       const options = (item.options || '').split(',').map(option => option.trim()).filter(Boolean);
       return (
-        <label key={item.key} className="admin-theme-config-field">
-          <Text size="2" weight="medium">{configLabel(item)}</Text>
-          <Select.Root value={String(value)} onValueChange={next => updateConfig(item.key!, next)}>
-            <Select.Trigger />
-            <Select.Content>
-              {options.map(option => <Select.Item key={option} value={option}>{option}</Select.Item>)}
-            </Select.Content>
-          </Select.Root>
-        </label>
+        <FormSelect
+          key={item.key}
+          label={configLabel(item)}
+          hint={item.help}
+          value={String(value)}
+          options={options.map(option => ({ value: option, label: option }))}
+          onChange={next => updateConfig(item.key!, next)}
+        />
       );
     }
     if (item.type === 'richtext') {
       return (
-        <label key={item.key} className="admin-theme-config-field">
-          <Text size="2" weight="medium">{configLabel(item)}</Text>
-          <TextArea value={String(value)} onChange={event => updateConfig(item.key!, event.target.value)} />
-        </label>
+        <FormInput
+          key={item.key}
+          label={configLabel(item)}
+          hint={item.help}
+          value={String(value)}
+          textarea
+          rows={4}
+          onChange={next => updateConfig(item.key!, next)}
+        />
       );
     }
     if (item.type === 'color') {
       return (
-        <label key={item.key} className="admin-theme-config-field">
-          <Text size="2" weight="medium">{configLabel(item)}</Text>
+        <label key={item.key} className="sa-scope sa-form-field">
+          <span className="sa-form-label">{configLabel(item)}</span>
           <input
-            className="admin-theme-color-input"
+            className="sa-theme-color"
             type="color"
             value={String(value || '#000000')}
             onChange={event => updateConfig(item.key!, event.target.value)}
           />
+          {item.help && <span className="sa-form-hint">{item.help}</span>}
         </label>
       );
     }
@@ -348,13 +450,13 @@ export default function AdminThemes() {
       const step = item.step ?? 1;
       const numberValue = Number(value || min);
       return (
-        <label key={item.key} className="admin-theme-config-field">
-          <Flex justify="between" gap="2">
-            <Text size="2" weight="medium">{configLabel(item)}</Text>
-            <Text size="2" color="gray">{numberValue}</Text>
-          </Flex>
+        <label key={item.key} className="sa-scope sa-form-field">
+          <span className="sa-form-label sa-form-label-row">
+            <span>{configLabel(item)}</span>
+            <span className="sa-muted sa-mono">{numberValue}</span>
+          </span>
           <input
-            className="admin-theme-range-input"
+            className="sa-theme-range"
             type="range"
             min={min}
             max={max}
@@ -362,19 +464,20 @@ export default function AdminThemes() {
             value={numberValue}
             onChange={event => updateConfig(item.key!, Number(event.target.value))}
           />
+          {item.help && <span className="sa-form-hint">{item.help}</span>}
         </label>
       );
     }
     return (
-      <label key={item.key} className="admin-theme-config-field">
-        <Text size="2" weight="medium">{configLabel(item)}</Text>
-        <TextField.Root
-          type={item.type === 'number' ? 'number' : 'text'}
-          placeholder={item.type === 'image' ? 'https://example.com/bg.webp 或 /api/theme/assets/主题ID/bg.webp' : undefined}
-          value={String(value)}
-          onChange={event => updateConfig(item.key!, item.type === 'number' ? Number(event.target.value) : event.target.value)}
-        />
-      </label>
+      <FormInput
+        key={item.key}
+        label={configLabel(item)}
+        hint={item.help}
+        type={item.type === 'number' ? 'number' : 'text'}
+        placeholder={item.type === 'image' ? 'https://example.com/bg.webp 或 /api/theme/assets/主题ID/bg.webp' : undefined}
+        value={String(value)}
+        onChange={next => updateConfig(item.key!, item.type === 'number' ? Number(next) : next)}
+      />
     );
   }
 
@@ -385,13 +488,14 @@ export default function AdminThemes() {
   if (loading) return <Loading />;
 
   return (
-    <Flex className="admin-themes-page" direction="column" gap="3">
-      <Flex className="admin-parent-title-row admin-server-title-row" justify="between" align="center" mb="3">
-        <Flex align="center" gap="2">
+    <div className="sa-scope sa-page admin-themes-page">
+      <div className="admin-parent-title-row">
+        <div className="sa-page-title">
           <Palette size={20} />
-          <Text size="5" weight="bold">主题管理</Text>
-        </Flex>
-      </Flex>
+          <span>主题管理</span>
+        </div>
+      </div>
+
       <input
         ref={fileInputRef}
         type="file"
@@ -399,99 +503,157 @@ export default function AdminThemes() {
         hidden
         onChange={event => void handleUpload(event.target.files?.[0] || null)}
       />
-      <Flex className="admin-theme-page-actions" justify="between" gap="3" wrap="wrap">
-        <Text as="p" size="1" color="gray" className="admin-theme-package-guidance">
-          主题包根目录需要 cf-monitor-theme.json；支持 CSS、图片、JSON 和 .woff2 字体；配置项支持 title、switch、select、number、string、richtext、color、image、range。
-        </Text>
-        <Button className="admin-theme-upload-action" size="2" disabled={saving} onClick={() => fileInputRef.current?.click()}>
-          <Upload size={14} />上传主题包
-        </Button>
-      </Flex>
 
-      <Grid className="admin-theme-grid" gap="4">
+      <div className="sa-page-actions">
+        <p>
+          主题包根目录需要 cf-monitor-theme.json；支持 CSS、图片、JSON 和 .woff2 字体；配置项支持 title、switch、select、number、string、richtext、color、image、range。
+        </p>
+        <Button variant="outline" disabled={saving} onClick={() => fileInputRef.current?.click()}>
+          <Upload size={16} /> {saving ? '上传中…' : '上传主题包'}
+        </Button>
+      </div>
+
+      <div className="sa-theme-grid">
         {themes.map(theme => (
-          <Card key={theme.short} className="admin-theme-card">
-            <Flex direction="column" gap="2" height="100%">
-              <div className="admin-theme-preview">
-                {renderThemePreview(theme)}
+          <Card key={theme.short} className="sa-theme-card">
+            <div className="sa-theme-preview">
+              {renderThemePreview(theme)}
+            </div>
+            <div className="sa-theme-head">
+              <div style={{ minWidth: 0 }}>
+                <div className="sa-theme-name">{theme.name}</div>
+                <div className="sa-theme-meta">{theme.author || 'Unknown'}{theme.version ? ` · ${theme.version}` : ''}</div>
               </div>
-              <Flex align="start" justify="between" gap="3">
-                <Box>
-                  <Text as="div" size="4" weight="bold">{theme.name}</Text>
-                  <Text as="div" size="2" color="gray">{theme.author || 'Unknown'}{theme.version ? ` · ${theme.version}` : ''}</Text>
-                </Box>
-                {theme.active ? <Badge color="green"><Check size={12} />当前</Badge> : null}
-              </Flex>
-              <Text as="p" size="2" color="gray" className="admin-theme-description">
-                {theme.description || '暂无描述'}
-              </Text>
-              <Flex className="admin-theme-actions" gap="1" wrap="wrap">
-                <Button size="2" variant={theme.active ? 'soft' : 'solid'} disabled={saving || theme.active} onClick={() => void handleSetTheme(theme)}>
-                  <Check size={14} />启用
-                </Button>
-                <Button size="2" variant="soft" disabled={!theme.configurable} onClick={() => openConfig(theme)}>
-                  <Settings size={14} />配置
-                </Button>
-                <Button size="2" color="red" variant="soft" disabled={!theme.deletable} onClick={() => setDeleting(theme)}>
-                  <Trash2 size={14} />删除
-                </Button>
-              </Flex>
-            </Flex>
+              {theme.active ? <Badge variant="success"><Check size={12} /> 当前</Badge> : null}
+            </div>
+            <p className="sa-theme-description">{theme.description || '暂无描述'}</p>
+            <div className="sa-theme-actions">
+              <Button size="sm" variant={theme.active ? 'outline' : 'default'} disabled={saving || theme.active} onClick={() => void handleSetTheme(theme)}>
+                <Check size={14} /> {theme.active ? '已启用' : '启用'}
+              </Button>
+              <Button size="sm" variant="outline" disabled={!theme.configurable} onClick={() => openConfig(theme)}>
+                <Settings size={14} /> 配置
+              </Button>
+              <Button size="sm" variant="destructive" disabled={!theme.deletable} onClick={() => setDeleting(theme)}>
+                <Trash2 size={14} /> 删除
+              </Button>
+            </div>
           </Card>
         ))}
-      </Grid>
+      </div>
 
-      <Dialog.Root open={!!editing} onOpenChange={open => !open && closeConfig()}>
-        <Dialog.Content aria-describedby={undefined} maxWidth="720px">
-          <Dialog.Title>配置主题</Dialog.Title>
-          <Flex direction="column" gap="4">
-            {(editing?.manifest?.configuration?.data || []).map(renderConfigField)}
-            <label className="admin-theme-config-field">
-              <Text size="2" weight="medium">自定义 CSS</Text>
-              <Text as="p" size="1" color="gray">
-                可以调整前台页面的颜色、背景、字体、间距、圆角、阴影、导航栏、节点卡片、统计卡片、按钮、徽章和响应式样式；不能修改后台页面、数据来源、接口逻辑、通知规则或新增交互功能。
-              </Text>
-              <TextArea className="admin-theme-custom-css" value={customCss} onChange={event => setCustomCss(event.target.value)} />
-            </label>
-            <Box className="admin-theme-css-guide">
-              <Text as="div" size="2" weight="medium">可改区域示例</Text>
-              <Text as="p" size="1" color="gray">复制需要的片段到上方自定义 CSS 后修改数值即可。</Text>
-              <Flex className="admin-theme-snippet-actions" gap="2" wrap="wrap">
-                {cssExampleSnippets.map(item => (
-                  <Button key={item.name} size="1" variant="soft" onClick={() => insertCssSnippet(item.css)}>
-                    <Plus size={12} />插入{item.name}
-                  </Button>
-                ))}
-              </Flex>
-              <pre>{themeCssExamples}</pre>
-            </Box>
-            <Flex justify="end" gap="2">
-              <Button variant="soft" onClick={() => void previewCustomCss()} disabled={previewing}>
-                <Eye size={14} />{previewing ? '加载预览…' : '预览'}
-              </Button>
-              <Button variant="soft" onClick={restoreCustomCss}>
-                <RotateCcw size={14} />恢复
-              </Button>
-              <Dialog.Close><Button variant="soft">取消</Button></Dialog.Close>
-              <Button disabled={saving} onClick={() => void saveConfig()}>保存</Button>
-            </Flex>
-            {preview && <ThemePreviewFrame bootstrap={preview.bootstrap} css={preview.css} />}
-          </Flex>
-        </Dialog.Content>
-      </Dialog.Root>
+      <Card>
+        <CardHeader
+          title="第三方主题"
+          action={thirdPartyTheme.enabled ? <Badge variant="success">已启用</Badge> : <Badge variant="secondary">未启用</Badge>}
+        />
+        <div className="sa-card-body sa-thirdparty-body">
+          <div className="sa-row">
+            <div className="sa-row-label">
+              <span className="sa-label">启用第三方主题</span>
+            </div>
+            <div className="sa-control">
+              <Switch
+                checked={thirdPartyTheme.enabled}
+                onCheckedChange={(checked) => setThirdPartyTheme(current => ({ ...current, enabled: checked }))}
+                aria-label="启用第三方主题"
+              />
+            </div>
+          </div>
+          <p className="sa-muted" style={{ fontSize: 12.5, lineHeight: 1.6, margin: 0 }}>
+            启用后首页与详情页由 Monitor 主题接管，后台 <code>/admin</code> 保持原样。粘贴主题的 GitHub 仓库地址即可；系统会像原版 Monitor 一样读取最新 Release 的 <code>theme.tar.gz</code>（不是源码压缩包），无需补 <code>/tree/dist</code>。主题需要发布包含 <code>dist/index.html</code> 的 <code>theme.tar.gz</code>。
+          </p>
+          <FormInput
+            label="主题仓库地址"
+            placeholder="https://github.com/owner/repo"
+            value={thirdPartyTheme.theme_url}
+            onChange={(next) => setThirdPartyTheme(current => ({ ...current, theme_url: next }))}
+          />
+          {thirdPartyTheme.raw_base ? (
+            <p className="sa-muted" style={{ fontSize: 12, margin: 0 }}>上游地址：{thirdPartyTheme.raw_base}</p>
+          ) : null}
+          {thirdPartyTheme.enabled && thirdPartyTheme.probe ? (
+            thirdPartyTheme.probe.ok ? (
+              <Notice tone="success" title="上游探活正常">
+                HTTP {thirdPartyTheme.probe.status}
+                {thirdPartyTheme.probe.version ? ` · ${thirdPartyTheme.probe.version}` : ''}
+              </Notice>
+            ) : (
+              <Notice tone="warning" title="上游不可用">
+                {thirdPartyTheme.probe.error}
+                {thirdPartyTheme.probe.status ? `（HTTP ${thirdPartyTheme.probe.status}）` : ''}。首页会继续显示内置主题。
+              </Notice>
+            )
+          ) : null}
+          <div className="sa-page-actions">
+            <Button disabled={thirdPartySaving} onClick={() => void saveThirdPartyTheme()}>
+              {thirdPartySaving ? '保存中…' : '保存配置'}
+            </Button>
+            <Button variant="outline" disabled={thirdPartyRefreshing} onClick={() => void refreshThirdPartyTheme()}>
+              <RotateCcw size={14} /> {thirdPartyRefreshing ? '刷新中…' : '刷新缓存'}
+            </Button>
+          </div>
+        </div>
+      </Card>
 
-      <Dialog.Root open={!!deleting} onOpenChange={open => !open && setDeleting(null)}>
-        <Dialog.Content aria-describedby={undefined} maxWidth="460px">
-          <Dialog.Title>删除主题</Dialog.Title>
-          <Flex direction="column" gap="3">
-            <Text size="2">删除后主题资源会被移除。若正在启用，会切回 Monitor 主题。</Text>
-            <Flex justify="end" gap="2">
-              <Dialog.Close><Button variant="soft">取消</Button></Dialog.Close>
-              <Button color="red" disabled={saving} onClick={() => void confirmDelete()}>删除</Button>
-            </Flex>
-          </Flex>
-        </Dialog.Content>
-      </Dialog.Root>
-    </Flex>
+      <Dialog
+        open={Boolean(editing)}
+        onOpenChange={open => { if (!open) closeConfig(); }}
+        size="xl"
+        title={editing ? `配置主题 · ${editing.name}` : '配置主题'}
+        footer={(
+          <>
+            <Button variant="outline" onClick={() => void previewCustomCss()} disabled={previewing}>
+              <Eye size={14} /> {previewing ? '加载预览…' : '预览'}
+            </Button>
+            <Button variant="outline" onClick={restoreCustomCss}>
+              <RotateCcw size={14} /> 恢复
+            </Button>
+            <Button variant="outline" onClick={closeConfig}>取消</Button>
+            <Button disabled={saving} onClick={() => void saveConfig()}>{saving ? '保存中…' : '保存'}</Button>
+          </>
+        )}
+      >
+        <div className="sa-theme-config">
+          {(editing?.manifest?.configuration?.data || []).map(renderConfigField)}
+          <div className="sa-form-label">自定义 CSS</div>
+          <p className="sa-form-hint" style={{ marginTop: -4 }}>
+            可以调整前台页面的颜色、背景、字体、间距、圆角、阴影、导航栏、节点卡片、统计卡片、按钮、徽章和响应式样式；不能修改后台页面、数据来源、接口逻辑、通知规则或新增交互功能。
+          </p>
+          <textarea
+            className="sa-input sa-textarea sa-theme-css-input"
+            rows={10}
+            spellCheck={false}
+            value={customCss}
+            onChange={event => setCustomCss(event.target.value)}
+          />
+          <div className="sa-theme-css-guide">
+            <div className="sa-form-label">可改区域示例</div>
+            <p className="sa-form-hint" style={{ marginTop: -4 }}>复制需要的片段到上方自定义 CSS 后修改数值即可。</p>
+            <div className="sa-theme-snippets">
+              {cssExampleSnippets.map(item => (
+                <Button key={item.name} size="sm" variant="outline" onClick={() => insertCssSnippet(item.css)}>
+                  <Plus size={12} /> 插入{item.name}
+                </Button>
+              ))}
+            </div>
+            <pre className="sa-code-block">{themeCssExamples}</pre>
+          </div>
+          {preview && <ThemePreviewFrame bootstrap={preview.bootstrap} css={preview.css} />}
+        </div>
+      </Dialog>
+
+      <ConfirmDialog
+        open={Boolean(deleting)}
+        onOpenChange={(open) => { if (!open) setDeleting(null); }}
+        title="删除主题"
+        description={<>确定删除 <strong>{deleting?.name}</strong> 吗？删除后主题资源会被移除。若正在启用，会切回 Monitor 主题。</>}
+        confirmLabel="删除"
+        destructive
+        keepOpenOnConfirm
+        confirmDisabled={saving}
+        onConfirm={() => { void confirmDelete(); }}
+      />
+    </div>
   );
 }

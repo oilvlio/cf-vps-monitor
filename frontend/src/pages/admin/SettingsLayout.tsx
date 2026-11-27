@@ -15,7 +15,6 @@ export interface SettingsLayoutOutletContext {
   settingsCache: Partial<Record<SettingsScope, SettingsMap>>;
   loadSettingsScope: (scope: SettingsScope) => Promise<SettingsMap>;
   setSettingsScope: (scope: SettingsScope, settings: SettingsMap | ((confirmed: SettingsMap) => SettingsMap)) => void;
-  invalidateSettingsScopes: () => void;
 }
 
 type SettingsScope = 'site' | 'general';
@@ -55,12 +54,6 @@ export default function SettingsLayout() {
     return request;
   }, [apiFetch, setSettingsScope]);
 
-  const invalidateSettingsScopes = useCallback(() => {
-    settingsCacheRef.current = {};
-    settingsRequestsRef.current = {};
-    setSettingsCacheState({});
-  }, []);
-
   useEffect(() => {
     void loadSettingsScope('site').catch(() => {});
     void loadSettingsScope('general').catch(() => {});
@@ -82,6 +75,7 @@ export default function SettingsLayout() {
         </Flex>
       </Flex>
 
+      <div className="admin-settings-body">
       <Flex className="admin-subnav-action-row" justify="between" align="center" wrap="wrap" gap="3" mb="3">
         <Flex className="admin-subnav-row" gap="1">
           {settingsTabs.map(tab => {
@@ -101,7 +95,8 @@ export default function SettingsLayout() {
         {action && <Flex className="admin-subnav-actions" align="center" gap="2">{action}</Flex>}
       </Flex>
 
-      <Outlet context={{ setAction, settingsCache, loadSettingsScope, setSettingsScope, invalidateSettingsScopes }} />
+      <Outlet context={{ setAction, settingsCache, loadSettingsScope, setSettingsScope }} />
+      </div>
     </div>
   );
 }

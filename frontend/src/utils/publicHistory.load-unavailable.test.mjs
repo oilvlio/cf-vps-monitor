@@ -23,6 +23,20 @@ assert.equal(unavailable.cpu, 10, '其余字段照常解析');
 assert.equal(normalizePublicMonitorRecord({ ...base, load: 1.5 }).load, 1.5);
 assert.equal(normalizePublicMonitorRecord(base).load, 0, '缺字段仍按 0');
 
+// 三元组 load5/load15 与 load 同规则：显式 null 保留、缺字段按 0、非法丢整条
+const triple = normalizePublicMonitorRecord({ ...base, load: 1.5, load5: 0.75, load15: 0.5 });
+assert.notEqual(triple, null);
+assert.equal(triple.load5, 0.75);
+assert.equal(triple.load15, 0.5);
+const tripleNull = normalizePublicMonitorRecord({ ...base, load: null, load5: null, load15: null });
+assert.notEqual(tripleNull, null, '三元组全 null 时整条记录必须保留');
+assert.equal(tripleNull.load5, null);
+assert.equal(tripleNull.load15, null);
+assert.equal(normalizePublicMonitorRecord(base).load5, 0, 'load5 缺字段仍按 0');
+assert.equal(normalizePublicMonitorRecord(base).load15, 0, 'load15 缺字段仍按 0');
+assert.equal(normalizePublicMonitorRecord({ ...base, load5: 'high' }), null, '非法 load5 应丢弃整条');
+assert.equal(normalizePublicMonitorRecord({ ...base, load15: 'high' }), null, '非法 load15 应丢弃整条');
+
 // 真正非法的值仍要丢弃整条，别把校验放没了
 assert.equal(normalizePublicMonitorRecord({ ...base, load: 'high' }), null, '字符串负载应丢弃整条');
 assert.equal(normalizePublicMonitorRecord({ ...base, cpu: null }), null, '其他字段为 null 仍丢弃整条');

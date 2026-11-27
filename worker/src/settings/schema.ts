@@ -1,5 +1,22 @@
 import { validateWebhookUrl } from '../utils/webhook.ts';
 
+/**
+ * 历史保留时间（小时）。
+ * 默认值必须与 supabase/migrations/1_schema.sql 的 seed 一致（seed 写的是真实行，
+ * 只对新装生效；存量部署保留各自已存的值，需要在后台「保留时间」里手动调整）。
+ * v2 起原始层默认 7 天、汇总层默认 90 天；原始层上限仍是 30 天。
+ * monitor 兼容层的 history_days / hours 上限（MONITOR_HISTORY_DAYS）也跟随这个上限。
+ */
+export const RECORD_RETENTION_DEFAULT_HOURS = 168;
+export const RECORD_RETENTION_MAX_HOURS = 720;
+export const RAW_RETENTION_MIN_HOURS = 48;
+export const PING_RAW_RETENTION_DEFAULT_HOURS = 168;
+export const PING_RAW_RETENTION_MAX_HOURS = 720;
+export const ROLLUP_RETENTION_DEFAULT_HOURS = 2160;
+export const ROLLUP_RETENTION_MIN_HOURS = 168;
+export const ROLLUP_RETENTION_MAX_HOURS = 8760;
+export const ROLLUP_RETENTION_SAFETY_MARGIN_HOURS = 2;
+
 type SettingType = 'string' | 'boolean' | 'integer' | 'enum';
 
 interface SettingDefinition {
@@ -27,6 +44,8 @@ export const REMOVED_SETTING_KEYS = new Set([
   'custom_footer_html',
   'agent_auto_discovery_key',
   'update_mode',
+  'record_high_watermark_rows',
+  'capacity_daily_view_minutes',
 ]);
 
 export const SETTING_SCHEMA = {
@@ -79,12 +98,6 @@ export const SETTING_SCHEMA = {
     public: false,
     maxLength: 64,
   },
-  update_repository_url: {
-    type: 'string',
-    defaultValue: '',
-    public: false,
-    maxLength: 256,
-  },
   record_enabled: {
     type: 'boolean',
     defaultValue: 'true',
@@ -92,21 +105,30 @@ export const SETTING_SCHEMA = {
   },
   record_preserve_time: {
     type: 'integer',
-    defaultValue: '72',
+    defaultValue: String(RECORD_RETENTION_DEFAULT_HOURS),
     public: false,
-    min: 1,
-    max: 72,
+    min: RAW_RETENTION_MIN_HOURS,
+    max: RECORD_RETENTION_MAX_HOURS,
   },
   ping_record_preserve_time: {
     type: 'integer',
-    defaultValue: '72',
+    defaultValue: String(PING_RAW_RETENTION_DEFAULT_HOURS),
     public: false,
-    min: 1,
-    max: 72,
+    min: RAW_RETENTION_MIN_HOURS,
+    max: PING_RAW_RETENTION_MAX_HOURS,
+  },
+  // v2 起 host/ping 汇总共用一档保留期。旧 key 只在 SQL 迁移中识别并复制，
+  // 不再成为运行期设置。
+  rollup_preserve_time: {
+    type: 'integer',
+    defaultValue: String(ROLLUP_RETENTION_DEFAULT_HOURS),
+    public: false,
+    min: ROLLUP_RETENTION_MIN_HOURS,
+    max: ROLLUP_RETENTION_MAX_HOURS,
   },
   record_persist_interval_sec: {
     type: 'integer',
-    // 保持 120。这里的值必须与 1_core_schema.sql 的 seed 一致——seed 写的是真实行，
+    // 保持 120。这里的值必须与 1_schema.sql 的 seed 一致——seed 写的是真实行，
     // buildAdminSettings 取 stored[key] ?? defaultValue，两者不一致时改这里毫无效果。
     // 另：本项目的写入量受 max(上报间隔, 节流间隔) 约束，空闲态 120s 上报才是约束项；
     // 一旦上采样功能落地，调低这个值会直接把写入量推到 2880 行/节点·天而超出免费额度。
@@ -122,13 +144,6 @@ export const SETTING_SCHEMA = {
     min: 60,
     max: 3600,
   },
-  record_high_watermark_rows: {
-    type: 'integer',
-    defaultValue: '700000',
-    public: false,
-    min: 1000,
-    max: 10000000,
-  },
   // 历史表真实磁盘占用（含索引）的熔断线，字节。Supabase 免费库卡的是磁盘字节，
   // 行数只是它的粗糙代理：同样行数可能对应 72MB 也可能 189MB。
   // 默认 400 MiB，给非历史表与索引膨胀留出余量。
@@ -138,13 +153,6 @@ export const SETTING_SCHEMA = {
     public: false,
     min: 16777216,
     max: 549755813888,
-  },
-  capacity_daily_view_minutes: {
-    type: 'integer',
-    defaultValue: '60',
-    public: false,
-    min: 0,
-    max: 1440,
   },
   audit_log_preserve_time: {
     type: 'integer',
@@ -425,29 +433,6 @@ function normalizeSiteLogoUrl(value: unknown): string | null {
   return /^\/api\/site-logo(?:\?v=\d+)?$/.test(raw) ? raw : null;
 }
 
-function normalizeUpdateRepositoryUrl(value: unknown): string | null {
-  if (value === '' || value === null || value === undefined) return '';
-  if (typeof value !== 'string') return null;
-  const raw = value.trim();
-  const withScheme = /^https?:\/\//i.test(raw)
-    ? raw
-    : raw.startsWith('github.com/')
-      ? `https://${raw}`
-      : /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(raw)
-        ? `https://github.com/${raw}`
-        : raw;
-  try {
-    const url = new URL(withScheme);
-    if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'github.com') return null;
-    if (url.username || url.password || url.search || url.hash) return null;
-    const parts = url.pathname.replace(/^\/+|\/+$/g, '').replace(/\.git$/i, '').split('/');
-    if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
-    return `https://github.com/${parts[0]}/${parts[1]}`;
-  } catch {
-    return null;
-  }
-}
-
 function normalizeSmtpHost(value: unknown): string | null {
   if (value === '' || value === null || value === undefined) return '';
   if (typeof value !== 'string') return null;
@@ -552,7 +537,6 @@ export function normalizeSettingValue(
     case 'string':
       if (key === 'script_domain') normalized = normalizeScriptDomain(value);
       else if (key === 'site_logo_url') normalized = normalizeSiteLogoUrl(value);
-      else if (key === 'update_repository_url') normalized = normalizeUpdateRepositoryUrl(value);
       else if (key === 'email_smtp_host') normalized = normalizeSmtpHost(value);
       else if (key === 'email_smtp_from_address') normalized = normalizeEmailAddress(value);
       else if (key === 'email_smtp_recipients') normalized = normalizeEmailRecipients(value);
@@ -632,6 +616,20 @@ export function buildAdminSettings(stored: Record<string, string>): Record<strin
     settings[key] = normalized.ok ? normalized.value : SETTING_SCHEMA[key].defaultValue;
   }
   return settings;
+}
+
+/** Rollups must outlive every raw family plus the partition gate/late-write margin. */
+export function validateHistoryRetentionInvariant(settings: Record<string, string>): string | null {
+  const normalized = buildAdminSettings(settings);
+  const maxRawHours = Math.max(
+    Number(normalized.record_preserve_time),
+    Number(normalized.ping_record_preserve_time),
+  );
+  const minimumRollupHours = maxRawHours + ROLLUP_RETENTION_SAFETY_MARGIN_HOURS;
+  if (Number(normalized.rollup_preserve_time) <= minimumRollupHours) {
+    return `汇总保留期必须大于原始保留期最大值加 ${ROLLUP_RETENTION_SAFETY_MARGIN_HOURS} 小时（当前至少 ${minimumRollupHours + 1} 小时）`;
+  }
+  return null;
 }
 
 export type PublicThemeSettings = {

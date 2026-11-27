@@ -1,3 +1,6 @@
+# 生产部署读取本文件（scripts/deploy-cloudflare.mjs 的 sourceConfig）。
+# 本地 wrangler dev / wrangler types 读取 worker/wrangler.toml；两份配置的
+# [assets] 与 [observability] 由 scripts/wrangler-config.test.mjs 校验一致性，改动时两边同步。
 name = "cf-vps-monitor"
 main = "worker/src/index.ts"
 compatibility_date = "2026-06-21"
@@ -7,10 +10,13 @@ preview_urls = true
 
 [observability]
 enabled = true
+# 只对错误路径全量记录：关闭每个请求的 invocation 日志（agent 每 3 秒上报 +
+# 每 2 分钟 cron 会产生大量噪音，很容易吃满免费额度）。worker 代码只在错误 /
+# 降级路径写 console.error / console.warn，所以采样率保持 1，确保这些日志不被丢弃。
 head_sampling_rate = 1
 
 [observability.logs]
-invocation_logs = true
+invocation_logs = false
 head_sampling_rate = 1
 
 [placement]
@@ -18,6 +24,74 @@ mode = "smart"
 
 [triggers]
 crons = ["*/2 * * * *"]
+
+# 高频入口（公开读、Agent 正常上报、WebSocket 建连、setup 状态）只用原生
+# Rate Limiting 绑定：按机房近似计数，没有 DO 往返，也不占用 DO 的请求 / 写入额度。
+# 敏感低频入口（管理员恢复 POST、Agent 鉴权失败、setup 初始化）仍走 RATE_LIMIT DO。
+# 绑定按每分钟上限声明，代码按上限值选择对应绑定。
+[[ratelimits]]
+name = "RATE_LIMIT_5"
+namespace_id = "4039125"
+
+  [ratelimits.simple]
+  limit = 5
+  period = 60
+
+[[ratelimits]]
+name = "RATE_LIMIT_20"
+namespace_id = "4039120"
+
+  [ratelimits.simple]
+  limit = 20
+  period = 60
+
+[[ratelimits]]
+name = "RATE_LIMIT_30"
+namespace_id = "4039130"
+
+  [ratelimits.simple]
+  limit = 30
+  period = 60
+
+[[ratelimits]]
+name = "RATE_LIMIT_60"
+namespace_id = "4039160"
+
+  [ratelimits.simple]
+  limit = 60
+  period = 60
+
+[[ratelimits]]
+name = "RATE_LIMIT_120"
+namespace_id = "4039121"
+
+  [ratelimits.simple]
+  limit = 120
+  period = 60
+
+[[ratelimits]]
+name = "RATE_LIMIT_180"
+namespace_id = "4039180"
+
+  [ratelimits.simple]
+  limit = 180
+  period = 60
+
+[[ratelimits]]
+name = "RATE_LIMIT_240"
+namespace_id = "4039240"
+
+  [ratelimits.simple]
+  limit = 240
+  period = 60
+
+[[ratelimits]]
+name = "RATE_LIMIT_3000"
+namespace_id = "4039200"
+
+  [ratelimits.simple]
+  limit = 3000
+  period = 60
 
 [[durable_objects.bindings]]
 name = "LIVE_DATA"
@@ -40,5 +114,9 @@ SUPABASE_URL = "https://PROJECT_REF.supabase.co"
 
 [assets]
 directory = "frontend/dist"
+binding = "ASSETS"
 not_found_handling = "single-page-application"
-run_worker_first = ["/api/*", "/ping", "/agent/*"]
+# 第三方主题的静态文件名由上游决定（`/assets/...`、`/style.css`、`/fonts/...` 都可能），
+# 枚举不过来，所以除了内置资源目录之外全部先交给 worker：
+# 主题启用时按上游取文件 / 回主题 index，未启用时原样透传给静态资源层。
+run_worker_first = ["/*", "!/assets/*"]

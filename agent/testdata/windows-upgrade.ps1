@@ -15,7 +15,7 @@ $script:Task = $null
 $script:failNextStart = [bool]$FailStart
 $script:events = [Collections.Generic.List[string]]::new()
 $script:Server = 'https://monitor.example.test'; $script:Token = 'new-token'; $script:Name = 'fixture'
-$script:Mode = 'websocket'; $script:TrafficResetDay = 1; $script:ReportInterval = 3; $script:PingInterval = 120
+$script:Mode = 'websocket'; $script:ReportInterval = 3; $script:PingInterval = 120
 $script:MountInclude = ''; $script:MountExclude = ''; $script:NicInclude = ''; $script:NicExclude = ''
 if ($UnicodeConfig) { $script:Name = "上海'节点\A"; $script:NicInclude = "网卡\eth'"; $script:MountInclude = "C:\数据,D:\x'x" }
 $script:DryRun = $false

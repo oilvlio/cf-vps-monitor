@@ -6,7 +6,6 @@ import '@radix-ui/themes/styles.css';
 import '../src/index.css';
 import NodeTable from '../src/components/NodeTable';
 import { SettingCard, SettingInput, SettingTextarea, SettingToggle } from '../src/components/admin/SettingCard';
-import { requestPassword } from '../src/utils/reauth';
 import { normalizePublicClients } from '../src/utils/publicClients';
 import { AuthProvider, useAuth } from '../src/contexts/AuthContext';
 import { LiveDataProvider, useLiveData } from '../src/contexts/LiveDataContext';
@@ -32,7 +31,6 @@ function Controls() {
   const [checked, setChecked] = useState(false);
   return <>
     <SettingCard title="测试分组"><SettingInput label="测试地址" value={value} onChange={setValue} /><SettingTextarea label="测试备注" value={value} onChange={setValue} /><SettingToggle label="测试开关" checked={checked} onCheckedChange={setChecked} /></SettingCard>
-    <button id="password-trigger" onClick={() => void requestPassword('输入测试密码').then(value => { (window as any).auditPasswordResult = value; })}>打开密码框</button>
     <button id="outside-button">模态外部按钮</button>
   </>;
 }

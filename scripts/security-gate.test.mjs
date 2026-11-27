@@ -26,7 +26,9 @@ async function fixture({ npm = cleanNpm, go = cleanGo, commands = ['npm run veri
       const npmStep = /^npm (?:run )?([\w:-]+)$/.exec(step.trim());
       if (npmStep) {
         const name = npmStep[1];
-        if (['ci', 'lint', 'build', 'test'].includes(name)) continue;
+        // Test suites keep their own dedicated CI jobs/steps. The gate only
+        // needs to traverse the commands that can hide or precede a scanner.
+        if (['ci', 'lint', 'build', 'test', 'test:postgres'].includes(name)) continue;
         assert.equal(typeof packageJson.scripts[name], 'string', `npm script ${name} exists`);
         await execute(packageJson.scripts[name]);
         continue;

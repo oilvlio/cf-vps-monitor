@@ -1,10 +1,19 @@
-import type { AuditLogsPage, BoundedTableRowCounts, ClearAllRecordsResult, Client, ClientCapacityCounts, ClientIdentity, ClientReferenceCleanupResult, ClientTokenMeta, ClientVisibility, DeleteClientsResult, DeleteOldRowsOptions, ExpiryNotification, ExpiryNotificationUpdate, GPUHistoryRecord, GPUInfo, HistoryTableRowCounts,
-  HistoryTableByteSizes, LoadMetricWindowStats, LoadNotification, LoadNotificationInput, LoadNotificationMetric, LoginRateLimit, MonitorRecord, OfflineNotification, OfflineNotificationUpdate, OrphanClientDataCleanupResult, PingHistoryRecord, PingSnapshotInput, PingTask, PingTaskEstimateRow, PingTaskHistoryRequest, PublicClientRow, PublicWebsiteMonitor, ScheduledClientRow, TableRowCounts, Theme, ThemeAsset, ThemeAssetUpsertInput, ThemeUpsertInput, User, WebsiteCheck, WebsiteCheckInput, WebsiteMonitor, WebsiteMonitorInput } from '../types.ts';
-import type { BackupData } from '../../utils/backup.ts';
-import type { BackupConfigurationSnapshot, HistoryStorageUsage, NotificationDeliveryClaim, NotificationDeliveryCleanupOptions, NotificationDeliveryCleanupResult } from '../types.ts';
+import type { AuditLogsFilter, AuditLogsPage, Client, ClientCapacityCounts, ClientIdentity, ClientReferenceCleanupResult, ClientTokenMeta, DeleteClientsResult, DeleteOldRowsOptions, ExpiryNotification, ExpiryNotificationUpdate, HistoryMaintenanceResult, HistoryMaintenanceStatus,
+  HistoryTableByteSizes, IpChangeNotification, LoadMetricWindowStats, LoadNotification, LoadNotificationInput, LoadNotificationMetric, LoginRateLimit, MonitorMetricsBucket, MonitorRecord, MonitorTrafficTotals, OfflineNotification, OfflineNotificationUpdate, OfflineTransition, OrphanClientDataCleanupResult, PingHistoryRecord, PingSnapshotInput, PingTask, PingTaskClientTimeout, PingTaskEstimateRow, PingTaskHistoryRequest, PingTaskStats, PublicClientRow, ScheduledClientRow, Theme, ThemeAsset, ThemeAssetUpsertInput, ThemeUpsertInput, User } from '../types.ts';
+import type { NotificationDeliveryClaim, NotificationDeliveryCleanupOptions, NotificationDeliveryCleanupResult } from '../types.ts';
+import type { ClientPingAssignmentResult } from '../types.ts';
 import { redactDatabaseSecrets } from '../../utils/setup-diagnostics.ts';
 import { generateAgentToken, hashAgentToken } from '../../utils/client.ts';
-import { scheduledFetch } from '../../utils/scheduled-budget.ts';
+import { ScheduledBudgetExceeded, scheduledFetch } from '../../utils/scheduled-budget.ts';
+import {
+  DEFAULT_SUPABASE_RPC_TIMEOUT_MS,
+  LONG_RUNNING_SUPABASE_RPC_TIMEOUT_MS,
+  SUPABASE_RPC_READ_ATTEMPTS,
+  SUPABASE_RPC_RETRY_BASE_DELAY_MS,
+  isRetryableReadStatus,
+  supabaseRpcMode,
+  type SupabaseRpcMode,
+} from './rpc-policy.ts';
 
 export type SupabaseApiEnv = {
   SUPABASE_URL?: string;
@@ -27,6 +36,27 @@ export class SupabaseApiError extends Error {
     this.name = 'SupabaseApiError';
     this.status = status;
   }
+}
+
+export class SupabaseRpcTimeoutError extends Error {
+  readonly functionName: string;
+  readonly timeoutMs: number;
+
+  constructor(functionName: string, timeoutMs: number) {
+    super(`Supabase RPC ${functionName} timed out after ${timeoutMs}ms`);
+    this.name = 'SupabaseRpcTimeoutError';
+    this.functionName = functionName;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+export interface SupabaseRpcOptions {
+  /** 调用方取消信号；路由可传 request.signal。 */
+  signal?: AbortSignal;
+  /** 单次尝试的超时（毫秒）；传 0 或负数表示不设上限。 */
+  timeoutMs?: number;
+  /** 覆盖按 RPC 名称推断的读/写策略。 */
+  mode?: SupabaseRpcMode;
 }
 
 export function isSupabaseApiConfigured(env: SupabaseApiEnv): boolean {
@@ -59,24 +89,139 @@ function sanitizeSupabaseDetail(detail: string, key: string): string {
   return redactDatabaseSecrets(detail).replaceAll(key, '[REDACTED]').slice(0, 400);
 }
 
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException('The operation was aborted.', 'AbortError');
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise(resolve => setTimeout(resolve, ms));
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+  return new Promise((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout>;
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortReason(signal));
+    };
+    timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function isRetryableReadFailure(error: unknown): boolean {
+  if (error instanceof SupabaseRpcTimeoutError) return true;
+  if (error instanceof SupabaseApiError) return isRetryableReadStatus(error.status);
+  // 进入下一次调度前预算已耗尽：重试只会立刻再失败。
+  if (error instanceof ScheduledBudgetExceeded) return false;
+  // fetch 的连接/DNS/TLS 失败统一抛 TypeError；读请求可安全重试。
+  return error instanceof TypeError;
+}
+
+interface SupabaseRpcAttempt {
+  url: string;
+  functionName: string;
+  body: Record<string, unknown>;
+  headers: Record<string, string>;
+  fetcher: typeof fetch;
+  signal?: AbortSignal;
+  timeoutMs: number;
+}
+
+/**
+ * 单次 RPC 尝试：默认超时 + 调用方取消都会在应用层直接结束等待，
+ * 不依赖底层 fetch 是否响应 AbortSignal。
+ */
+async function fetchSupabaseRpcAttempt(attempt: SupabaseRpcAttempt): Promise<Response> {
+  const { url, functionName, body, headers, fetcher, signal, timeoutMs } = attempt;
+  const controller = new AbortController();
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let removeAbortListener: (() => void) | undefined;
+
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    if (!(timeoutMs > 0)) return;
+    timer = setTimeout(() => {
+      timedOut = true;
+      const error = new SupabaseRpcTimeoutError(functionName, timeoutMs);
+      controller.abort(error);
+      reject(error);
+    }, timeoutMs);
+  });
+
+  const callerAbortPromise = new Promise<never>((_resolve, reject) => {
+    if (!signal) return;
+    const onAbort = () => reject(abortReason(signal));
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+    removeAbortListener = () => signal.removeEventListener('abort', onAbort);
+  });
+
+  try {
+    return await Promise.race([
+      scheduledFetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      }, fetcher),
+      timeoutPromise,
+      callerAbortPromise,
+    ]);
+  } catch (error) {
+    if (timedOut) {
+      throw error instanceof SupabaseRpcTimeoutError ? error : new SupabaseRpcTimeoutError(functionName, timeoutMs);
+    }
+    if (signal?.aborted) throw abortReason(signal);
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+    removeAbortListener?.();
+  }
+}
+
 export async function callSupabaseRpc<T>(
   env: SupabaseApiEnv,
   functionName: string,
   body: Record<string, unknown> = {},
   fetcher: typeof fetch = fetch,
+  options: SupabaseRpcOptions = {},
 ): Promise<T> {
   const { url, key } = readSupabaseConfig(env);
-  const response = await scheduledFetch(`${url}/rest/v1/rpc/${encodeURIComponent(functionName)}`, {
-    method: 'POST',
-    headers: supabaseRpcHeaders(key),
-    body: JSON.stringify(body),
-  }, fetcher);
-  if (!response.ok) {
-    const detail = sanitizeSupabaseDetail(await response.text().catch(() => ''), key);
-    throw new SupabaseApiError(functionName, response.status, detail);
+  if (options.signal?.aborted) throw abortReason(options.signal);
+
+  const mode = options.mode ?? supabaseRpcMode(functionName);
+  const attempts = mode === 'read' ? SUPABASE_RPC_READ_ATTEMPTS : 1;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_SUPABASE_RPC_TIMEOUT_MS;
+  const headers = supabaseRpcHeaders(key);
+  const rpcUrl = `${url}/rest/v1/rpc/${encodeURIComponent(functionName)}`;
+
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      const response = await fetchSupabaseRpcAttempt({
+        url: rpcUrl,
+        functionName,
+        body,
+        headers,
+        fetcher,
+        signal: options.signal,
+        timeoutMs,
+      });
+      if (!response.ok) {
+        const detail = sanitizeSupabaseDetail(await response.text().catch(() => ''), key);
+        throw new SupabaseApiError(functionName, response.status, detail);
+      }
+      if (response.status === 204) return undefined as T;
+      return await response.json() as T;
+    } catch (error) {
+      if (attempt >= attempts || !isRetryableReadFailure(error)) throw error;
+      await sleep(SUPABASE_RPC_RETRY_BASE_DELAY_MS * attempt, options.signal);
+    }
   }
-  if (response.status === 204) return undefined as T;
-  return await response.json() as T;
 }
 
 function readRpcBoolean(value: unknown): boolean {
@@ -126,31 +271,8 @@ function normalizePingTaskList<T extends { clients?: unknown; all_clients?: unkn
   return tasks.map(normalizePingTask);
 }
 
-function normalizeWebsiteMonitor<T extends { agent_probe_clients?: unknown; agent_probe_status_enabled?: unknown }>(monitor: T): T {
-  return {
-    ...monitor,
-    agent_probe_clients: readRpcStringArray((monitor as Record<string, unknown>).agent_probe_clients),
-    agent_probe_status_enabled: readRpcBoolean((monitor as Record<string, unknown>).agent_probe_status_enabled),
-  } as T;
-}
-
-function normalizeWebsiteMonitorList<T extends { agent_probe_clients?: unknown; agent_probe_status_enabled?: unknown }>(monitors: T[]): T[] {
-  return monitors.map(normalizeWebsiteMonitor);
-}
-
 export function getSupabasePublicSettings(env: SupabaseApiEnv): Promise<Record<string, string>> {
   return callSupabaseRpc<Record<string, string>>(env, 'cfm_public_settings');
-}
-
-export async function getSupabaseBackupConfigurationSnapshot(env: SupabaseApiEnv): Promise<BackupConfigurationSnapshot> {
-  const snapshot = await callSupabaseRpc<BackupConfigurationSnapshot>(env, 'cfm_backup_configuration_snapshot');
-  return {
-    ...snapshot,
-    clients: normalizeClientList(snapshot.clients),
-    ping_tasks: normalizePingTaskList(snapshot.ping_tasks),
-    load_notifications: snapshot.load_notifications.map(row => ({ ...row, clients: readRpcStringArray(row.clients) })),
-    website_monitors: normalizeWebsiteMonitorList(snapshot.website_monitors),
-  };
 }
 
 export function getSupabaseSettingsByKeys(env: SupabaseApiEnv, keys: string[]): Promise<Record<string, string>> {
@@ -170,17 +292,11 @@ export function getSupabaseAdminClients(env: SupabaseApiEnv): Promise<Client[]> 
   return callSupabaseRpc<Client[]>(env, 'cfm_admin_clients').then(normalizeClientList);
 }
 
-export function supabaseClientExists(env: SupabaseApiEnv, uuid: string): Promise<boolean> {
-  return callSupabaseRpc<boolean>(env, 'cfm_client_exists', { input_uuid: uuid });
-}
 
 export function getSupabaseClient(env: SupabaseApiEnv, uuid: string): Promise<Client | null> {
   return callSupabaseRpc<Client | null>(env, 'cfm_client', { input_uuid: uuid }).then(normalizeClientBooleans);
 }
 
-export function getSupabaseClientVisibility(env: SupabaseApiEnv, uuid: string): Promise<ClientVisibility | null> {
-  return callSupabaseRpc<ClientVisibility | null>(env, 'cfm_client_visibility', { input_uuid: uuid }).then(normalizeClientBooleans);
-}
 
 export function listSupabaseScheduledClientRows(env: SupabaseApiEnv): Promise<ScheduledClientRow[]> {
   return callSupabaseRpc<ScheduledClientRow[]>(env, 'cfm_scheduled_clients');
@@ -248,8 +364,13 @@ export async function createSupabaseClient(env: SupabaseApiEnv, client: Partial<
   }).then(normalizeClientBooleans);
 }
 
-export function markSupabaseClientTokenUsed(env: SupabaseApiEnv, uuid: string, ip = ''): Promise<boolean> {
-  return callSupabaseRpc<boolean>(env, 'cfm_mark_client_token_used', {
+export type MarkClientTokenUsedResult = {
+  updated: boolean;
+  previous_ip: string | null;
+};
+
+export function markSupabaseClientTokenUsed(env: SupabaseApiEnv, uuid: string, ip = ''): Promise<MarkClientTokenUsedResult> {
+  return callSupabaseRpc<MarkClientTokenUsedResult>(env, 'cfm_mark_client_token_used', {
     input_uuid: uuid,
     input_ip: ip,
   });
@@ -312,9 +433,6 @@ export function getSupabasePingTaskEstimateRows(env: SupabaseApiEnv): Promise<Pi
   return callSupabaseRpc<PingTaskEstimateRow[]>(env, 'cfm_ping_task_estimate_rows').then(normalizePingTaskList);
 }
 
-export function getSupabasePingTask(env: SupabaseApiEnv, id: number): Promise<PingTask | null> {
-  return callSupabaseRpc<PingTask | null>(env, 'cfm_ping_task', { input_id: id }).then(task => task ? normalizePingTask(task) : null);
-}
 
 export function createSupabasePingTask(env: SupabaseApiEnv, task: PingTask): Promise<PingTask> {
   return callSupabaseRpc<PingTask>(env, 'cfm_create_ping_task', { input_task: task }).then(normalizePingTask);
@@ -335,37 +453,26 @@ export function deleteSupabasePingTask(env: SupabaseApiEnv, id: number): Promise
   return callSupabaseRpc<PingTask | null>(env, 'cfm_delete_ping_task', { input_id: id }).then(task => task ? normalizePingTask(task) : null);
 }
 
-export function deleteSupabaseOldRecords(
-  env: SupabaseApiEnv,
-  beforeTime: string,
-  options: DeleteOldRowsOptions = {},
-): Promise<{ records: number; gpu_records: number; gpu_snapshots: number; has_more: boolean }> {
-  return callSupabaseRpc(env, 'cfm_delete_old_records', {
-    input_before_time: beforeTime,
-    input_max_batches: options.maxBatches,
-  });
+export function maintainSupabaseHistory(env: SupabaseApiEnv, now: string): Promise<HistoryMaintenanceResult> {
+  return callSupabaseRpc<HistoryMaintenanceResult>(
+    env,
+    'cfm_partition_maintain',
+    { input_now: now },
+    fetch,
+    { timeoutMs: LONG_RUNNING_SUPABASE_RPC_TIMEOUT_MS },
+  );
 }
 
-export function deleteSupabaseOldWebsiteChecks(
-  env: SupabaseApiEnv,
-  beforeTime: string,
-  options: DeleteOldRowsOptions = {},
-): Promise<{ website_checks: number; has_more: boolean }> {
-  return callSupabaseRpc(env, 'cfm_delete_old_website_checks', {
-    input_before_time: beforeTime,
-    input_max_batches: options.maxBatches,
-  });
-}
 
-export function deleteSupabaseOldPingRecords(
+export function buildSupabaseRollup(
   env: SupabaseApiEnv,
-  beforeTime: string,
-  options: DeleteOldRowsOptions = {},
-): Promise<{ ping_records: number; ping_snapshots: number; has_more: boolean }> {
-  return callSupabaseRpc(env, 'cfm_delete_old_ping_records', {
-    input_before_time: beforeTime,
-    input_max_batches: options.maxBatches,
-  });
+  family: 'host' | 'ping',
+  now: string,
+  maxBuckets = 48,
+): Promise<Record<string, unknown>> {
+  return callSupabaseRpc<Record<string, unknown>>(env, 'cfm_build_rollup', {
+    input_family: family, input_now: now, input_max_buckets: maxBuckets,
+  }, fetch, { timeoutMs: LONG_RUNNING_SUPABASE_RPC_TIMEOUT_MS });
 }
 
 export function deleteSupabaseOldAuditLogs(
@@ -376,7 +483,7 @@ export function deleteSupabaseOldAuditLogs(
   return callSupabaseRpc(env, 'cfm_delete_old_audit_logs', {
     input_before_time: beforeTime,
     input_max_batches: options.maxBatches,
-  });
+  }, fetch, { timeoutMs: LONG_RUNNING_SUPABASE_RPC_TIMEOUT_MS });
 }
 
 export function claimSupabaseNotificationDelivery(
@@ -396,9 +503,6 @@ export function completeSupabaseNotificationDelivery(
   });
 }
 
-export function getSupabaseOfflineNotification(env: SupabaseApiEnv, client: string): Promise<OfflineNotification | null> {
-  return callSupabaseRpc<OfflineNotification | null>(env, 'cfm_offline_notification', { input_client: client });
-}
 
 export function listSupabaseOfflineNotifications(env: SupabaseApiEnv): Promise<OfflineNotification[]> {
   return callSupabaseRpc<OfflineNotification[]>(env, 'cfm_offline_notifications');
@@ -406,6 +510,18 @@ export function listSupabaseOfflineNotifications(env: SupabaseApiEnv): Promise<O
 
 export function setSupabaseOfflineNotifications(env: SupabaseApiEnv, items: OfflineNotificationUpdate[]): Promise<number> {
   return callSupabaseRpc<number>(env, 'cfm_set_offline_notifications', { input_items: items });
+}
+
+export function listSupabaseIpChangeNotifications(env: SupabaseApiEnv): Promise<IpChangeNotification[]> {
+  return callSupabaseRpc<IpChangeNotification[]>(env, 'cfm_ip_change_notifications');
+}
+
+export function ipChangeNotificationEnabled(env: SupabaseApiEnv, uuid: string): Promise<boolean> {
+  return callSupabaseRpc<boolean>(env, 'cfm_ip_change_notification_enabled', { input_uuid: uuid });
+}
+
+export function setSupabaseIpChangeNotifications(env: SupabaseApiEnv, items: IpChangeNotification[]): Promise<number> {
+  return callSupabaseRpc<number>(env, 'cfm_set_ip_change_notifications', { input_items: items });
 }
 
 export function markSupabaseOfflineNotificationSent(env: SupabaseApiEnv, client: string, time: string | null, token: string): Promise<boolean> {
@@ -416,9 +532,22 @@ export function markSupabaseOfflineNotificationSent(env: SupabaseApiEnv, client:
   });
 }
 
-export function getSupabaseExpiryNotification(env: SupabaseApiEnv, client: string): Promise<ExpiryNotification | null> {
-  return callSupabaseRpc<ExpiryNotification | null>(env, 'cfm_expiry_notification', { input_client: client });
+export function recordSupabaseOfflineTransition(
+  env: SupabaseApiEnv,
+  client: string,
+  transition: OfflineTransition,
+): Promise<boolean> {
+  return callSupabaseRpc<boolean>(env, 'cfm_record_offline_transition', {
+    input_client: client,
+    input_phase: transition.phase,
+    input_time: transition.time ?? null,
+    input_since: transition.since ?? null,
+    input_month_key: transition.monthKey ?? null,
+    input_month_offline_ms: transition.monthOfflineMs ?? null,
+    input_token: transition.token,
+  });
 }
+
 
 export function listSupabaseExpiryNotifications(env: SupabaseApiEnv): Promise<ExpiryNotification[]> {
   return callSupabaseRpc<ExpiryNotification[]>(env, 'cfm_expiry_notifications');
@@ -501,51 +630,17 @@ export function deleteSupabaseLoadNotification(env: SupabaseApiEnv, id: number):
   return callSupabaseRpc<void>(env, 'cfm_delete_load_notification', { input_id: id });
 }
 
-export function listSupabaseDueWebsiteMonitors(env: SupabaseApiEnv, now: string, limit: number): Promise<WebsiteMonitor[]> {
-  return callSupabaseRpc<WebsiteMonitor[]>(env, 'cfm_due_website_monitors', {
-    input_now: now,
-    input_limit: limit,
-  }).then(normalizeWebsiteMonitorList);
-}
-
-export function recordSupabaseWebsiteCheck(env: SupabaseApiEnv, check: WebsiteCheckInput): Promise<WebsiteMonitor | null> {
-  return callSupabaseRpc<WebsiteMonitor | null>(env, 'cfm_record_website_check', { input_check: check })
-    .then(monitor => monitor ? normalizeWebsiteMonitor(monitor) : null);
-}
-
-export function listSupabaseAgentWebsiteProbeTasks(
+export function listSupabaseAuditLogsPaged(
   env: SupabaseApiEnv,
-  client: string,
-  now: string,
+  page: number,
   limit: number,
-): Promise<WebsiteMonitor[]> {
-  return callSupabaseRpc<WebsiteMonitor[]>(env, 'cfm_agent_website_probe_tasks', {
-    input_client: client,
-    input_now: now,
-    input_limit: limit,
-  }).then(normalizeWebsiteMonitorList);
-}
-
-export function markSupabaseWebsiteMonitorNotified(
-  env: SupabaseApiEnv, id: number, time: string | null,
-  expected: Pick<WebsiteMonitor, 'config_revision' | 'status' | 'down_since' | 'last_notified_at'>,
-): Promise<boolean> {
-  return callSupabaseRpc<boolean>(env, 'cfm_mark_website_monitor_notified', {
-    input_id: id,
-    input_time: time,
-    input_expected: {
-      config_revision: expected.config_revision,
-      status: expected.status,
-      down_since: expected.down_since,
-      last_notified_at: expected.last_notified_at,
-    },
-  });
-}
-
-export function listSupabaseAuditLogsPaged(env: SupabaseApiEnv, page: number, limit: number): Promise<AuditLogsPage> {
+  filter: AuditLogsFilter = {},
+): Promise<AuditLogsPage> {
   return callSupabaseRpc<AuditLogsPage>(env, 'cfm_audit_logs_paged', {
     input_page: page,
     input_limit: limit,
+    input_action: filter.action || null,
+    input_search: filter.search || null,
   });
 }
 
@@ -596,14 +691,6 @@ export function insertSupabaseMonitorRecord(env: SupabaseApiEnv, record: Monitor
   return callSupabaseRpc<void>(env, 'cfm_insert_monitor_record', { input_record: record });
 }
 
-export function insertSupabaseGpuRecords(env: SupabaseApiEnv, client: string, time: string, gpus: GPUInfo[]): Promise<void> {
-  return callSupabaseRpc<void>(env, 'cfm_insert_gpu_snapshot', {
-    input_client: client,
-    input_time: time,
-    input_gpus: gpus,
-  });
-}
-
 export function insertSupabasePingSnapshot(env: SupabaseApiEnv, client: string, time: string, results: PingSnapshotInput[]): Promise<void> {
   return callSupabaseRpc<void>(env, 'cfm_insert_ping_snapshot', {
     input_client: client,
@@ -619,13 +706,7 @@ export function getSupabaseRecentRecords(env: SupabaseApiEnv, client: string, li
   });
 }
 
-export function getSupabaseLatestRecords(env: SupabaseApiEnv): Promise<MonitorRecord[]> {
-  return callSupabaseRpc<MonitorRecord[]>(env, 'cfm_latest_records');
-}
 
-export function getSupabaseLatestRecordTimes(env: SupabaseApiEnv): Promise<Array<{ client: string; last_time: string }>> {
-  return callSupabaseRpc<Array<{ client: string; last_time: string }>>(env, 'cfm_latest_record_times');
-}
 
 export function getSupabaseLatestRecordTimesForClients(
   env: SupabaseApiEnv,
@@ -636,18 +717,6 @@ export function getSupabaseLatestRecordTimesForClients(
   });
 }
 
-export function getSupabaseRecordsByTimeRange(
-  env: SupabaseApiEnv,
-  client: string,
-  start: string,
-  end: string,
-): Promise<MonitorRecord[]> {
-  return callSupabaseRpc<MonitorRecord[]>(env, 'cfm_records_range', {
-    input_client: client,
-    input_start: start,
-    input_end: end,
-  });
-}
 
 export function getSupabaseRecordsByTimeRangeLimited(
   env: SupabaseApiEnv,
@@ -661,6 +730,75 @@ export function getSupabaseRecordsByTimeRangeLimited(
     input_start: start,
     input_end: end,
     input_limit: limit,
+  });
+}
+
+export function getSupabaseRecordsByTimeRangeBucketed(
+  env: SupabaseApiEnv,
+  client: string,
+  start: string,
+  end: string,
+  bucketSec: number,
+  limit = 1000,
+): Promise<MonitorRecord[]> {
+  return callSupabaseRpc<MonitorRecord[]>(env, 'cfm_records_range_bucketed', {
+    input_client: client,
+    input_start: start,
+    input_end: end,
+    input_bucket_sec: bucketSec,
+    input_limit: limit,
+  });
+}
+
+/**
+ * monitor 主题契约的 metrics：每个桶给整桶的均值、峰值与真实分钟数。
+ * `sampleSec` 是记录落库间隔（record_persist_interval_sec），用来把样本数折成分钟。
+ */
+export function getSupabaseRecordsByTimeRangeAggregated(
+  env: SupabaseApiEnv,
+  client: string,
+  start: string,
+  end: string,
+  bucketSec: number,
+  limit = 2000,
+  sampleSec = 120,
+): Promise<MonitorMetricsBucket[]> {
+  return callSupabaseRpc<MonitorMetricsBucket[]>(env, 'cfm_records_range_aggregated', {
+    input_client: client,
+    input_start: start,
+    input_end: end,
+    input_bucket_sec: bucketSec,
+    input_limit: limit,
+    input_sample_sec: sampleSec,
+  });
+}
+
+export function getSupabaseRecordsByTimeRangeAggregatedRaw(
+  env: SupabaseApiEnv,
+  client: string,
+  start: string,
+  end: string,
+  bucketSec: number,
+  limit = 2000,
+  sampleSec = 120,
+): Promise<MonitorMetricsBucket[]> {
+  return callSupabaseRpc<MonitorMetricsBucket[]>(env, 'cfm_records_range_aggregated_raw', {
+    input_client: client,
+    input_start: start,
+    input_end: end,
+    input_bucket_sec: bucketSec,
+    input_limit: limit,
+    input_sample_sec: sampleSec,
+  });
+}
+
+/** monitor 主题契约的节点流量：批量取 day_* / total_*。 */
+export function getSupabaseTrafficTotals(
+  env: SupabaseApiEnv,
+  clients: readonly string[],
+): Promise<Record<string, MonitorTrafficTotals>> {
+  return callSupabaseRpc<Record<string, MonitorTrafficTotals>>(env, 'cfm_traffic_totals', {
+    input_clients: [...clients],
   });
 }
 
@@ -698,55 +836,6 @@ export function getSupabaseRecordsByTimeRangeCursor(
   });
 }
 
-export function getSupabaseGpuRecords(
-  env: SupabaseApiEnv,
-  client: string,
-  start: string | undefined,
-  end: string | undefined,
-  limit: number,
-): Promise<GPUHistoryRecord[]> {
-  return callSupabaseRpc<GPUHistoryRecord[]>(env, 'cfm_gpu_records', {
-    input_client: client,
-    input_start: start,
-    input_end: end,
-    input_limit: limit,
-  });
-}
-
-export function getSupabaseGpuRecordsPaged(
-  env: SupabaseApiEnv,
-  client: string,
-  start: string | undefined,
-  end: string | undefined,
-  page: number,
-  limit: number,
-): Promise<{ data: GPUHistoryRecord[]; total: number; page: number; limit: number; has_more: boolean }> {
-  return callSupabaseRpc(env, 'cfm_gpu_records_paged', {
-    input_client: client,
-    input_start: start,
-    input_end: end,
-    input_page: page,
-    input_limit: limit,
-  });
-}
-
-export function getSupabaseGpuRecordsCursor(
-  env: SupabaseApiEnv,
-  client: string,
-  start: string | undefined,
-  end: string | undefined,
-  cursor: string | undefined,
-  limit: number,
-): Promise<{ data: GPUHistoryRecord[]; total: number; page: number; limit: number; has_more: boolean; next_cursor?: string }> {
-  return callSupabaseRpc(env, 'cfm_gpu_records_cursor', {
-    input_client: client,
-    input_start: start,
-    input_end: end,
-    input_cursor: cursor,
-    input_limit: limit,
-  });
-}
-
 export function getSupabasePingRecords(env: SupabaseApiEnv, client: string, taskId: number, limit: number): Promise<PingHistoryRecord[]> {
   return callSupabaseRpc<PingHistoryRecord[]>(env, 'cfm_ping_records', {
     input_client: client,
@@ -761,12 +850,16 @@ export function getSupabasePingRecordsPaged(
   taskId: number,
   page: number,
   limit: number,
+  start?: string,
+  end?: string,
 ): Promise<{ data: PingHistoryRecord[]; total: number; page: number; limit: number; has_more: boolean }> {
   return callSupabaseRpc(env, 'cfm_ping_records_paged', {
     input_client: client,
     input_task_id: taskId,
     input_page: page,
     input_limit: limit,
+    input_start: start,
+    input_end: end,
   });
 }
 
@@ -776,12 +869,16 @@ export function getSupabasePingRecordsCursor(
   taskId: number,
   cursor: string | undefined,
   limit: number,
+  start?: string,
+  end?: string,
 ): Promise<{ data: PingHistoryRecord[]; total: number; page: number; limit: number; has_more: boolean; next_cursor?: string }> {
   return callSupabaseRpc(env, 'cfm_ping_records_cursor', {
     input_client: client,
     input_task_id: taskId,
     input_cursor: cursor,
     input_limit: limit,
+    input_start: start,
+    input_end: end,
   });
 }
 
@@ -804,6 +901,178 @@ export function getSupabasePingRecordsForTasks(
   });
 }
 
+export function getSupabasePingRecordsForTasksRange(
+  env: SupabaseApiEnv,
+  client: string,
+  taskIds: number[],
+  start: string | undefined,
+  end: string | undefined,
+  limit: number,
+): Promise<Record<string, PingHistoryRecord[]>> {
+  return callSupabaseRpc<Record<string, PingHistoryRecord[]>>(env, 'cfm_ping_records_for_tasks_range', {
+    input_client: client,
+    input_task_ids: taskIds,
+    input_start: start,
+    input_end: end,
+    input_limit: limit,
+  });
+}
+
+export function getSupabasePingRecordsForTasksRangeBucketed(
+  env: SupabaseApiEnv,
+  client: string,
+  taskIds: number[],
+  start: string | undefined,
+  end: string | undefined,
+  bucketSec: number,
+  limit = 1000,
+): Promise<Record<string, PingHistoryRecord[]>> {
+  return callSupabaseRpc(env, 'cfm_ping_records_for_tasks_range_bucketed', {
+    input_client: client,
+    input_task_ids: taskIds,
+    input_start: start,
+    input_end: end,
+    input_bucket_sec: bucketSec,
+    input_limit: limit,
+  });
+}
+
+export function getSupabasePingRollupRange(
+  env: SupabaseApiEnv,
+  client: string,
+  taskIds: number[],
+  start: string | undefined,
+  end: string | undefined,
+  stepSec: number,
+  limit = 1500,
+): Promise<Record<string, PingHistoryRecord[]>> {
+  return callSupabaseRpc(env, 'cfm_ping_rollup_range', {
+    input_client: client,
+    input_task_ids: taskIds,
+    input_start: start,
+    input_end: end,
+    input_step_sec: stepSec,
+    input_limit: limit,
+  });
+}
+
+export function getSupabasePingStatsForTasksRange(
+  env: SupabaseApiEnv,
+  client: string,
+  taskIds: number[],
+  start: string | undefined,
+  end: string | undefined,
+): Promise<Record<string, PingTaskStats>> {
+  return callSupabaseRpc<Record<string, PingTaskStats>>(env, 'cfm_ping_stats_for_tasks_range', {
+    input_client: client,
+    input_task_ids: taskIds,
+    input_start: start,
+    input_end: end,
+  });
+}
+
+export function getSupabasePingStatsFromRollupRange(
+  env: SupabaseApiEnv,
+  client: string,
+  taskIds: number[],
+  start: string,
+  end: string,
+): Promise<Record<string, PingTaskStats>> {
+  return callSupabaseRpc<Record<string, PingTaskStats>>(env, 'cfm_ping_stats_from_rollup', {
+    input_client: client,
+    input_task_ids: taskIds,
+    input_start: start,
+    input_end: end,
+  });
+}
+
+export function getSupabaseHomePingAssignments(env: SupabaseApiEnv): Promise<Record<string, number>> {
+  return callSupabaseRpc<Record<string, number>>(env, 'cfm_home_ping_assignments');
+}
+
+export function setSupabaseHomePingTask(
+  env: SupabaseApiEnv,
+  client: string,
+  taskId: number | null,
+): Promise<{ client: string; task_id: number | null }> {
+  return callSupabaseRpc(env, 'cfm_set_home_ping_task', {
+    input_client: client,
+    input_task_id: taskId,
+  });
+}
+
+/** Agent 上报的一次网卡读数样本（已由调用方校验、限幅）。 */
+export interface TrafficSamplePayload {
+  ts: number;
+  boot: number;
+  scope: string;
+  utc_offset: number;
+  interfaces: Record<string, { up: number; down: number }>;
+}
+
+/** 旧版 Agent 本地保存的一个日增量（升级迁移用）。 */
+export interface TrafficImportDay {
+  date: string;
+  up: number;
+  down: number;
+}
+
+export interface TrafficImportBaseline {
+  scope: string;
+  boot: number;
+  interfaces: Record<string, { up: number; down: number }>;
+}
+
+/**
+ * 处理一批网卡读数样本（换算增量、累加到当日、更新读数），并返回 [from, to]（YYYY-MM-DD，含两端）
+ * 的流量合计，即当前计费周期的流量。samples 为空时只返回合计。
+ */
+export async function applySupabaseTrafficSamples(
+  env: SupabaseApiEnv,
+  client: string,
+  samples: TrafficSamplePayload[],
+  from: string,
+  to: string,
+): Promise<{ up: number; down: number; applied: number }> {
+  const result = await callSupabaseRpc<{ up?: unknown; down?: unknown; applied?: unknown } | null>(env, 'cfm_traffic_apply_samples', {
+    input_client: client,
+    input_samples: samples,
+    input_from: from,
+    input_to: to,
+  });
+  const toCount = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0);
+  return { up: toCount(result?.up), down: toCount(result?.down), applied: toCount(result?.applied) };
+}
+
+/** 一次性导入旧版 Agent 的本地流量历史；幂等。返回处理的日期数。 */
+export async function importSupabaseTrafficHistory(
+  env: SupabaseApiEnv,
+  client: string,
+  days: TrafficImportDay[],
+  baseline: TrafficImportBaseline | null,
+): Promise<number> {
+  const result = await callSupabaseRpc<{ days?: unknown } | null>(env, 'cfm_traffic_import', {
+    input_client: client,
+    input_days: days,
+    input_baseline: baseline,
+  });
+  return typeof result?.days === 'number' ? result.days : 0;
+}
+
+export function getSupabaseHomePingRows(
+  env: SupabaseApiEnv,
+  start: string,
+  end: string,
+  rowLimit = 400,
+): Promise<Record<string, { task_id: number; name: string; rows: { time: string; value: number }[] }>> {
+  return callSupabaseRpc(env, 'cfm_home_ping_rows', {
+    input_start: start,
+    input_end: end,
+    input_row_limit: rowLimit,
+  });
+}
+
+
 async function getSupabasePingRecordsForTaskSpecs(
   env: SupabaseApiEnv,
   client: string,
@@ -823,119 +1092,50 @@ async function getSupabasePingRecordsForTaskSpecs(
   return Object.fromEntries(entries);
 }
 
-export function getSupabaseHistoryStorageRowCounts(env: SupabaseApiEnv): Promise<HistoryTableRowCounts> {
-  return callSupabaseRpc<HistoryTableRowCounts>(env, 'cfm_history_storage_counts');
-}
 
 export function getSupabaseHistoryStorageBytes(env: SupabaseApiEnv): Promise<HistoryTableByteSizes> {
   return callSupabaseRpc<HistoryTableByteSizes>(env, 'cfm_history_storage_bytes');
 }
 
-export function getSupabaseHistoryStorageUsage(env: SupabaseApiEnv): Promise<HistoryStorageUsage> {
-  return callSupabaseRpc<HistoryStorageUsage>(env, 'cfm_history_storage_usage');
+export function getSupabaseHistoryMaintenanceStatus(env: SupabaseApiEnv): Promise<HistoryMaintenanceStatus> {
+  return callSupabaseRpc<HistoryMaintenanceStatus>(env, 'cfm_history_maintenance_status');
 }
 
-export function getSupabaseStorageRowCounts(env: SupabaseApiEnv): Promise<TableRowCounts> {
-  return callSupabaseRpc<TableRowCounts>(env, 'cfm_storage_row_counts');
-}
 
-export function getSupabaseBoundedStorageRowCounts(env: SupabaseApiEnv, limit: number): Promise<BoundedTableRowCounts> {
-  return callSupabaseRpc<BoundedTableRowCounts>(env, 'cfm_bounded_storage_row_counts', { input_limit: limit });
-}
 
-export function getSupabaseExpiredRowCounts(
+export function getSupabasePublicPingTasks(
   env: SupabaseApiEnv,
-  beforeTimes: { records: string; ping_records: string; audit_logs: string },
-): Promise<TableRowCounts> {
-  return callSupabaseRpc<TableRowCounts>(env, 'cfm_expired_row_counts', {
-    input_records_before: beforeTimes.records,
-    input_ping_records_before: beforeTimes.ping_records,
-    input_audit_logs_before: beforeTimes.audit_logs,
-  });
-}
-
-export function getSupabasePublicPingTasks(env: SupabaseApiEnv, fetcher: typeof fetch = fetch): Promise<PingTask[]> {
-  return callSupabaseRpc<PingTask[]>(env, 'cfm_public_ping_tasks', {}, fetcher).then(normalizePingTaskList);
-}
-
-export function getSupabasePublicWebsites(
-  env: SupabaseApiEnv,
-  periodHours: number,
-  checkLimit: number,
-  includeHidden = false,
   fetcher: typeof fetch = fetch,
-): Promise<PublicWebsiteMonitor[]> {
-  return callSupabaseRpc<PublicWebsiteMonitor[]>(env, 'cfm_public_websites', {
-    period_hours: periodHours,
-    check_limit: checkLimit,
-    input_include_hidden: includeHidden,
-  }, fetcher);
+  options: SupabaseRpcOptions = {},
+): Promise<PingTask[]> {
+  return callSupabaseRpc<PingTask[]>(env, 'cfm_public_ping_tasks', {}, fetcher, options).then(normalizePingTaskList);
 }
 
-export function getSupabasePublicWebsiteMonitorById(
-  env: SupabaseApiEnv,
-  id: number,
-  checkLimit: number,
-  includeHidden = false,
-  fetcher: typeof fetch = fetch,
-): Promise<PublicWebsiteMonitor | null> {
-  return callSupabaseRpc<PublicWebsiteMonitor | null>(env, 'cfm_public_website_monitor', {
-    input_id: id,
-    input_check_limit: checkLimit,
-    input_include_hidden: includeHidden,
-  }, fetcher);
+export function getSupabasePingTaskClientTimeouts(env: SupabaseApiEnv): Promise<PingTaskClientTimeout[]> {
+  return callSupabaseRpc<PingTaskClientTimeout[]>(env, 'cfm_ping_task_client_timeouts', {});
 }
 
-export function listSupabaseWebsiteMonitors(env: SupabaseApiEnv): Promise<WebsiteMonitor[]> {
-  return callSupabaseRpc<WebsiteMonitor[]>(env, 'cfm_website_monitors').then(normalizeWebsiteMonitorList);
-}
-
-export function getSupabaseWebsiteMonitor(env: SupabaseApiEnv, id: number): Promise<WebsiteMonitor | null> {
-  return callSupabaseRpc<WebsiteMonitor | null>(env, 'cfm_website_monitor', { input_id: id })
-    .then(monitor => monitor ? normalizeWebsiteMonitor(monitor) : null);
-}
-
-export function listSupabaseWebsiteChecks(env: SupabaseApiEnv, monitorId: number, limit: number): Promise<WebsiteCheck[]> {
-  return callSupabaseRpc<WebsiteCheck[]>(env, 'cfm_website_checks', {
-    input_monitor_id: monitorId,
-    input_limit: limit,
+export async function setSupabaseClientPingAssignment(
+  env: SupabaseApiEnv, client: string, desired: number[], base: number[],
+  timeouts: Array<{ taskId: number; timeoutMs: number | null }>,
+): Promise<ClientPingAssignmentResult> {
+  const result = await callSupabaseRpc<ClientPingAssignmentResult>(env, 'cfm_set_client_ping_assignment', {
+    input_client: client, input_desired: desired, input_base: base,
+    input_timeouts: timeouts.map(row => ({ task_id: row.taskId, timeout_ms: row.timeoutMs })),
   });
+  return result.ok ? { ...result, tasks: normalizePingTaskList(result.tasks) } : result;
 }
 
-export function createSupabaseWebsiteMonitor(env: SupabaseApiEnv, monitor: WebsiteMonitorInput): Promise<WebsiteMonitor> {
-  return callSupabaseRpc<WebsiteMonitor>(env, 'cfm_create_website_monitor', { input_monitor: monitor }).then(normalizeWebsiteMonitor);
-}
-
-export function updateSupabaseWebsiteMonitorAndReturn(
+export function setSupabasePingTaskClientTimeout(
   env: SupabaseApiEnv,
-  id: number,
-  monitor: Partial<WebsiteMonitorInput>,
-): Promise<WebsiteMonitor | null> {
-  return callSupabaseRpc<WebsiteMonitor | null>(env, 'cfm_update_website_monitor', {
-    input_id: id,
-    input_monitor: monitor,
-  }).then(monitor => monitor ? normalizeWebsiteMonitor(monitor) : null);
-}
-
-export function deleteSupabaseWebsiteMonitor(env: SupabaseApiEnv, id: number): Promise<void> {
-  return callSupabaseRpc<void>(env, 'cfm_delete_website_monitor', { input_id: id });
-}
-
-export function reorderSupabaseWebsiteMonitors(env: SupabaseApiEnv, ids: number[]): Promise<number> {
-  return callSupabaseRpc<number>(env, 'cfm_reorder_website_monitors', { input_ids: ids });
-}
-
-export function setSupabaseWebsiteMonitorVisibility(env: SupabaseApiEnv, id: number, hidden: boolean): Promise<boolean> {
-  return callSupabaseRpc<boolean>(env, 'cfm_set_website_monitor_visibility', {
-    input_id: id,
-    input_hidden: hidden,
-  });
-}
-
-export function setSupabaseWebsiteMonitorEnabled(env: SupabaseApiEnv, id: number, enabled: boolean): Promise<boolean> {
-  return callSupabaseRpc<boolean>(env, 'cfm_set_website_monitor_enabled', {
-    input_id: id,
-    input_enabled: enabled,
+  taskId: number,
+  client: string,
+  timeoutMs: number | null,
+): Promise<PingTaskClientTimeout | null> {
+  return callSupabaseRpc<PingTaskClientTimeout | null>(env, 'cfm_set_ping_task_client_timeout', {
+    input_task_id: taskId,
+    input_client: client,
+    input_timeout_ms: timeoutMs,
   });
 }
 
@@ -947,27 +1147,7 @@ export function countSupabaseUsers(env: SupabaseApiEnv): Promise<number> {
   return callSupabaseRpc<number>(env, 'cfm_users_count');
 }
 
-export function createSupabaseUser(
-  env: SupabaseApiEnv,
-  user: { uuid: string; username: string; hashedPassword: string },
-): Promise<boolean> {
-  return callSupabaseRpc<boolean>(env, 'cfm_create_user', {
-    input_uuid: user.uuid,
-    input_username: user.username,
-    input_passwd: user.hashedPassword,
-  });
-}
 
-export function deleteSupabaseUserIfMatches(
-  env: SupabaseApiEnv,
-  user: { uuid: string; username: string; hashedPassword: string },
-): Promise<boolean> {
-  return callSupabaseRpc<boolean>(env, 'cfm_delete_user_if_matches', {
-    input_uuid: user.uuid,
-    input_username: user.username,
-    input_passwd: user.hashedPassword,
-  });
-}
 
 export function createSupabaseInitialAdmin(
   env: SupabaseApiEnv,
@@ -1040,12 +1220,7 @@ export function consumeSupabaseRecoveryCode(env: SupabaseApiEnv, uuid: string, c
     input_code_hash: codeHash,
   });
 }
-export function updateSupabaseUserUsername(env: SupabaseApiEnv, uuid: string, username: string): Promise<void> {
-  return callSupabaseRpc<void>(env, 'cfm_update_user_username', {
-    input_uuid: uuid,
-    input_username: username,
-  });
-}
+
 
 export function updateSupabaseUserUsernameAndRotateSession(
   env: SupabaseApiEnv,
@@ -1094,22 +1269,7 @@ export function validateSupabaseAdminSession(
   );
 }
 
-export function ensureSupabaseInitialAdmin(
-  env: SupabaseApiEnv,
-  uuid: string,
-  username: string,
-  hashedPassword: string,
-): Promise<void> {
-  return callSupabaseRpc<void>(env, 'cfm_ensure_initial_admin', {
-    input_uuid: uuid,
-    input_username: username,
-    input_passwd: hashedPassword,
-  });
-}
 
-export function getSupabaseLoginRateLimit(env: SupabaseApiEnv, bucket: string): Promise<LoginRateLimit | null> {
-  return callSupabaseRpc<LoginRateLimit | null>(env, 'cfm_login_rate_limit', { input_bucket: bucket });
-}
 
 export function getSupabaseLoginRateLimitsByBuckets(env: SupabaseApiEnv, buckets: string[]): Promise<LoginRateLimit[]> {
   return callSupabaseRpc<LoginRateLimit[]>(env, 'cfm_login_rate_limits', { input_buckets: buckets });
@@ -1123,44 +1283,12 @@ export function clearSupabaseObservedLoginFailures(env: SupabaseApiEnv, states: 
   return callSupabaseRpc<void>(env, 'cfm_clear_observed_login_failures', { input_states: states });
 }
 
-export function setSupabaseLoginRateLimit(env: SupabaseApiEnv, state: LoginRateLimit): Promise<void> {
-  return callSupabaseRpc<void>(env, 'cfm_set_login_rate_limit', { input_state: state });
-}
 
-export function setSupabaseLoginRateLimits(env: SupabaseApiEnv, states: LoginRateLimit[]): Promise<void> {
-  return callSupabaseRpc<void>(env, 'cfm_set_login_rate_limits', { input_states: states });
-}
 
-export function clearSupabaseLoginRateLimit(env: SupabaseApiEnv, bucket: string): Promise<void> {
-  return callSupabaseRpc<void>(env, 'cfm_clear_login_rate_limits', { input_buckets: [bucket] });
-}
 
-export function clearSupabaseLoginRateLimits(env: SupabaseApiEnv, buckets: string[]): Promise<void> {
-  return callSupabaseRpc<void>(env, 'cfm_clear_login_rate_limits', { input_buckets: buckets });
-}
 
 export function deleteSupabaseLoginRateLimitsBefore(env: SupabaseApiEnv, beforeTime: string): Promise<void> {
   return callSupabaseRpc<void>(env, 'cfm_delete_login_rate_limits_before', { input_before_time: beforeTime });
-}
-
-export async function updateSupabaseWebsiteMonitor(
-  env: SupabaseApiEnv,
-  id: number,
-  monitor: Partial<WebsiteMonitorInput>,
-): Promise<boolean> {
-  return (await updateSupabaseWebsiteMonitorAndReturn(env, id, monitor)) !== null;
-}
-
-export function clearSupabaseAllRecords(env: SupabaseApiEnv): Promise<ClearAllRecordsResult> {
-  return callSupabaseRpc<ClearAllRecordsResult>(env, 'cfm_clear_all_records');
-}
-
-export function clearSupabaseClientRecords(env: SupabaseApiEnv, client: string): Promise<void> {
-  return callSupabaseRpc<void>(env, 'cfm_clear_client_records', { input_client: client });
-}
-
-export function restoreSupabaseBackupData(env: SupabaseApiEnv, backup: BackupData): Promise<void> {
-  return callSupabaseRpc<void>(env, 'cfm_restore_backup_data', { input_backup: backup });
 }
 
 export function insertSupabaseAuditLog(

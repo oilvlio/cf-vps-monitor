@@ -1,4 +1,3 @@
-import { Box, Flex, Select, Text, TextField } from '@radix-ui/themes';
 import {
   BANDWIDTH_UNITS,
   TRAFFIC_LIMIT_TYPES,
@@ -6,6 +5,7 @@ import {
   TrafficLimitFormValue,
   TrafficLimitMode,
 } from '../../utils/traffic';
+import { FormField } from '../ui/minimal';
 
 export function TrafficLimitEditor({
   value,
@@ -17,76 +17,77 @@ export function TrafficLimitEditor({
   const update = (patch: Partial<TrafficLimitFormValue>) => onChange({ ...value, ...patch });
 
   return (
-    <Box className="traffic-limit-editor">
-      <Text size="2" weight="bold" style={{ display: 'block', marginBottom: 4 }}>
-        流量限制
-      </Text>
-      <Flex className="traffic-limit-controls" gap="2" align="center" wrap="nowrap">
-        <Select.Root value={value.mode} onValueChange={(next) => update({ mode: next as TrafficLimitMode })}>
-          <Select.Trigger className="traffic-limit-mode-select" />
-          <Select.Content>
-            <Select.Item value="quota">固定流量</Select.Item>
-            <Select.Item value="unlimited">无限流量</Select.Item>
-            <Select.Item value="bandwidth">带宽无限</Select.Item>
-          </Select.Content>
-        </Select.Root>
+    <FormField label="流量限制" span>
+      <div className="sa-traffic-controls">
+        <select
+          className="sa-input sa-select"
+          aria-label="流量限制方式"
+          value={value.mode}
+          onChange={(event) => update({ mode: event.target.value as TrafficLimitMode })}
+        >
+          <option value="quota">固定流量</option>
+          <option value="unlimited">无限流量</option>
+          <option value="bandwidth">带宽无限</option>
+        </select>
 
         {value.mode === 'quota' && (
           <>
-            <TextField.Root
-              className="traffic-limit-number-input"
-              value={value.value}
-              onChange={(event) => update({ value: event.target.value })}
+            <input
+              className="sa-input"
               type="number"
               min="0"
               step="0.01"
+              aria-label="流量额度"
+              value={value.value}
+              onChange={(event) => update({ value: event.target.value })}
             />
-            <Select.Root value={value.unit} onValueChange={(next) => update({ unit: next as TrafficLimitFormValue['unit'] })}>
-              <Select.Trigger className="traffic-limit-unit-select" />
-              <Select.Content>
-                {TRAFFIC_LIMIT_UNITS.map((unit) => (
-                  <Select.Item key={unit.value} value={unit.value}>
-                    {unit.label}
-                  </Select.Item>
-                ))}
-              </Select.Content>
-            </Select.Root>
-            <Select.Root value={value.type} onValueChange={(next) => update({ type: next })}>
-              <Select.Trigger className="traffic-limit-type-select" />
-              <Select.Content>
-                {TRAFFIC_LIMIT_TYPES.map((type) => (
-                  <Select.Item key={type.value} value={type.value}>
-                    {type.label}
-                  </Select.Item>
-                ))}
-              </Select.Content>
-            </Select.Root>
+            <select
+              className="sa-input sa-select"
+              aria-label="流量单位"
+              value={value.unit}
+              onChange={(event) => update({ unit: event.target.value as TrafficLimitFormValue['unit'] })}
+            >
+              {TRAFFIC_LIMIT_UNITS.map((unit) => (
+                <option key={unit.value} value={unit.value}>{unit.label}</option>
+              ))}
+            </select>
+            <select
+              className="sa-input sa-select"
+              aria-label="统计口径"
+              value={value.type}
+              onChange={(event) => update({ type: event.target.value })}
+            >
+              {TRAFFIC_LIMIT_TYPES.map((type) => (
+                <option key={type.value} value={type.value}>{type.label}</option>
+              ))}
+            </select>
           </>
         )}
 
         {value.mode === 'bandwidth' && (
           <>
-            <TextField.Root
-              className="traffic-limit-number-input"
-              value={value.bandwidthValue}
-              onChange={(event) => update({ bandwidthValue: event.target.value })}
+            <input
+              className="sa-input"
               type="number"
               min="0"
               step="0.01"
+              aria-label="带宽数值"
+              value={value.bandwidthValue}
+              onChange={(event) => update({ bandwidthValue: event.target.value })}
             />
-            <Select.Root value={value.bandwidthUnit} onValueChange={(next) => update({ bandwidthUnit: next as TrafficLimitFormValue['bandwidthUnit'] })}>
-              <Select.Trigger className="traffic-limit-bandwidth-unit-select" />
-              <Select.Content>
-                {BANDWIDTH_UNITS.map((unit) => (
-                  <Select.Item key={unit} value={unit}>
-                    {unit}
-                  </Select.Item>
-                ))}
-              </Select.Content>
-            </Select.Root>
+            <select
+              className="sa-input sa-select"
+              aria-label="带宽单位"
+              value={value.bandwidthUnit}
+              onChange={(event) => update({ bandwidthUnit: event.target.value as TrafficLimitFormValue['bandwidthUnit'] })}
+            >
+              {BANDWIDTH_UNITS.map((unit) => (
+                <option key={unit} value={unit}>{unit}</option>
+              ))}
+            </select>
           </>
         )}
-      </Flex>
-    </Box>
+      </div>
+    </FormField>
   );
 }

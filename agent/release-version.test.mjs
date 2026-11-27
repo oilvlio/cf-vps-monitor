@@ -10,6 +10,8 @@ const posix = path => path.replaceAll('\\', '/');
 const bash = process.platform === 'win32'
   ? join(dirname(dirname(spawnSync('where.exe', ['git'], { encoding: 'utf8', windowsHide: true }).stdout.trim().split(/\r?\n/)[0])), 'bin', 'bash.exe')
   : 'bash';
+const hasPwsh = spawnSync('pwsh', ['-NoProfile', '-Command', 'exit 0'],
+  { stdio: 'ignore', windowsHide: true }).error?.code !== 'ENOENT';
 
 function validationCommands() {
   const workflow = readFileSync(join(repo, '.github', 'workflows', 'release-agent.yml'), 'utf8');
@@ -22,12 +24,10 @@ function validationCommands() {
 
 function scripts(root) {
   const paths = {};
-  for (const name of ['install.sh', 'install-linux.sh']) {
-    const source = readFileSync(join(repo, 'agent', name), 'utf8');
-    const definitions = source.split(name === 'install.sh' ? /^while \[ "\$#" -gt 0 \]; do/m : /^while \[\[ \$# -gt 0 \]\]; do/m)[0];
-    paths[name] = join(root, name);
-    writeFileSync(paths[name], `${definitions}\nCF_MONITOR_RELEASE_TAG="$REAUDIT_RELEASE_TAG"\nset_release_base\nprintf '%s\\n' "$CF_MONITOR_RELEASE_BASE"\n`);
-  }
+  const source = readFileSync(join(repo, 'agent', 'install.sh'), 'utf8');
+  const definitions = source.split(/^while \[ "\$#" -gt 0 \]; do/m)[0];
+  paths['install.sh'] = join(root, 'install.sh');
+  writeFileSync(paths['install.sh'], `${definitions}\nCF_MONITOR_RELEASE_TAG="$REAUDIT_RELEASE_TAG"\nset_release_base\nprintf '%s\\n' "$CF_MONITOR_RELEASE_BASE"\n`);
   const windows = readFileSync(join(repo, 'agent', 'install-windows.ps1'), 'utf8');
   const end = windows.indexOf('$releaseBase = Resolve-ReleaseBase');
   assert.ok(end > 0);
@@ -54,7 +54,7 @@ ${validationCommands()}
   return paths;
 }
 
-test('R-A09 every publishable version resolves through all three real installers', async t => {
+test('R-A09 every publishable version resolves through the real installers', async t => {
   const parent = join(repo, 'worker', '.tmp', 'reaudit-agent-release');
   mkdirSync(parent, { recursive: true });
   const root = mkdtempSync(join(parent, 'case-'));
@@ -81,7 +81,7 @@ test('R-A09 every publishable version resolves through all three real installers
       'v1.2.3+foo+bar', 'v1.2.3+', 'v1.2.3-alpha..1', 'v1.2.3-rc_1+build', 'v1.2.3;echo',
       ' ', 'v1.2.3\n', 'v1.2.3\nv1.2.4', 'v1.2.3\r'].map(tag => ({ tag, publish: false, pin: false })),
   ];
-  for (const vector of vectors) await t.test(JSON.stringify(vector.tag), () => {
+  for (const vector of vectors) await t.test(JSON.stringify(vector.tag), async t => {
     const commandLog = join(root, 'commands.log');
     const env = { ...process.env, REAUDIT_RELEASE_TAG: vector.tag, AGENT_VERSION: vector.tag,
       GITHUB_SHA: 'a'.repeat(40), GITHUB_REPOSITORY: 'synthetic/repository', GITHUB_ENV: posix(join(root, 'github-env')),
@@ -94,20 +94,28 @@ test('R-A09 every publishable version resolves through all three real installers
     if (!vector.publish && released.status !== 0 && existsSync(commandLog) && readFileSync(commandLog, 'utf8').trim()) {
       failures.push('invalid release must be rejected before git/gh lookups');
     }
-    for (const name of ['install.sh', 'install-linux.sh', 'install-windows.ps1']) {
-      const result = name === 'install-windows.ps1'
-        ? spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', paths[name], '-DryRun'],
-          { env, encoding: 'utf8', timeout: 15_000, windowsHide: true })
-        : spawnSync(name === 'install.sh' ? 'sh' : bash, [posix(paths[name])],
+    for (const name of ['install.sh']) {
+      const result = spawnSync('sh', [posix(paths[name])],
           { env, encoding: 'utf8', timeout: 15_000, windowsHide: true });
       assert.ifError(result.error);
       if ((result.status === 0) !== vector.pin) failures.push(`${name}: expected ${vector.pin ? 'accept' : 'reject'}, exit=${result.status}, ${result.stdout}${result.stderr}`);
       if (vector.pin && result.status === 0) {
-        const expected = vector.tag ? `https://github.com/kadidalax/cf-vps-monitor/releases/download/${encodeURIComponent(vector.tag)}`
-          : 'https://github.com/kadidalax/cf-vps-monitor/releases/latest/download';
+        const expected = vector.tag ? `https://github.com/oilvlio/cf-vps-monitor/releases/download/${encodeURIComponent(vector.tag)}`
+          : 'https://github.com/oilvlio/cf-vps-monitor/releases/latest/download';
         if (result.stdout.trim() !== expected) failures.push(`${name}: decoded/encoded repository+tag path is not equivalent: ${result.stdout}`);
       }
     }
+    await t.test('install-windows.ps1 release URL', { skip: !hasPwsh ? 'pwsh is not installed' : false }, () => {
+      const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', paths['install-windows.ps1'], '-DryRun'],
+        { env, encoding: 'utf8', timeout: 15_000, windowsHide: true });
+      assert.ifError(result.error);
+      assert.equal((result.status === 0), vector.pin, `expected ${vector.pin ? 'accept' : 'reject'}, exit=${result.status}, ${result.stdout}${result.stderr}`);
+      if (vector.pin) {
+        const expected = vector.tag ? `https://github.com/oilvlio/cf-vps-monitor/releases/download/${encodeURIComponent(vector.tag)}`
+          : 'https://github.com/oilvlio/cf-vps-monitor/releases/latest/download';
+        assert.equal(result.stdout.trim(), expected);
+      }
+    });
     assert.deepEqual(failures, [], failures.join('\n'));
   });
 });

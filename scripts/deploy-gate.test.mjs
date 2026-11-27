@@ -28,12 +28,13 @@ function runDeployment({ verificationStatus = 0, ciGateStatus = 0, buildStatus =
   };
   let status = 0;
   try {
-    new Function('mkdirSync', 'readFileSync', 'rmSync', 'writeFileSync', 'dirname', 'join', 'fileURLToPath', 'spawnSync', 'process', 'console', 'prepareCloudflareVerificationEnv', source)(
+    new Function('mkdirSync', 'readFileSync', 'rmSync', 'writeFileSync', 'dirname', 'join', 'fileURLToPath', 'spawnSync', 'process', 'console', 'prepareCloudflareVerificationEnv', 'resolveAgentRepository', source)(
       path => writes.push(path),
       () => 'name = "synthetic-worker"\nmain = "worker/src/index.ts"\n[vars]\nSUPABASE_URL = "https://PROJECT_REF.supabase.co"\n',
       path => writes.push(path), path => writes.push(path), dirname, join, fileURLToPath, spawn, fakeProcess,
       { log() {}, error() {} },
       () => { if (preparationFails) throw new Error('Synthetic tool preparation failure'); return fakeProcess.env; },
+      () => 'synthetic/repo',
     );
   } catch (error) { if (!(error instanceof Exit)) throw error; status = error.status; }
   return { status, calls, writes };
@@ -103,6 +104,19 @@ test('generic CI flags cannot bypass full local verification', () => {
   assert.notEqual(result.status, 0);
   assert.ok(result.calls.some(call => call.args.join(' ') === 'run verify'));
   assert.equal(result.calls.some(call => call.args[0]?.endsWith('wrangler.js')), false);
+});
+
+test('Workers Builds always requires successful commit CI regardless of branch metadata', () => {
+  for (const env of [
+    { WORKERS_CI: '1' },
+    { WORKERS_CI: '1', CF_WORKER_NAME: 'alternate-worker' },
+  ]) {
+    const result = runDeployment({ env, ciGateStatus: 1, verificationStatus: 1 });
+    assert.notEqual(result.status, 0);
+    assert.ok(result.calls.some(call => call.args[0]?.endsWith('github-ci-gate.mjs')));
+    assert.ok(!result.calls.some(call => call.args.join(' ') === 'run build'));
+    assert.ok(!result.calls.some(call => call.args.some(arg => arg.endsWith('wrangler.js'))));
+  }
 });
 
 test('AUD-19 GitHub release job cannot run after its same-checkout verification job failed', async () => {

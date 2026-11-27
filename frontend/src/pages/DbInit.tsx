@@ -11,6 +11,7 @@ type InitInfo = {
 };
 
 type InitResult = {
+  confirmation_required?: 'history_reset';
   success?: boolean;
   project_ref?: string;
   total?: number;
@@ -33,6 +34,7 @@ export default function DbInit() {
   const [token, setToken] = React.useState('');
   const [loading, setLoading] = React.useState(false);
   const [result, setResult] = React.useState<InitResult | null>(null);
+  const [confirmHistoryReset, setConfirmHistoryReset] = React.useState(false);
 
   React.useEffect(() => {
     fetch('/api/setup/database/init')
@@ -53,10 +55,11 @@ export default function DbInit() {
       const response = await fetch('/api/setup/database/init', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accessToken: token.trim() }),
+        body: JSON.stringify({ accessToken: token.trim(), confirmHistoryReset }),
       });
       const body = await readJson(response);
       setResult(body);
+      if (response.status === 409 && body.confirmation_required === 'history_reset') return;
       if (!response.ok || !body.success) throw new Error(body.error || `HTTP ${response.status}`);
       setToken('');
       toast.success('数据库初始化完成');
@@ -104,7 +107,7 @@ export default function DbInit() {
                 size="3"
                 type="password"
                 value={token}
-                onChange={(event) => setToken(event.target.value)}
+                onChange={(event) => { setToken(event.target.value); setConfirmHistoryReset(false); setResult(null); }}
                 placeholder="sbp_xxx"
                 autoComplete="off"
                 disabled={loading}
@@ -115,9 +118,18 @@ export default function DbInit() {
               </TextField.Root>
             </label>
 
-            <Button type="submit" size="3" disabled={loading || !info?.ok} style={{ height: 44, fontWeight: 700 }}>
+            {result?.confirmation_required === 'history_reset' && (
+              <Box role="alert">
+                <Text as="p" size="2" color="orange">将清空历史图表数据，traffic_daily 保留。此操作无法恢复历史图表。</Text>
+                <label>
+                  <input type="checkbox" checked={confirmHistoryReset} onChange={event => setConfirmHistoryReset(event.target.checked)} />
+                  <Text size="2">我已了解并确认清空历史图表数据</Text>
+                </label>
+              </Box>
+            )}
+            <Button type="submit" size="3" disabled={loading || !info?.ok || (result?.confirmation_required === 'history_reset' && !confirmHistoryReset)} style={{ height: 44, fontWeight: 700 }}>
               {loading ? <Loader2 className="db-init-spin" size={18} /> : <Database size={18} />}
-              {loading ? '正在初始化...' : '一键初始化数据库'}
+              {loading ? '正在初始化...' : result?.confirmation_required === 'history_reset' ? '确认并执行升级' : '一键初始化数据库'}
             </Button>
           </Flex>
         </form>
@@ -127,7 +139,7 @@ export default function DbInit() {
             <Flex align="center" gap="2" mb="2">
               {done ? <CheckCircle2 size={18} /> : <XCircle size={18} />}
               <Text size="2" weight="bold">
-                {done ? `完成：新执行 ${result.applied ?? 0} 个，跳过 ${result.skipped ?? 0} 个` : '初始化失败'}
+                {done ? `完成：新执行 ${result.applied ?? 0} 个，跳过 ${result.skipped ?? 0} 个` : result.confirmation_required ? '升级需要确认' : '初始化失败'}
               </Text>
             </Flex>
             {result.error && <Text size="2">{result.error}</Text>}

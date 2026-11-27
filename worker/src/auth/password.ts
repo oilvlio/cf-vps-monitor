@@ -1,11 +1,16 @@
 const PASSWORD_ALGORITHM = 'pbkdf2_sha256';
-const PBKDF2_ITERATIONS = 10000;
+// Cloudflare Workers（生产环境）对 WebCrypto PBKDF2 的迭代次数上限是 100,000，
+// 超过会抛 NotSupportedError。注意本地 workerd/测试不强制这个上限，所以不能靠
+// 本地跑通来判断，值必须固定在这一档。OWASP 对 PBKDF2-SHA256 建议 600,000，
+// 平台上暂时做不到；等平台放开后再调高（旧哈希会由 needsPasswordRehash 平滑升级）。
+const PBKDF2_ITERATIONS = 100000;
+// 只用于兼容历史哈希：低于当前迭代次数的记录会在登录成功后自动重算。
 const MIN_ACCEPTED_PBKDF2_ITERATIONS = 10000;
 const SALT_BYTES = 16;
 const HASH_BYTES = 32;
 const LEGACY_SALT = 'cf-monitor-salt';
 const LEGACY_SHA256_HEX_RE = /^[a-f0-9]{64}$/i;
-const MIN_ADMIN_PASSWORD_LENGTH = 6;
+const MIN_ADMIN_PASSWORD_LENGTH = 12;
 
 type ParsedPasswordHash = {
   iterations: number;

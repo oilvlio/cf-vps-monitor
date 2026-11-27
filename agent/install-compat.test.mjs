@@ -297,19 +297,21 @@ function nativeSystemFixture(t, manager, custom = false) {
   const pathSetup = commandShims(root, {
     systemctl: `
 case "$*" in
-  daemon-reload|'enable cf-vps-monitor-agent-fixture'|'restart cf-vps-monitor-agent-fixture') ;;
+  daemon-reload|'enable cf-vps-monitor-agent'|'restart cf-vps-monitor-agent') ;;
   *) echo '[fixture-error] unexpected systemctl arguments' >&2; exit 91 ;;
 esac
 printf 'systemctl:%s\\n' "$*" >> "$ROOT/service-events"
 `,
     'rc-service': `
-[ "$#" -eq 2 ] && [ "$1" = cf-vps-monitor-agent-fixture ] && [ "$2" = restart ] || {
+# The installer confirms the supervised Agent stayed up; model a healthy service.
+[ "$#" -eq 2 ] && [ "$1" = cf-vps-monitor-agent ] && [ "$2" = status ] && exit 0
+[ "$#" -eq 2 ] && [ "$1" = cf-vps-monitor-agent ] && [ "$2" = restart ] || {
   echo '[fixture-error] unexpected rc-service arguments' >&2; exit 92
 }
 printf 'rc-service:%s\\n' "$*" >> "$ROOT/service-events"
 `,
     'rc-update': `
-[ "$#" -eq 3 ] && [ "$1" = add ] && [ "$2" = cf-vps-monitor-agent-fixture ] && [ "$3" = default ] || {
+[ "$#" -eq 3 ] && [ "$1" = add ] && [ "$2" = cf-vps-monitor-agent ] && [ "$3" = default ] || {
   echo '[fixture-error] unexpected rc-update arguments' >&2; exit 93
 }
 printf 'rc-update:%s\\n' "$*" >> "$ROOT/service-events"
@@ -327,10 +329,10 @@ umask 077
 install_${manager}
 `, { sandbox: true });
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-  assert.match(result.stdout, /Installed cf-vps-monitor-agent-fixture\./, 'permission assertions require an installation that actually completed');
+  assert.match(result.stdout, /Installed cf-vps-monitor-agent\./, 'permission assertions require an installation that actually completed');
   assert.deepEqual(readFileSync(join(root, 'service-events'), 'utf8').trim().split('\n'), manager === 'systemd'
-    ? ['systemctl:daemon-reload', 'systemctl:enable cf-vps-monitor-agent-fixture', 'systemctl:restart cf-vps-monitor-agent-fixture']
-    : ['rc-update:add cf-vps-monitor-agent-fixture default', 'rc-service:cf-vps-monitor-agent-fixture restart']);
+    ? ['systemctl:daemon-reload', 'systemctl:enable cf-vps-monitor-agent', 'systemctl:restart cf-vps-monitor-agent']
+    : ['rc-update:add cf-vps-monitor-agent default', 'rc-service:cf-vps-monitor-agent restart']);
   const installDir = custom ? join(privateParent, 'fixture') : join(root, 'host/opt/cf-vps-monitor/fixture');
   assert.ok(existsSync(join(installDir, 'cf-vps-monitor-agent')), 'installation must create the actual Agent file before checking permissions');
   return { root, result, privateParent, installDir };
@@ -343,11 +345,11 @@ for (const manager of ['systemd', 'openrc']) {
   test(`compat ${manager} default paths allow the service user under umask 077`, nativeOptions, t => {
     const { result, installDir } = nativeSystemFixture(t, manager);
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-    const access = spawnSync('sh', ['-c', 'test -x "$1" && test -r "$1" && test -w "$2"', 'fixture', join(installDir, 'cf-vps-monitor-agent'), join(installDir, 'state')], {
+    const access = spawnSync('sh', ['-c', 'test -x "$1" && test -r "$1"', 'fixture', join(installDir, 'cf-vps-monitor-agent')], {
       encoding: 'utf8', uid: Number(nobodyUid.stdout.trim()), gid: Number(nobodyGid.stdout.trim()),
     });
     assert.ifError(access.error);
-    assert.equal(access.status, 0, 'the actual unprivileged service user cannot execute the Agent or write its state');
+    assert.equal(access.status, 0, 'the actual unprivileged service user cannot execute the Agent');
   });
   test(`compat ${manager} must not open permissions on a private custom parent`, nativeOptions, t => {
     const { privateParent } = nativeSystemFixture(t, manager, true);

@@ -1,4 +1,3 @@
-import { Button, Flex, IconButton, Select, Text, TextField, Tooltip } from '@radix-ui/themes';
 import { toast } from 'sonner';
 import {
   BILLING_CYCLE_OPTIONS,
@@ -6,27 +5,27 @@ import {
   formatBillingCycle,
   getLongTermDateValue,
 } from '../../utils/billing';
+import { Button, FormField, FormSelect } from '../ui/minimal';
 
 export function CurrencySymbols({ onPick }: { onPick: (symbol: string) => void }) {
   return (
-    <Flex className="currency-symbol-list" gap="1" wrap="wrap" align="center">
+    <div className="sa-chip-list" role="group" aria-label="常用货币符号">
       {COMMON_CURRENCIES.map(({ symbol, name }) => (
-        <Tooltip key={`${symbol}-${name}`} content={name}>
-          <IconButton
-            aria-label={`选择${name}`}
-            size="1"
-            variant="soft"
-            className="currency-symbol-button"
-            onClick={() => {
-              onPick(symbol);
-              toast.success(`已设置为${name}`);
-            }}
-          >
-            {symbol}
-          </IconButton>
-        </Tooltip>
+        <button
+          key={`${symbol}-${name}`}
+          type="button"
+          className="sa-chip-btn"
+          aria-label={`选择${name}`}
+          title={name}
+          onClick={() => {
+            onPick(symbol);
+            toast.success(`已设置为${name}`);
+          }}
+        >
+          {symbol}
+        </button>
       ))}
-    </Flex>
+    </div>
   );
 }
 
@@ -41,28 +40,18 @@ export function BillingCycleSelect({
 }) {
   const selectedValue = String(value || 30);
   const hasPreset = BILLING_CYCLE_OPTIONS.some((option) => String(option.value) === selectedValue);
+  const options = [
+    ...(hasPreset ? [] : [{ value: selectedValue, label: formatBillingCycle(Number(selectedValue)) || `${selectedValue}天` }]),
+    ...BILLING_CYCLE_OPTIONS.map((option) => ({ value: String(option.value), label: option.label })),
+  ];
 
   return (
-    <label className="billing-cycle-field">
-      <Text size="2" weight="bold" style={{ display: 'block', marginBottom: 4 }}>
-        {label}
-      </Text>
-      <Select.Root value={selectedValue} onValueChange={(next) => onChange(parseInt(next, 10))}>
-        <Select.Trigger className="billing-cycle-select" style={{ width: '100%' }} />
-        <Select.Content>
-          {!hasPreset && (
-            <Select.Item value={selectedValue}>
-              {formatBillingCycle(Number(selectedValue)) || `${selectedValue}天`}
-            </Select.Item>
-          )}
-          {BILLING_CYCLE_OPTIONS.map((option) => (
-            <Select.Item key={option.value} value={String(option.value)}>
-              {option.label}
-            </Select.Item>
-          ))}
-        </Select.Content>
-      </Select.Root>
-    </label>
+    <FormSelect
+      label={label}
+      value={selectedValue}
+      onChange={(next) => onChange(parseInt(next, 10))}
+      options={options}
+    />
   );
 }
 
@@ -76,21 +65,17 @@ export function ExpiryDateInput({
   label?: string;
 }) {
   return (
-    <label className="expiry-date-field">
-      <Text size="2" weight="bold" style={{ display: 'block', marginBottom: 4 }}>
-        {label}
-      </Text>
-      <div className="expiry-date-control-row">
-        <TextField.Root
-          className="expiry-date-input"
+    <FormField label={label}>
+      <div className="sa-inline-row">
+        <input
+          className="sa-input"
+          type="date"
+          aria-label={label}
           value={value}
           onChange={(event) => onChange(event.target.value)}
-          type="date"
         />
-        <Button className="expiry-long-term-button" type="button" size="1" variant="soft" onClick={() => onChange(getLongTermDateValue())}>
-          设置长期
-        </Button>
+        <Button variant="outline" size="sm" onClick={() => onChange(getLongTermDateValue())}>设置长期</Button>
       </div>
-    </label>
+    </FormField>
   );
 }

@@ -2,11 +2,11 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 // --- 回归锁：安装脚本内置的分支常量必须与所属仓库匹配 ---
-// 三个安装脚本都内置一对常量：从哪个仓库、哪个分支取源码。显式
+// install.sh 与 install-windows.ps1 都内置一对常量：从哪个仓库、哪个分支取源码。显式
 // `--build-from-source` 和 Unix/Linux 下载预编译包失败后的源码回退都会用到。
 // 默认安装成功时走 releases/latest，所以分支写错了不会立刻暴露。
 //
-// 2026-09-03 实测：dev 上三个脚本的分支常量都是 `main`，而 dev 的仓库
+// 2026-09-03 实测：dev 上两个脚本的分支常量都是 `main`，而 dev 的仓库
 // `kadidalax/cf-monitor-test` 没有 main 分支（`git ls-remote --heads` 可核对），
 // 拼出的 `.../refs/heads/main.tar.gz` 实测 HTTP 404 ——
 // dev 分支上 `--build-from-source` 是坏的。
@@ -34,17 +34,12 @@ function readConstant(source, pattern, label) {
 const targets = [
   {
     file: 'install.sh',
-    repo: /^CF_MONITOR_REPOSITORY="([^"]+)"/m,
-    branch: /^CF_MONITOR_BRANCH="([^"]+)"/m,
-  },
-  {
-    file: 'install-linux.sh',
-    repo: /^CF_MONITOR_REPOSITORY="([^"]+)"/m,
+    repo: /^CF_MONITOR_REPOSITORY="\$\{CF_MONITOR_REPOSITORY:-([^}]+)\}"/m,
     branch: /^CF_MONITOR_BRANCH="([^"]+)"/m,
   },
   {
     file: 'install-windows.ps1',
-    repo: /^\$repository\s*=\s*"([^"]+)"/m,
+    repo: /\[string\]\$Repository\s*=\s*"([^"]+)"/m,
     branch: /^\$branch\s*=\s*"([^"]+)"/m,
   },
 ];
@@ -67,7 +62,7 @@ for (const target of targets) {
   seen.push({ file: target.file, repository, branch });
 }
 
-// 三个脚本装的是同一个 agent，仓库与分支必须一致；
+// 两个脚本装的是同一个 agent，仓库与分支必须一致；
 // 只改其中一个（此前八处漏改那类问题）同样要报错。
 const [first, ...rest] = seen;
 for (const other of rest) {
@@ -85,16 +80,22 @@ for (const other of rest) {
 
 // 与前端保持同源：后台展示的安装命令从该分支拉取 install.sh，
 // 脚本再从同一分支拉源码，两者必须指向同一个分支。
-// 仓库常量的权威定义在 projectLinks.ts（agentInstallCommand.ts 只是 import 它）。
+// 仓库常量的权威定义在 projectLinks.ts 的 CF_MONITOR_AGENT_REPOSITORY
+//（fork 把 agent 二进制发布到自己的 release，安装脚本必须与它同源；
+// CF_MONITOR_REPOSITORY 只是项目主页链接，仍指向上游）。
 const frontendSource = readFileSync(
   new URL('../frontend/src/utils/projectLinks.ts', import.meta.url),
   'utf8',
 );
-const frontendRepo = readConstant(
-  frontendSource,
-  /CF_MONITOR_REPOSITORY\s*=\s*'([^']+)'/,
-  '前端的仓库常量',
-);
+const frontendAgentRepo = frontendSource.match(
+  /__AGENT_REPOSITORY__\s*:\s*'([^']+)'/,
+)?.[1];
+const frontendRepo = frontendAgentRepo
+  ?? readConstant(
+    frontendSource,
+    /CF_MONITOR_REPOSITORY\s*=\s*'([^']+)'/,
+    '前端的仓库常量',
+  );
 assert.equal(
   frontendRepo,
   first.repository,

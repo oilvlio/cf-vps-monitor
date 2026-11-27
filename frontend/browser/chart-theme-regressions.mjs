@@ -13,9 +13,8 @@ const metrics = [
   ['磁盘', [['磁盘', '50.0%']]],
   ['网络', [['下载', '2 KB/s'], ['上传', '3.0 MB/s']]],
   ['连接数', [['TCP', '12'], ['UDP', '0']]],
-  ['进程数', [['进程数', '23']]],
+  ['进程', [['进程数', '23']]],
   ['温度', [['温度', '0.0 °C']]],
-  ['GPU', [['利用率 %', '37.5%'], ['显存 %', '25.0%'], ['温度 °C', '45.0 °C']]],
 ];
 const pingValues = [['Ping East', '21 ms'], ['Ping West', '42 ms']];
 
@@ -32,7 +31,6 @@ function historyRows(end, duration = 3_600_000) {
 async function openInstance(page, data, context, { display = 'monitor', appearance = 'light', css = '' } = {}) {
   data.authenticated = false;
   data.settings.active_theme = display;
-  data.clients[0].gpu_name = 'Synthetic GPU';
   data.observed.tooltips = [];
   await context.addInitScript(({ display, appearance }) => {
     localStorage.setItem('cf-monitor-theme', appearance);
@@ -43,13 +41,10 @@ async function openInstance(page, data, context, { display = 'monitor', appearan
     if (path === '/api/theme/active.css') {
       await route.fulfill({ contentType: 'text/css', body: typeof css === 'function' ? css() : css }); return true;
     }
-    if (path === '/api/records/load' || path === '/api/records/gpu') {
+    if (path === '/api/records/load') {
       const end = Date.parse(url.searchParams.get('end'));
       const rows = historyRows(end, end - Date.parse(url.searchParams.get('start')));
-      const records = path.endsWith('/gpu')
-        ? rows.map(({ time }) => ({ time, utilization: 37.5, mem_used: 256, mem_total: 1024, temperature: 45 }))
-        : rows;
-      await json({ data: records, has_more: false }); return true;
+      await json(rows); return true;
     }
     if (path === '/api/task/ping') {
       await json(pingValues.map(([name], index) => ({
@@ -57,16 +52,16 @@ async function openInstance(page, data, context, { display = 'monitor', appearan
       })));
       return true;
     }
-    if (path === '/api/records/ping/batch' || path === '/api/records/ping') {
-      const rows = historyRows(Date.parse(url.searchParams.get('cursor')));
+    if (path === '/api/records/ping/window') {
+      const rows = historyRows(Date.now());
       const byTask = Object.fromEntries([1, 2].map(id => [id, rows.map(({ time }) => ({ time, value: id * 21, task_id: id }))]));
-      await json(path.endsWith('/batch') ? byTask : { data: byTask[url.searchParams.get('task_id')], has_more: false });
+      await json({ tasks: pingValues.map(([name], index) => ({ id: index + 1, name, type: 'icmp', target: 'example.invalid', interval_sec: 60 })), records: byTask, stats: {} });
       return true;
     }
     return false;
   });
   await page.goto(origin + '/instance/node-a');
-  await page.getByText('12 个数据点', { exact: true }).waitFor();
+  await page.getByText('采样 12 个点', { exact: true }).waitFor();
 }
 
 async function renderedBackground(page, tooltip) {
@@ -85,9 +80,14 @@ async function renderedBackground(page, tooltip) {
   }, png.toString('base64'));
 }
 
+async function chartWrapper(page, chart) {
+  await page.getByRole('button', { name: chart === 'ping' ? 'Ping' : '负载', exact: true }).click();
+  return chart === 'ping' ? page.locator('.lp-ping-panel .recharts-wrapper').first()
+    : page.getByRole('region', { name: chart === 'metric' ? 'CPU' : chart, exact: true }).locator('.recharts-wrapper');
+}
+
 async function readTooltip(page, chart = 'metric', { verifyOpaque = false } = {}) {
-  if (chart === 'ping') await page.getByText('Ping 延迟', { exact: true }).scrollIntoViewIfNeeded();
-  const wrapper = page.locator('.instance-detail-panel .recharts-wrapper').nth(chart === 'ping' ? 1 : 0);
+  const wrapper = await chartWrapper(page, chart);
   await wrapper.waitFor();
   await wrapper.scrollIntoViewIfNeeded();
   const box = await wrapper.boundingBox();
@@ -169,19 +169,13 @@ async function checkBothCharts(page, data, appearance, options) {
 }
 
 async function reloadThemeStylesheet(page) {
-  await deadline(page.evaluate(() => new Promise((resolve, reject) => {
-    const link = document.getElementById('cf-monitor-active-theme-css');
-    if (!link) { reject(new Error('Public theme stylesheet is missing')); return; }
-    const cleanup = () => {
-      link.removeEventListener('load', loaded);
-      link.removeEventListener('error', failed);
-    };
-    const loaded = () => { cleanup(); resolve(); };
-    const failed = () => { cleanup(); reject(new Error('Public theme stylesheet failed to load')); };
-    link.addEventListener('load', loaded);
-    link.addEventListener('error', failed);
-    window.dispatchEvent(new CustomEvent('cf-monitor:theme-updated'));
-  })), 'active theme stylesheet update');
+  const response = page.waitForResponse(response => new URL(response.url()).pathname === '/api/theme/active.css');
+  await page.evaluate(async () => {
+    const { refreshActiveThemeStylesheet } = await import('/src/utils/activeThemeStylesheet.ts');
+    refreshActiveThemeStylesheet({ force: true });
+  });
+  await (await response).finished();
+  await page.waitForFunction(() => document.getElementById('cf-monitor-active-theme-css')?.sheet?.cssRules.length > 0);
   await settleRender(page);
 }
 
@@ -192,9 +186,8 @@ try {
       await check(`CHART-${display}-${appearance}`, 'every metric and Ping tooltip follows the current theme', async (page, data, context) => {
         await openInstance(page, data, context, { display, appearance });
         for (const [metric, values] of metrics) {
-          await page.getByRole('tab', { name: metric, exact: true }).click();
           await settleRender(page);
-          const observation = await readTooltip(page);
+          const observation = await readTooltip(page, metric);
           data.observed.tooltips.push(Object.assign(observation, { metric }));
           assertReadable(observation, appearance, values);
         }
@@ -226,16 +219,17 @@ try {
       await page.emulateMedia({ colorScheme: 'light' });
       await openInstance(page, data, context, { display: 'aurora', appearance: 'system', css: () => customCss });
       const beforeRange = data.calls.length;
-      await page.getByRole('radio', { name: '24小时', exact: true }).click();
+      await page.getByRole('button', { name: '1 天', exact: true }).click();
       await settleCall(page, await waitForCall(data, call => call.path === '/api/records/load', beforeRange));
-      await page.getByText('12 个数据点', { exact: true }).waitFor();
+      await page.getByText('采样 12 个点', { exact: true }).waitFor();
 
       const values = chart === 'ping' ? pingValues : metrics[0][1];
       const initial = await readTooltip(page, chart, { verifyOpaque: true });
       data.observed.tooltips.push(Object.assign(initial, { chart, phase: 'system-light' }));
       assertReadable(initial, 'light', values);
       assert.ok(initial.label.match(/\d+/g).length >= 4, 'The open tooltip includes its date and time');
-      const wrapper = page.locator('.instance-detail-panel .recharts-wrapper').nth(chart === 'ping' ? 1 : 0);
+      const wrapper = chart === 'ping' ? page.locator('.lp-ping-panel .recharts-wrapper').first()
+        : page.getByRole('region', { name: 'CPU', exact: true }).locator('.recharts-wrapper');
       const tooltip = await wrapper.locator('.recharts-tooltip-wrapper[style*="visibility: visible"] .recharts-default-tooltip').elementHandle();
       assert.ok(tooltip, 'The hovered tooltip exists before changing themes');
       await page.evaluate(() => {
@@ -325,8 +319,9 @@ try {
       assert.deepEqual(dark[index].labelColor, [224, 255, 237, 255], 'Custom dark text token reaches the tooltip title');
       assert.ok(dark[index].background[1] > dark[index].background[0] * 2, 'Custom green panel token reaches both chart surfaces');
     }
-    await page.getByRole('radio', { name: '24小时', exact: true }).click();
-    await page.getByText('12 个数据点', { exact: true }).waitFor();
+    await page.getByRole('button', { name: '负载', exact: true }).click();
+    await page.getByRole('button', { name: '1 天', exact: true }).click();
+    await page.getByText('采样 12 个点', { exact: true }).waitFor();
     const date = await readTooltip(page);
     assertReadable(date, 'dark', metrics[0][1]);
     assert.ok(date.label.match(/\d+/g).length >= 4, 'A day-spanning range retains date and time in the title');

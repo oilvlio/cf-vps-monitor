@@ -39,7 +39,7 @@ export function formatBillingCycle(cycle?: number): string {
   return `${value}天`;
 }
 
-export function getExpiryInfo(expired_at?: string | number, nowMs = Date.now()): { label: string; color: string } {
+export function getExpiryInfo(expired_at?: string | number | null, nowMs = Date.now()): { label: string; color: 'gray' | 'red' | 'green' | 'yellow' } {
   if (!expired_at) return { label: '', color: 'gray' };
   const expiredTime = new Date(expired_at).getTime();
   if (!Number.isFinite(expiredTime)) return { label: '', color: 'gray' };
@@ -50,6 +50,22 @@ export function getExpiryInfo(expired_at?: string | number, nowMs = Date.now()):
   if (diffDays > 30) return { label: `剩 ${diffDays}天`, color: 'green' };
   if (diffDays >= 7) return { label: `剩 ${diffDays}天`, color: 'yellow' };
   return { label: `剩 ${diffDays}天`, color: 'red' };
+}
+
+// 首页卡片的剩余天数（只返回数值部分，「剩余」标签由卡片自己渲染）：
+// 「N天」/「已到期」/「长期」；没设置到期时间返回空串。
+export function getExpiryRemaining(expired_at?: string | number | null, nowMs = Date.now()): { value: string; color: 'green' | 'yellow' | 'red' | 'gray' } {
+  if (!expired_at) return { value: '', color: 'gray' };
+  const expiredTime = new Date(expired_at).getTime();
+  if (!Number.isFinite(expiredTime)) return { value: '', color: 'gray' };
+
+  const diffDays = Math.ceil((expiredTime - nowMs) / (1000 * 60 * 60 * 24));
+  if (diffDays <= 0) return { value: '已到期', color: 'red' };
+  if (diffDays > 36500) return { value: '长期', color: 'green' };
+  const value = `${diffDays}天`;
+  if (diffDays > 30) return { value, color: 'green' };
+  if (diffDays >= 7) return { value, color: 'yellow' };
+  return { value, color: 'red' };
 }
 
 export function getLongTermDateValue(): string {

@@ -108,5 +108,26 @@ test('node state: explicit unavailable fields override metadata while missing fi
   assert.equal(missing.percent, 0);
   assert.equal(resourceUsage(0, 0, 983).percent, null);
   assert.equal(formatMetricUptime(null), '—');
-  assert.equal(formatMetricUptime(0), '0s');
+  assert.equal(formatMetricUptime(0), '0h');
+});
+
+test('node state: uptime shows a single unit — d when >= 1 day, otherwise h', () => {
+  const { formatMetricUptime } = productionModule('src/utils/nodeMetrics.ts');
+  assert.equal(formatMetricUptime(59), '0h');
+  assert.equal(formatMetricUptime(3599), '0h');
+  assert.equal(formatMetricUptime(3600), '1h');
+  assert.equal(formatMetricUptime(5 * 3600 + 59 * 60 + 59), '5h');
+  assert.equal(formatMetricUptime(86400), '1d');
+  assert.equal(formatMetricUptime(86400 - 1), '23h');
+  assert.equal(formatMetricUptime(3 * 86400 + 5 * 3600 + 12 * 60 + 7), '3d');
+  assert.equal(formatMetricUptime(120 * 86400 + 23 * 3600), '120d');
+});
+
+test('node state: card uptime uses Chinese single unit (天 / 小时)', () => {
+  const { formatMetricUptimeCn } = productionModule('src/utils/nodeMetrics.ts');
+  assert.equal(formatMetricUptimeCn(null), '—');
+  assert.equal(formatMetricUptimeCn(59), '0小时');
+  assert.equal(formatMetricUptimeCn(5 * 3600 + 59 * 60), '5小时');
+  assert.equal(formatMetricUptimeCn(86400), '1天');
+  assert.equal(formatMetricUptimeCn(13 * 86400 + 23 * 3600), '13天');
 });

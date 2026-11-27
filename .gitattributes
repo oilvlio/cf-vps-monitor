@@ -1,1 +1,5 @@
 *.sh text eol=lf
+
+# 由 supabase/migrations/*.sql 经 scripts/generate-migrations.mjs 生成，
+# CI 已做 drift 检查；标记为生成文件，GitHub PR diff 默认折叠。
+worker/src/generated/** linguist-generated=true

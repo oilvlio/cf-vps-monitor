@@ -26,32 +26,33 @@ export interface Client {
   billing_cycle: number;
   auto_renewal: boolean;
   currency: string;
-  expired_at: string;
+  expired_at: string | null;
   group: string;
   tags: string;
   hidden: boolean;
+  /** 流量配额（字节），具体口径见 traffic_limit_type。 */
   traffic_limit: number;
   traffic_limit_type: string;
-  // 每月流量重置日（1~31）。经 agent policy 下发；改它会让探针重建当期统计。
+  // 每月流量重置日（1~31）。服务端据此计算聚合周期，并经 agent policy 下发。
   traffic_reset_day: number;
   sort_order?: number;
   created_at: string;
   updated_at: string;
 }
 
-export type PublicClientRow = Omit<Client, 'token' | 'token_hash' | 'token_last_used_at' | 'token_last_used_ip' | 'token_rotated_at' | 'remark'> & {
-  ipv4: string;
-  ipv6: string;
-};
+/** cfm_public_clients 的显式投影；新增管理字段不会自动扩散到公开模型。 */
+export type PublicClientRow = Pick<Client,
+  | 'uuid' | 'name' | 'cpu_name' | 'virtualization' | 'arch' | 'cpu_cores' | 'os'
+  | 'kernel_version' | 'gpu_name' | 'ipv4' | 'ipv6' | 'region' | 'public_remark'
+  | 'mem_total' | 'swap_total' | 'disk_total' | 'version' | 'price' | 'billing_cycle'
+  | 'auto_renewal' | 'currency' | 'expired_at' | 'group' | 'tags' | 'hidden'
+  | 'traffic_limit' | 'traffic_limit_type' | 'traffic_reset_day' | 'sort_order'
+  | 'created_at' | 'updated_at'
+>;
 
 export type ScheduledClientRow = Pick<Client, 'uuid' | 'name' | 'created_at' | 'expired_at'>;
 export type ClientTokenMeta = Pick<Client, 'uuid' | 'token' | 'token_hash' | 'name'>;
 export type ClientIdentity = Pick<Client, 'uuid' | 'token' | 'token_last_used_ip' | 'token_rotated_at' | 'created_at' | 'name' | 'hidden'>;
-
-export interface ClientVisibility {
-  uuid: string;
-  hidden: boolean;
-}
 
 export interface ClientCapacityCounts {
   clients: number;
@@ -70,9 +71,13 @@ export interface MonitorRecord {
   swap_total: number;
   // null = 本机负载不可取信（容器内 /proc/loadavg 透传宿主机），不是 0。
   load: number | null;
+  // load5/load15 与 load 同语义：显式 null = 不可用，缺字段 = 0（老探针兼容）。
+  load5: number | null;
+  load15: number | null;
   temp: number | null;
-  disk: number;
-  disk_total: number;
+  disk: number | null;
+  disk_total: number | null;
+  /** 网络速率为字节/秒；net_total_* 为当前计费周期累计字节。 */
   net_in: number;
   net_out: number;
   net_total_up: number;
@@ -80,7 +85,37 @@ export interface MonitorRecord {
   process_count: number;
   connections: number;
   connections_udp: number;
-  uptime: number;
+  uptime: number | null;
+}
+
+/**
+ * `cfm_records_range_aggregated` 的一个分桶：桶内所有记录一起聚合，
+ * `samples` 是桶内记录数，`minutes` 是按落库间隔折算出的分钟数。
+ */
+export interface MonitorMetricsBucket {
+  ts: number;
+  samples: number;
+  minutes: number;
+  cpu: number;
+  cpu_max: number;
+  mem_used: number;
+  disk_used: number | null;
+  net_rx: number;
+  net_tx: number;
+  net_rx_max: number;
+  net_tx_max: number;
+  swap_used: number;
+  tcp: number;
+  udp: number;
+  procs: number;
+}
+
+/** `cfm_traffic_totals` 给单个节点的当日 / 累计流量（字节）。 */
+export interface MonitorTrafficTotals {
+  day_rx: number;
+  day_tx: number;
+  total_rx: number;
+  total_tx: number;
 }
 
 export interface PagedResult<T> {
@@ -104,23 +139,25 @@ export type DeleteOldRowsOptions = {
   maxBatches?: number;
 };
 
-export type HistoryDeleteCounts = {
-  records: number;
-  gpu_records: number;
-  gpu_snapshots: number;
-  ping_records: number;
-  ping_snapshots: number;
+export type HistoryMaintenanceResult = {
+  created: number;
+  dropped: number;
+  dropped_by_parent?: Record<string, number>;
+  pending: number;
+  skipped: number;
+  locked: boolean;
 };
 
-export type ClearAllRecordsResult = {
-  deleted: HistoryDeleteCounts;
-  remaining: HistoryDeleteCounts;
-  has_more: boolean;
+export type HistoryDeleteCounts = {
+  records: number;
+  ping_snapshots: number;
+  ping_rollup: number;
+  host_rollup: number;
 };
 
 export type DeleteClientsResult = {
   removed: number;
-  deleted_records: HistoryDeleteCounts;
+  deleted_records: Pick<HistoryDeleteCounts, 'host_rollup' | 'ping_rollup'> & { rollup_dirty: number };
 };
 
 export interface GPUInfo {
@@ -132,11 +169,6 @@ export interface GPUInfo {
   temperature: number;
 }
 
-export type GPUHistoryRecord = GPUInfo & {
-  id?: number;
-  client: string;
-  time: string;
-};
 
 export interface User {
   uuid: string;
@@ -174,6 +206,15 @@ export interface AuditLogsPage {
   logs: AuditLogEntry[];
   total: number;
   has_more: boolean;
+  /** 全表出现过的动作类型（不受当前筛选影响），供前端下拉框使用。 */
+  actions?: string[];
+}
+
+export interface AuditLogsFilter {
+  /** 精确匹配动作；空值表示不过滤。 */
+  action?: string;
+  /** 在 ID / 用户 / 动作 / 详情中做不区分大小写的子串匹配；空值表示不过滤。 */
+  search?: string;
 }
 
 export interface Theme {
@@ -212,8 +253,26 @@ export interface PingTask {
   type: string;
   target: string;
   interval_sec: number;
+  /** 任务默认探测硬期限（毫秒），超过即按丢包记录。 */
+  timeout_ms: number;
+  /**
+   * 仅管理端列表使用：client uuid -> 该节点上的超时覆盖。
+   * Agent 下发前会被解析成最终生效的 timeout_ms，不会原样下发。
+   */
+  client_timeouts?: Record<string, number>;
   sort_order?: number;
 }
+
+/** 节点—任务级超时覆盖。 */
+export interface PingTaskClientTimeout {
+  task_id: number;
+  client: string;
+  timeout_ms: number;
+}
+
+export type ClientPingAssignmentResult =
+  | { ok: true; tasks: PingTask[]; timeouts: number }
+  | { ok: false; status: 400 | 404; error: string };
 
 export type PingTaskEstimateRow = Pick<PingTask, 'id' | 'name' | 'clients' | 'all_clients' | 'interval_sec'>;
 
@@ -222,7 +281,32 @@ export interface PingHistoryRecord {
   client: string;
   task_id: number;
   time: string;
+  /** 原始点为整数 ms；分桶点为桶内中位数（不取整），桶内全部丢包时为 -1。 */
   value: number;
+  /** 以下仅分桶结果带有。 */
+  sample_count?: number;
+  success_count?: number;
+  loss_count?: number;
+  avg_latency?: number | null;
+  min_latency?: number | null;
+  max_latency?: number | null;
+  p50_latency?: number | null;
+  p75_latency?: number | null;
+}
+
+/** 整个时间窗口的 Ping 统计（cfm_ping_stats_for_tasks_range）；没有成功样本时延迟类字段为 null。 */
+export interface PingTaskStats {
+  samples: number;
+  success_count: number;
+  loss_count: number;
+  loss_rate: number | null;
+  avg_latency: number | null;
+  min_latency: number | null;
+  max_latency: number | null;
+  p50_latency: number | null;
+  p75_latency: number | null;
+  /** 成功样本延迟的样本标准差（ms），不足 2 个样本时为 null。 */
+  jitter: number | null;
 }
 
 export interface PingSnapshotInput {
@@ -234,119 +318,6 @@ export interface PingTaskHistoryRequest {
   taskId: number;
   limit?: number;
   intervalSec?: number;
-}
-
-export type WebsiteMonitorStatus = 'pending' | 'up' | 'down' | 'paused';
-export type WebsiteMonitorMethod = 'GET' | 'HEAD' | 'TCP';
-export type WebsiteAgentProbeMode = 'off' | 'selected' | 'country_auto';
-export type WebsiteCheckSourceType = 'worker' | 'agent';
-
-export interface WebsiteMonitor {
-  id: number;
-  config_revision: string;
-  name: string;
-  url: string;
-  method: WebsiteMonitorMethod;
-  expected_status_min: number;
-  expected_status_max: number;
-  interval_sec: number;
-  timeout_sec: number;
-  grace_period_sec: number;
-  enabled: boolean;
-  hidden: boolean;
-  /** 对游客隐藏地址：公开出口的 url 返回 null，管理端不受影响。 */
-  hide_url: boolean;
-  agent_probe_mode: WebsiteAgentProbeMode;
-  agent_probe_clients: string[];
-  agent_probe_limit: number;
-  agent_probe_status_enabled: boolean;
-  sort_order: number;
-  status: WebsiteMonitorStatus;
-  last_checked_at: string | null;
-  last_success_at: string | null;
-  last_failure_at: string | null;
-  last_status_code: number | null;
-  last_raw_status_code: number | null;
-  last_latency_ms: number | null;
-  last_effective_reason: string | null;
-  last_error: string | null;
-  down_since: string | null;
-  last_notified_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export type WebsiteMonitorInput = Omit<
-  WebsiteMonitor,
-  | 'id'
-  | 'config_revision'
-  | 'sort_order'
-  | 'status'
-  | 'last_checked_at'
-  | 'last_success_at'
-  | 'last_failure_at'
-  | 'last_status_code'
-  | 'last_raw_status_code'
-  | 'last_latency_ms'
-  | 'last_effective_reason'
-  | 'last_error'
-  | 'down_since'
-  | 'last_notified_at'
-  | 'created_at'
-  | 'updated_at'
->;
-
-export interface WebsiteCheck {
-  id: number;
-  monitor_id: number;
-  config_revision: string | null;
-  checked_at: string;
-  ok: boolean;
-  effective_status: Extract<WebsiteMonitorStatus, 'up' | 'down'>;
-  effective_reason: string | null;
-  status_code: number | null;
-  raw_status_code: number | null;
-  latency_ms: number | null;
-  error: string | null;
-  source_type: WebsiteCheckSourceType;
-  source_client: string | null;
-}
-
-export type WebsiteCheckInput =
-  Omit<WebsiteCheck, 'id' | 'source_type' | 'source_client' | 'config_revision'> &
-  { config_revision: string } &
-  Partial<Pick<WebsiteCheck, 'source_type' | 'source_client'>>;
-
-export type WebsiteNotificationExpectation = Pick<
-  WebsiteMonitor, 'config_revision' | 'status' | 'down_since' | 'last_notified_at'
->;
-
-export interface BackupConfigurationSnapshot {
-  settings: Record<string, string>;
-  clients: Client[];
-  ping_tasks: PingTask[];
-  offline_notifications: OfflineNotification[];
-  expiry_notifications: ExpiryNotification[];
-  load_notifications: LoadNotification[];
-  website_monitors: WebsiteMonitor[];
-}
-
-export interface PublicWebsiteMonitor {
-  id: number;
-  name: string;
-  /** 勾选「对游客隐藏地址」时为 null——游客侧只有名称与状态。 */
-  url: string | null;
-  /** 公开下发监控类型，供前端区分 TCP 与 HTTP，不泄露地址。 */
-  method: WebsiteMonitorMethod;
-  hide_url: boolean;
-  interval_sec: number;
-  status: WebsiteMonitorStatus;
-  last_checked_at: string | null;
-  last_status_code: number | null;
-  last_raw_status_code: number | null;
-  last_latency_ms: number | null;
-  last_effective_reason: string | null;
-  checks: Array<Pick<WebsiteCheck, 'checked_at' | 'ok' | 'effective_status' | 'effective_reason' | 'status_code' | 'raw_status_code' | 'latency_ms' | 'source_type' | 'source_client'>>;
 }
 
 export interface NotificationDeliveryClaim {
@@ -373,6 +344,26 @@ export interface OfflineNotificationUpdate {
 
 export interface OfflineNotification extends OfflineNotificationUpdate {
   last_notified: string | null;
+  /** 本次离线起点（断线前最后一次上报；从未上报时为创建时间）。 */
+  offline_since: string | null;
+  /** 本月累计离线所属月份，北京时间 `YYYY-MM`。 */
+  month_key: string | null;
+  /** 本月已完成离线累计毫秒。PostgREST 可能把 bigint 序列化为字符串。 */
+  month_offline_ms: number | string | null;
+}
+
+export interface OfflineTransition {
+  phase: 'offline' | 'recovery';
+  time?: string | null;
+  since?: string | null;
+  monthKey?: string | null;
+  monthOfflineMs?: number | null;
+  token: string;
+}
+
+export interface IpChangeNotification {
+  client: string;
+  enable: boolean;
 }
 
 export interface ExpiryNotificationUpdate {
@@ -417,45 +408,46 @@ export interface ClientReferenceCleanupResult {
 
 export interface OrphanClientDataCleanupResult extends ClientReferenceCleanupResult {
   offline_notifications_deleted: number;
-  records_deleted: number;
-  gpu_records_deleted: number;
-  gpu_snapshots_deleted: number;
-  ping_records_deleted: number;
-  ping_snapshots_deleted: number;
+  host_rollup_deleted: number;
+  ping_rollup_deleted: number;
+  rollup_dirty_deleted: number;
 }
 
-export interface TableRowCounts {
+// Historical storage is measured from actual partition-tree allocation.
+export interface HistoryTableByteSizes {
   records: number;
-  gpu_records: number;
-  gpu_snapshots: number;
-  ping_records: number;
   ping_snapshots: number;
-  audit_logs: number;
-}
-
-export type HistoryTableRowCounts = Omit<TableRowCounts, 'audit_logs'>;
-
-// 历史表的真实磁盘占用（含索引与 TOAST），字节。
-export type HistoryTableByteSizes = HistoryTableRowCounts & { total: number };
-
-export interface HistoryStorageUsage {
-  live_rows: number;
-  live_row_bytes: number;
-  estimated_live_storage_bytes: number;
+  host_rollup: number;
+  ping_rollup: number;
+  total: number;
   allocated_bytes: number;
-  reusable_bytes: null;
-  measurement: 'live-row-bytes-plus-index-estimate';
-  index_page_allowance_bytes_per_row: number;
-  tables: Record<keyof HistoryTableRowCounts, {
-    live_rows: number;
-    live_row_bytes: number;
-    estimated_live_storage_bytes: number;
-    allocated_bytes: number;
-  }>;
 }
 
-export interface BoundedTableRowCounts {
-  counts: TableRowCounts;
-  capped: Partial<Record<keyof TableRowCounts, boolean>>;
-  limit: number;
+export interface HistoryStorageUsage extends HistoryTableByteSizes {
+  allocated_bytes: number;
+  measurement: 'partition-tree-bytes';
+}
+
+export interface HistoryMaintenanceStatus {
+  checked_at: string;
+  rollups: Record<'host' | 'ping', {
+    watermark: string | null;
+    lag_seconds: number | null;
+    dirty_buckets: number;
+    oldest_dirty_at: string | null;
+    oldest_dirty_age_seconds: number | null;
+  }>;
+  partitions: Record<string, {
+    min_start: string | null;
+    max_end: string | null;
+    runway_seconds: number | null;
+    gate_family: string | null;
+    gate_watermark: string | null;
+    gate_clearance_seconds: number | null;
+  }>;
+  partition_maintenance: {
+    updated_at: string | null;
+    pending_partitions: number;
+    lock_timeouts: number;
+  };
 }

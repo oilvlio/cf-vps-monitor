@@ -100,8 +100,9 @@ jobs:
           build freebsd amd64 cf-vps-monitor-agent-freebsd-amd64
           build windows amd64 cf-vps-monitor-agent-windows-amd64.exe
           cp install.sh dist/install.sh
-          cp install-linux.sh dist/install-linux.sh
           cp install-windows.ps1 dist/install-windows.ps1
+          # Released installers follow the repository that published them.
+          sed -i "s|oilvlio/cf-vps-monitor|${GITHUB_REPOSITORY}|g" dist/install.sh dist/install-windows.ps1
           (cd dist && sha256sum * > SHA256SUMS)
 
       - name: Generate artifact provenance

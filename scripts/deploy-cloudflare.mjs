@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { prepareCloudflareVerificationEnv } from './cloudflare-build-tools.mjs';
+import { resolveAgentRepository } from './repository.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const wrangler = join(root, 'node_modules', 'wrangler', 'bin', 'wrangler.js');
@@ -145,6 +146,10 @@ function writeDeployConfig() {
   generated = /\nCURRENT_GIT_COMMIT\s*=/.test(generated)
     ? generated.replace(/CURRENT_GIT_COMMIT\s*=\s*"[^"]*"/, `CURRENT_GIT_COMMIT = "${commit}"`)
     : generated.replace(/(\[vars\]\s*)/, `$1\nCURRENT_GIT_COMMIT = "${commit}"\n`);
+  const agentRepository = resolveAgentRepository(root);
+  generated = /\nCF_MONITOR_AGENT_REPOSITORY\s*=/.test(generated)
+    ? generated.replace(/CF_MONITOR_AGENT_REPOSITORY\s*=\s*"[^"]*"/, `CF_MONITOR_AGENT_REPOSITORY = "${agentRepository}"`)
+    : generated.replace(/(\[vars\]\s*)/, `$1\nCF_MONITOR_AGENT_REPOSITORY = "${agentRepository}"\n`);
   generated = generated
     .replace('main = "worker/src/index.ts"', 'main = "../src/index.ts"')
     .replace('directory = "frontend/dist"', 'directory = "../../frontend/dist"');

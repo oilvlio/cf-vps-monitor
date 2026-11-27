@@ -3,14 +3,9 @@ export * from './types';
 import type { AppDatabase } from './provider';
 import * as sba from './supabase-api/client';
 import type * as t from './types';
-import type { BackupData } from '../utils/backup';
 import { redactDatabaseSecrets } from '../utils/setup-diagnostics';
 
 export type QueryDatabase = AppDatabase;
-
-export async function getBackupConfigurationSnapshot(database: QueryDatabase): Promise<t.BackupConfigurationSnapshot> {
-  return sba.getSupabaseBackupConfigurationSnapshot(database.env);
-}
 
 function filterSettings(settings: Record<string, string>, keys: string[]): Record<string, string> {
   return Object.fromEntries(keys.flatMap(key => key in settings ? [[key, settings[key]]] : []));
@@ -20,9 +15,6 @@ export async function getClient(database: QueryDatabase, uuid: string): Promise<
   return sba.getSupabaseClient(database.env, uuid);
 }
 
-export async function clientExists(database: QueryDatabase, uuid: string): Promise<boolean> {
-  return sba.supabaseClientExists(database.env, uuid);
-}
 
 export async function getClientTokenMeta(database: QueryDatabase, uuid: string): Promise<t.ClientTokenMeta | null> {
   return sba.getSupabaseClientTokenMeta(database.env, uuid);
@@ -60,9 +52,6 @@ export async function listPublicClientRows(database: QueryDatabase, _fresh = fal
   return sba.getSupabasePublicClients(database.env);
 }
 
-export async function getClientVisibility(database: QueryDatabase, uuid: string): Promise<t.ClientVisibility | null> {
-  return sba.getSupabaseClientVisibility(database.env, uuid);
-}
 
 export async function listScheduledClientRows(database: QueryDatabase): Promise<t.ScheduledClientRow[]> {
   return sba.listSupabaseScheduledClientRows(database.env);
@@ -92,7 +81,7 @@ export async function rotateClientToken(database: QueryDatabase, uuid: string, t
   return sba.rotateSupabaseClientToken(database.env, uuid, token);
 }
 
-export async function markClientTokenUsed(database: QueryDatabase, uuid: string, ip = ''): Promise<boolean> {
+export async function markClientTokenUsed(database: QueryDatabase, uuid: string, ip = ''): Promise<sba.MarkClientTokenUsedResult> {
   return sba.markSupabaseClientTokenUsed(database.env, uuid, ip);
 }
 
@@ -116,19 +105,7 @@ export async function countUsers(database: QueryDatabase): Promise<number> {
   return sba.countSupabaseUsers(database.env);
 }
 
-export async function createUser(
-  database: QueryDatabase,
-  user: { uuid: string; username: string; hashedPassword: string },
-): Promise<boolean> {
-  return sba.createSupabaseUser(database.env, user);
-}
 
-export async function deleteUserIfMatches(
-  database: QueryDatabase,
-  user: { uuid: string; username: string; hashedPassword: string },
-): Promise<boolean> {
-  return sba.deleteSupabaseUserIfMatches(database.env, user);
-}
 
 export async function createInitialAdmin(
   database: QueryDatabase,
@@ -183,9 +160,7 @@ export async function consumeTotpStep(database: QueryDatabase, uuid: string, ste
 export async function consumeRecoveryCode(database: QueryDatabase, uuid: string, codeHash: string): Promise<boolean> {
   return sba.consumeSupabaseRecoveryCode(database.env, uuid, codeHash);
 }
-export async function updateUserUsername(database: QueryDatabase, uuid: string, username: string): Promise<void> {
-  return sba.updateSupabaseUserUsername(database.env, uuid, username);
-}
+
 
 export async function updateUserUsernameAndRotateSession(database: QueryDatabase, uuid: string, username: string): Promise<t.User | null> {
   return sba.updateSupabaseUserUsernameAndRotateSession(database.env, uuid, username);
@@ -207,9 +182,6 @@ export async function rotateUserSession(database: QueryDatabase, uuid: string): 
   return sba.rotateSupabaseUserSession(database.env, uuid);
 }
 
-export async function getLoginRateLimit(database: QueryDatabase, bucket: string): Promise<t.LoginRateLimit | null> {
-  return sba.getSupabaseLoginRateLimit(database.env, bucket);
-}
 
 export async function getLoginRateLimitsByBuckets(database: QueryDatabase, buckets: string[]): Promise<Map<string, t.LoginRateLimit>> {
   const rows = await sba.getSupabaseLoginRateLimitsByBuckets(database.env, buckets);
@@ -225,21 +197,9 @@ export async function clearObservedLoginRateLimits(database: QueryDatabase, stat
   return sba.clearSupabaseObservedLoginFailures(database.env, states);
 }
 
-export async function setLoginRateLimit(database: QueryDatabase, state: t.LoginRateLimit): Promise<void> {
-  return sba.setSupabaseLoginRateLimit(database.env, state);
-}
 
-export async function setLoginRateLimits(database: QueryDatabase, states: t.LoginRateLimit[]): Promise<void> {
-  return sba.setSupabaseLoginRateLimits(database.env, states);
-}
 
-export async function clearLoginRateLimit(database: QueryDatabase, bucket: string): Promise<void> {
-  return sba.clearSupabaseLoginRateLimit(database.env, bucket);
-}
 
-export async function clearLoginRateLimits(database: QueryDatabase, buckets: string[]): Promise<void> {
-  return sba.clearSupabaseLoginRateLimits(database.env, buckets);
-}
 
 export async function deleteLoginRateLimitsBefore(database: QueryDatabase, beforeTime: string): Promise<void> {
   return sba.deleteSupabaseLoginRateLimitsBefore(database.env, beforeTime);
@@ -265,9 +225,6 @@ export async function getSettingsByKeys(database: QueryDatabase, keys: string[],
   return filterSettings(await sba.getSupabaseSettingsByKeys(database.env, keys), keys);
 }
 
-export async function getRawSettingsByKeys(database: QueryDatabase, keys: string[]): Promise<Record<string, string>> {
-  return filterSettings(await sba.getSupabaseSettingsByKeys(database.env, keys), keys);
-}
 
 export async function setSetting(database: QueryDatabase, key: string, value: string): Promise<void> {
   return sba.setSupabaseSettings(database.env, { [key]: value });
@@ -314,9 +271,6 @@ export async function getThemeAsset(database: QueryDatabase, short: string, path
   return sba.getSupabaseThemeAsset(database.env, short, path);
 }
 
-export async function getPingTask(database: QueryDatabase, id: number): Promise<t.PingTask | null> {
-  return sba.getSupabasePingTask(database.env, id);
-}
 
 export async function listPingTasks(database: QueryDatabase, _fresh = false): Promise<t.PingTask[]> {
   return sba.getSupabasePublicPingTasks(database.env);
@@ -324,6 +278,26 @@ export async function listPingTasks(database: QueryDatabase, _fresh = false): Pr
 
 export async function listPingTaskEstimateRows(database: QueryDatabase): Promise<t.PingTaskEstimateRow[]> {
   return sba.getSupabasePingTaskEstimateRows(database.env);
+}
+
+export async function listPingTaskClientTimeouts(database: QueryDatabase): Promise<t.PingTaskClientTimeout[]> {
+  return sba.getSupabasePingTaskClientTimeouts(database.env);
+}
+
+export function setClientPingAssignment(
+  database: QueryDatabase, client: string, desired: number[], base: number[],
+  timeouts: Array<{ taskId: number; timeoutMs: number | null }>,
+): Promise<t.ClientPingAssignmentResult> {
+  return sba.setSupabaseClientPingAssignment(database.env, client, desired, base, timeouts);
+}
+
+export async function setPingTaskClientTimeout(
+  database: QueryDatabase,
+  taskId: number,
+  client: string,
+  timeoutMs: number | null,
+): Promise<t.PingTaskClientTimeout | null> {
+  return sba.setSupabasePingTaskClientTimeout(database.env, taskId, client, timeoutMs);
 }
 
 export async function createPingTask(database: QueryDatabase, task: t.PingTask): Promise<t.PingTask> {
@@ -342,77 +316,6 @@ export async function deletePingTask(database: QueryDatabase, id: number): Promi
   return sba.deleteSupabasePingTask(database.env, id);
 }
 
-export async function getWebsiteMonitor(database: QueryDatabase, id: number): Promise<t.WebsiteMonitor | null> {
-  return sba.getSupabaseWebsiteMonitor(database.env, id);
-}
-
-export async function listWebsiteMonitors(database: QueryDatabase, _fresh = false): Promise<t.WebsiteMonitor[]> {
-  return sba.listSupabaseWebsiteMonitors(database.env);
-}
-
-export async function listPublicWebsiteMonitors(database: QueryDatabase, checkLimit: number = 60, _fresh = false, periodHours = 24, includeHidden = false): Promise<t.PublicWebsiteMonitor[]> {
-  return sba.getSupabasePublicWebsites(database.env, periodHours, checkLimit, includeHidden);
-}
-
-export async function getPublicWebsiteMonitorById(database: QueryDatabase, id: number, checkLimit: number = 120, includeHidden = false): Promise<t.PublicWebsiteMonitor | null> {
-  return sba.getSupabasePublicWebsiteMonitorById(database.env, id, checkLimit, includeHidden);
-}
-
-export async function createWebsiteMonitor(database: QueryDatabase, monitor: t.WebsiteMonitorInput): Promise<t.WebsiteMonitor> {
-  return sba.createSupabaseWebsiteMonitor(database.env, monitor);
-}
-
-export async function updateWebsiteMonitor(database: QueryDatabase, id: number, monitor: Partial<t.WebsiteMonitorInput>): Promise<boolean> {
-  return sba.updateSupabaseWebsiteMonitor(database.env, id, monitor);
-}
-
-export async function updateWebsiteMonitorAndReturn(database: QueryDatabase, id: number, monitor: Partial<t.WebsiteMonitorInput>): Promise<t.WebsiteMonitor | null> {
-  return sba.updateSupabaseWebsiteMonitorAndReturn(database.env, id, monitor);
-}
-
-export async function deleteWebsiteMonitor(database: QueryDatabase, id: number): Promise<void> {
-  return sba.deleteSupabaseWebsiteMonitor(database.env, id);
-}
-
-export async function reorderWebsiteMonitors(database: QueryDatabase, orderedIds: number[]): Promise<number> {
-  return sba.reorderSupabaseWebsiteMonitors(database.env, orderedIds);
-}
-
-export async function setWebsiteMonitorVisibility(database: QueryDatabase, id: number, hidden: boolean): Promise<boolean> {
-  return sba.setSupabaseWebsiteMonitorVisibility(database.env, id, hidden);
-}
-
-export async function setWebsiteMonitorEnabled(database: QueryDatabase, id: number, enabled: boolean): Promise<boolean> {
-  return sba.setSupabaseWebsiteMonitorEnabled(database.env, id, enabled);
-}
-
-export async function listDueWebsiteMonitors(database: QueryDatabase, now: string, limit: number = 50): Promise<t.WebsiteMonitor[]> {
-  return sba.listSupabaseDueWebsiteMonitors(database.env, now, limit);
-}
-
-export async function recordWebsiteCheck(database: QueryDatabase, check: t.WebsiteCheckInput): Promise<t.WebsiteMonitor | null> {
-  return sba.recordSupabaseWebsiteCheck(database.env, check);
-}
-
-export async function listAgentWebsiteProbeTasks(
-  database: QueryDatabase,
-  client: string,
-  now: string,
-  limit: number = 20,
-): Promise<t.WebsiteMonitor[]> {
-  return sba.listSupabaseAgentWebsiteProbeTasks(database.env, client, now, limit);
-}
-
-export async function listWebsiteChecks(database: QueryDatabase, monitorId: number, limit: number = 60): Promise<t.WebsiteCheck[]> {
-  return sba.listSupabaseWebsiteChecks(database.env, monitorId, limit);
-}
-
-export async function markWebsiteMonitorNotified(
-  database: QueryDatabase, id: number, time: string | null, expected: t.WebsiteNotificationExpectation,
-): Promise<boolean> {
-  return sba.markSupabaseWebsiteMonitorNotified(database.env, id, time, expected);
-}
-
 export async function insertRecord(database: QueryDatabase, record: t.MonitorRecord): Promise<void> {
   return sba.insertSupabaseMonitorRecord(database.env, record);
 }
@@ -421,9 +324,6 @@ export async function getRecentRecords(database: QueryDatabase, client: string, 
   return sba.getSupabaseRecentRecords(database.env, client, limit);
 }
 
-export async function getRecordsByTimeRange(database: QueryDatabase, client: string, start: string, end: string): Promise<t.MonitorRecord[]> {
-  return sba.getSupabaseRecordsByTimeRange(database.env, client, start, end);
-}
 
 export async function getRecordsByTimeRangeLimited(
   database: QueryDatabase,
@@ -433,6 +333,101 @@ export async function getRecordsByTimeRangeLimited(
   limit: number,
 ): Promise<t.MonitorRecord[]> {
   return sba.getSupabaseRecordsByTimeRangeLimited(database.env, client, start, end, limit);
+}
+
+export async function getRecordsByTimeRangeBucketed(
+  database: QueryDatabase,
+  client: string,
+  start: string,
+  end: string,
+  bucketSec: number,
+  limit = 1000,
+): Promise<t.MonitorRecord[]> {
+  return sba.getSupabaseRecordsByTimeRangeBucketed(database.env, client, start, end, bucketSec, limit);
+}
+
+export async function getRecordsByTimeRangeAggregated(
+  database: QueryDatabase,
+  client: string,
+  start: string,
+  end: string,
+  bucketSec: number,
+  limit = 2000,
+  sampleSec = 120,
+): Promise<t.MonitorMetricsBucket[]> {
+  return sba.getSupabaseRecordsByTimeRangeAggregated(
+    database.env, client, start, end, bucketSec, limit, sampleSec,
+  );
+}
+
+/**
+ * monitor 主题契约：批量取节点的 day_* / total_* 流量。
+ *
+ * 首页每 30 秒、每个访客都会要这份数据，而它是只读聚合，短时间内的重复查询
+ * 没有收益。这里按 isolate 缓存 10 秒，并合并同一时刻的并发请求：多个访客同时
+ * 打开页面时只打一次 Supabase。失败不缓存，避免把一次网络抖动放大成 10 秒空值。
+ */
+const TRAFFIC_TOTALS_TTL_MS = 10_000;
+// 游客、管理员（含隐藏节点）、/api/ws 会带不同的节点集合；单槽缓存会互相顶掉，
+// 留几条就能覆盖这些常见视角。
+const TRAFFIC_TOTALS_CACHE_MAX_ENTRIES = 4;
+type TrafficTotals = Record<string, t.MonitorTrafficTotals>;
+type TrafficTotalsCacheEntry = { at: number; value: TrafficTotals };
+const trafficTotalsCache = new WeakMap<object, Map<string, TrafficTotalsCacheEntry>>();
+const trafficTotalsInflight = new WeakMap<object, Map<string, Promise<TrafficTotals>>>();
+
+function cacheFor<T>(bucket: WeakMap<object, Map<string, T>>, env: object): Map<string, T> {
+  let map = bucket.get(env);
+  if (!map) {
+    map = new Map();
+    bucket.set(env, map);
+  }
+  return map;
+}
+
+export type TrafficTotalsLookup = { cached?: boolean };
+
+export async function getTrafficTotals(
+  database: QueryDatabase,
+  clients: readonly string[],
+  lookup?: TrafficTotalsLookup,
+): Promise<TrafficTotals> {
+  const env = database.env as unknown as object;
+  // 节点集合相同即同一份数据；排序让调用方传参顺序不影响命中。
+  const key = [...clients].sort().join('\n');
+
+  const cache = cacheFor(trafficTotalsCache, env);
+  const cached = cache.get(key);
+  if (cached && Date.now() - cached.at < TRAFFIC_TOTALS_TTL_MS) {
+    if (lookup) lookup.cached = true;
+    // Map 的插入顺序当 LRU：命中后移到末尾，避免热视角被冷视角挤掉。
+    cache.delete(key);
+    cache.set(key, cached);
+    return cached.value;
+  }
+
+  const inflight = cacheFor(trafficTotalsInflight, env);
+  const pending = inflight.get(key);
+  if (pending) {
+    if (lookup) lookup.cached = true;
+    return pending;
+  }
+
+  const promise = sba.getSupabaseTrafficTotals(database.env, clients)
+    .then(value => {
+      cache.delete(key);
+      cache.set(key, { at: Date.now(), value });
+      if (cache.size > TRAFFIC_TOTALS_CACHE_MAX_ENTRIES) {
+        const oldest = cache.keys().next().value;
+        if (oldest !== undefined) cache.delete(oldest);
+      }
+      return value;
+    })
+    .finally(() => {
+      if (inflight.get(key) === promise) inflight.delete(key);
+    });
+  inflight.set(key, promise);
+  return promise;
 }
 
 export async function getRecordsByTimeRangePaged(
@@ -457,9 +452,6 @@ export async function getRecordsByTimeRangeCursor(
   return sba.getSupabaseRecordsByTimeRangeCursor(database.env, client, start, end, cursor, limit);
 }
 
-export async function getLatestRecordTimes(database: QueryDatabase): Promise<Array<{ client: string; last_time: string }>> {
-  return sba.getSupabaseLatestRecordTimes(database.env);
-}
 
 export async function getLatestRecordTimesForClients(
   database: QueryDatabase,
@@ -468,72 +460,20 @@ export async function getLatestRecordTimesForClients(
   return sba.getSupabaseLatestRecordTimesForClients(database.env, clients);
 }
 
-export async function getLatestRecords(database: QueryDatabase): Promise<t.MonitorRecord[]> {
-  return sba.getSupabaseLatestRecords(database.env);
+
+export async function maintainHistory(database: QueryDatabase, now: string): Promise<t.HistoryMaintenanceResult> {
+  return sba.maintainSupabaseHistory(database.env, now);
 }
 
-export async function getGPURecords(database: QueryDatabase, client: string, start?: string, end?: string, limit: number = 100): Promise<t.GPUHistoryRecord[]> {
-  return sba.getSupabaseGpuRecords(database.env, client, start, end, limit);
-}
+export type RollupFamily = 'host' | 'ping';
 
-export async function getGPURecordsPaged(
+export async function buildRollup(
   database: QueryDatabase,
-  client: string,
-  start?: string,
-  end?: string,
-  page: number = 1,
-  limit: number = 100,
-): Promise<t.PagedResult<t.GPUHistoryRecord>> {
-  return sba.getSupabaseGpuRecordsPaged(database.env, client, start, end, page, limit);
-}
-
-export async function getGPURecordsCursor(
-  database: QueryDatabase,
-  client: string,
-  start: string | undefined,
-  end: string | undefined,
-  cursor: string | undefined,
-  limit: number = 100,
-): Promise<t.PagedResult<t.GPUHistoryRecord>> {
-  return sba.getSupabaseGpuRecordsCursor(database.env, client, start, end, cursor, limit);
-}
-
-export async function insertGPURecords(database: QueryDatabase, client: string, time: string, gpus: t.GPUInfo[]): Promise<void> {
-  return sba.insertSupabaseGpuRecords(database.env, client, time, gpus);
-}
-
-export async function deleteOldRecords(
-  database: QueryDatabase,
-  beforeTime: string,
-  options: t.DeleteOldRowsOptions = {},
-): Promise<{ records: number; gpu_records: number; gpu_snapshots: number; has_more: boolean }> {
-  return sba.deleteSupabaseOldRecords(database.env, beforeTime, options);
-}
-
-export async function deleteOldWebsiteChecks(
-  database: QueryDatabase,
-  beforeTime: string,
-  options: t.DeleteOldRowsOptions = {},
-): Promise<{ website_checks: number; has_more: boolean }> {
-  return sba.deleteSupabaseOldWebsiteChecks(database.env, beforeTime, options);
-}
-
-export async function deleteOldPingRecords(
-  database: QueryDatabase,
-  beforeTime: string,
-  options: t.DeleteOldRowsOptions = {},
-): Promise<{ ping_records: number; ping_snapshots: number; has_more: boolean }> {
-  return sba.deleteSupabaseOldPingRecords(database.env, beforeTime, options);
-}
-
-export async function clearAllRecords(
-  database: QueryDatabase,
-): Promise<t.ClearAllRecordsResult> {
-  return sba.clearSupabaseAllRecords(database.env);
-}
-
-export async function clearClientRecords(database: QueryDatabase, client: string): Promise<void> {
-  return sba.clearSupabaseClientRecords(database.env, client);
+  family: RollupFamily,
+  now: string,
+  maxBuckets = 48,
+): Promise<Record<string, unknown>> {
+  return sba.buildSupabaseRollup(database.env, family, now, maxBuckets);
 }
 
 export async function insertPingSnapshot(database: QueryDatabase, client: string, time: string, results: t.PingSnapshotInput[]): Promise<void> {
@@ -555,14 +495,124 @@ export async function getPingRecordsForTasks(
   return sba.getSupabasePingRecordsForTasks(database.env, client, taskIds, limit, cursor);
 }
 
+export async function getPingRecordsForTasksRange(
+  database: QueryDatabase,
+  client: string,
+  taskIds: number[],
+  start: string | undefined,
+  end: string | undefined,
+  limit: number = 1000,
+): Promise<Record<string, t.PingHistoryRecord[]>> {
+  return sba.getSupabasePingRecordsForTasksRange(database.env, client, taskIds, start, end, limit);
+}
+
+export async function getPingRecordsForTasksRangeBucketed(
+  database: QueryDatabase,
+  client: string,
+  taskIds: number[],
+  start: string | undefined,
+  end: string | undefined,
+  bucketSec: number,
+  limit = 1000,
+): Promise<Record<string, t.PingHistoryRecord[]>> {
+  return sba.getSupabasePingRecordsForTasksRangeBucketed(
+    database.env,
+    client,
+    taskIds,
+    start,
+    end,
+    bucketSec,
+    limit,
+  );
+}
+
+export async function getPingRollupRange(
+  database: QueryDatabase,
+  client: string,
+  taskIds: number[],
+  start: string | undefined,
+  end: string | undefined,
+  stepSec: number,
+  limit = 1500,
+): Promise<Record<string, t.PingHistoryRecord[]>> {
+  return sba.getSupabasePingRollupRange(database.env, client, taskIds, start, end, stepSec, limit);
+}
+
+export async function getPingStatsForTasksRange(
+  database: QueryDatabase,
+  client: string,
+  taskIds: number[],
+  start: string | undefined,
+  end: string | undefined,
+): Promise<Record<string, t.PingTaskStats>> {
+  return sba.getSupabasePingStatsForTasksRange(database.env, client, taskIds, start, end);
+}
+
+export async function getPingStatsFromRollupRange(
+  database: QueryDatabase,
+  client: string,
+  taskIds: number[],
+  start: string,
+  end: string,
+): Promise<Record<string, t.PingTaskStats>> {
+  return sba.getSupabasePingStatsFromRollupRange(database.env, client, taskIds, start, end);
+}
+
+export async function getHomePingAssignments(database: QueryDatabase): Promise<Record<string, number>> {
+  return sba.getSupabaseHomePingAssignments(database.env);
+}
+
+export async function setHomePingTask(
+  database: QueryDatabase,
+  client: string,
+  taskId: number | null,
+): Promise<{ client: string; task_id: number | null }> {
+  return sba.setSupabaseHomePingTask(database.env, client, taskId);
+}
+
+export type TrafficSamplePayload = sba.TrafficSamplePayload;
+export type TrafficImportDay = sba.TrafficImportDay;
+export type TrafficImportBaseline = sba.TrafficImportBaseline;
+
+export async function applyTrafficSamples(
+  database: QueryDatabase,
+  client: string,
+  samples: TrafficSamplePayload[],
+  from: string,
+  to: string,
+): Promise<{ up: number; down: number; applied: number }> {
+  return sba.applySupabaseTrafficSamples(database.env, client, samples, from, to);
+}
+
+export async function importTrafficHistory(
+  database: QueryDatabase,
+  client: string,
+  days: TrafficImportDay[],
+  baseline: TrafficImportBaseline | null,
+): Promise<number> {
+  return sba.importSupabaseTrafficHistory(database.env, client, days, baseline);
+}
+
+export async function getHomePingRows(
+  database: QueryDatabase,
+  start: string,
+  end: string,
+  rowLimit = 400,
+): Promise<Record<string, { task_id: number; name: string; rows: { time: string; value: number }[] }>> {
+  return sba.getSupabaseHomePingRows(database.env, start, end, rowLimit);
+}
+
+
 export async function getPingRecordsPaged(
   database: QueryDatabase,
   client: string,
   taskId: number,
   page: number = 1,
   limit: number = 120,
+  start?: string,
+  end?: string,
 ): Promise<t.PagedResult<t.PingHistoryRecord>> {
-  return sba.getSupabasePingRecordsPaged(database.env, client, taskId, page, limit);
+  return sba.getSupabasePingRecordsPaged(database.env, client, taskId, page, limit, start, end);
 }
 
 export async function getPingRecordsCursor(
@@ -571,21 +621,12 @@ export async function getPingRecordsCursor(
   taskId: number,
   cursor: string | undefined,
   limit: number = 120,
+  start?: string,
+  end?: string,
 ): Promise<t.PagedResult<t.PingHistoryRecord>> {
-  return sba.getSupabasePingRecordsCursor(database.env, client, taskId, cursor, limit);
+  return sba.getSupabasePingRecordsCursor(database.env, client, taskId, cursor, limit, start, end);
 }
 
-export async function getLoadMetricWindowStats(
-  database: QueryDatabase,
-  client: string,
-  start: string,
-  end: string,
-  metric: t.LoadNotificationMetric,
-  threshold: number,
-): Promise<t.LoadMetricWindowStats> {
-  const stats = await sba.getSupabaseLoadMetricWindowStatsForClients(database.env, [client], start, end, metric, threshold);
-  return stats.get(client) || { samples: 0, exceeded: 0, avg_value: 0 };
-}
 
 export async function getLoadMetricWindowStatsForClients(
   database: QueryDatabase,
@@ -606,47 +647,20 @@ export async function deleteOldAuditLogs(
   return sba.deleteSupabaseOldAuditLogs(database.env, beforeTime, options);
 }
 
-export async function getStorageRowCounts(database: QueryDatabase): Promise<t.TableRowCounts> {
-  return sba.getSupabaseStorageRowCounts(database.env);
-}
-
-export async function getBoundedStorageRowCounts(
-  database: QueryDatabase,
-  limit: number,
-): Promise<t.BoundedTableRowCounts> {
-  return sba.getSupabaseBoundedStorageRowCounts(database.env, limit);
-}
-
-export async function getHistoryStorageRowCounts(database: QueryDatabase): Promise<t.HistoryTableRowCounts> {
-  return sba.getSupabaseHistoryStorageRowCounts(database.env);
-}
 
 export async function getHistoryStorageBytes(database: QueryDatabase): Promise<t.HistoryTableByteSizes> {
   return sba.getSupabaseHistoryStorageBytes(database.env);
 }
 
-export async function getHistoryStorageUsage(database: QueryDatabase): Promise<t.HistoryStorageUsage> {
-  return sba.getSupabaseHistoryStorageUsage(database.env);
+export async function getHistoryMaintenanceStatus(database: QueryDatabase): Promise<t.HistoryMaintenanceStatus> {
+  return sba.getSupabaseHistoryMaintenanceStatus(database.env);
 }
 
-export async function getExpiredRowCounts(
-  database: QueryDatabase,
-  beforeTimes: { records: string; ping_records: string; audit_logs: string },
-): Promise<t.TableRowCounts> {
-  return sba.getSupabaseExpiredRowCounts(database.env, beforeTimes);
-}
-
-export async function getOfflineNotification(database: QueryDatabase, client: string, _fresh = false): Promise<t.OfflineNotification | null> {
-  return sba.getSupabaseOfflineNotification(database.env, client);
-}
 
 export async function listOfflineNotifications(database: QueryDatabase, _fresh = false): Promise<t.OfflineNotification[]> {
   return sba.listSupabaseOfflineNotifications(database.env);
 }
 
-export async function setOfflineNotification(database: QueryDatabase, client: string, enable: boolean, gracePeriod: number): Promise<boolean> {
-  return (await sba.setSupabaseOfflineNotifications(database.env, [{ client, enable, grace_period: gracePeriod }])) > 0;
-}
 
 export async function setOfflineNotifications(database: QueryDatabase, items: t.OfflineNotificationUpdate[]): Promise<number> {
   return sba.setSupabaseOfflineNotifications(database.env, items);
@@ -656,17 +670,27 @@ export async function markOfflineNotificationSent(database: QueryDatabase, clien
   return sba.markSupabaseOfflineNotificationSent(database.env, client, time, token);
 }
 
-export async function getExpiryNotification(database: QueryDatabase, client: string, _fresh = false): Promise<t.ExpiryNotification | null> {
-  return sba.getSupabaseExpiryNotification(database.env, client);
+export async function recordOfflineTransition(database: QueryDatabase, client: string, transition: t.OfflineTransition): Promise<boolean> {
+  return sba.recordSupabaseOfflineTransition(database.env, client, transition);
 }
+
+export async function listIpChangeNotifications(database: QueryDatabase, _fresh = false): Promise<t.IpChangeNotification[]> {
+  return sba.listSupabaseIpChangeNotifications(database.env);
+}
+
+export async function isIpChangeNotificationEnabled(database: QueryDatabase, client: string): Promise<boolean> {
+  return sba.ipChangeNotificationEnabled(database.env, client);
+}
+
+export async function setIpChangeNotifications(database: QueryDatabase, items: t.IpChangeNotification[]): Promise<number> {
+  return sba.setSupabaseIpChangeNotifications(database.env, items);
+}
+
 
 export async function listExpiryNotifications(database: QueryDatabase, _fresh = false): Promise<t.ExpiryNotification[]> {
   return sba.listSupabaseExpiryNotifications(database.env);
 }
 
-export async function setExpiryNotification(database: QueryDatabase, client: string, enable: boolean, advanceDays: number): Promise<boolean> {
-  return (await sba.setSupabaseExpiryNotifications(database.env, [{ client, enable, advance_days: advanceDays }])) > 0;
-}
 
 export async function setExpiryNotifications(database: QueryDatabase, items: t.ExpiryNotificationUpdate[]): Promise<number> {
   return sba.setSupabaseExpiryNotifications(database.env, items);
@@ -724,12 +748,9 @@ export async function listAuditLogsPaged(
   database: QueryDatabase,
   page: number = 1,
   limit: number = 50,
+  filter: t.AuditLogsFilter = {},
 ): Promise<t.AuditLogsPage> {
-  return sba.listSupabaseAuditLogsPaged(database.env, page, limit);
-}
-
-export async function restoreBackupData(database: QueryDatabase, backup: BackupData): Promise<void> {
-  return sba.restoreSupabaseBackupData(database.env, backup);
+  return sba.listSupabaseAuditLogsPaged(database.env, page, limit, filter);
 }
 
 export async function insertAuditLog(

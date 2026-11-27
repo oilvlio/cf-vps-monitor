@@ -50,7 +50,7 @@ export default function ThemePreviewFrame({ bootstrap, css }: { bootstrap: Publi
               <nav className="nav-bar"><div className="nav-brand-title">{bootstrap.settings?.site_title || 'CF VPS Monitor'}</div></nav>
               <div className="monitor-dashboard-page" style={{ padding: 16 }}>
                 <div className="node-card-grid">
-                  {clients.map(client => <NodeCard key={client.uuid} client={client} online={online.has(client.uuid)} live={bootstrap.live?.data?.[client.uuid]} includeHidden={false} />)}
+                  {clients.map(client => <NodeCard key={client.uuid} client={client} online={online.has(client.uuid)} live={bootstrap.live?.data?.[client.uuid]} />)}
                 </div>
                 {clients.length === 0 && <p>暂无公开服务器</p>}
               </div>

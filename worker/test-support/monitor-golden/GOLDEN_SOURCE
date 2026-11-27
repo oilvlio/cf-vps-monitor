@@ -1,0 +1,55 @@
+hub-golden.json 为 monitor 主题契约的形状黄金样本（键集合 + 类型 + 单位不变量）。
+
+基线分三处分别记录，互不替代：
+
+1) hub commit
+   monitor 仓库 `2477cef8425d21580eb5ac98c23f03efc7da2a6a`。
+   这是对照 src/api.rs 的 node_view()（公开视图）、PUBLIC_METRICS、me()、
+   metrics() 响应包络，以及 src/db.rs 的 metrics()/close_bucket() 行形状与
+   period_start() 的提交。相对默认主题 pin 升到 1.4.3 时（提交
+   2840c7b07735771b043c5a824c31e6eb435d0f56），node_view() 与
+   period_start() 的形状没有变化；只核对了这两处，其余 hub 改动与公开读形状无关。
+
+2) 默认主题 pin
+   monitor/web-theme.pin 的 `v1.4.3 78c83ea0343d0ac06507528407eae93af0773239fdefae54024ca9d16a54c0a8`
+   （由提交 2840c7b07735771b043c5a824c31e6eb435d0f56 "chore: 默认主题升到
+   1.4.3" 引入）。契约版本（hub-golden.json 的 contractVersion、
+   contract.ts 的 MONITOR_CONTRACT_VERSION）跟随这个 pin 的版本号。
+
+3) golden 来源
+   形状从上面的 hub commit 手工抽取：src/api.rs 的 node_view() / PUBLIC_METRICS /
+   me() / metrics() 包络，src/db.rs 的 metrics()、close_bucket() 行与
+   period_start()。它不是某次线上 hub 录制的产物；录制刷新方式见下。
+
+主题侧的对照物：Monitor-Theme-LuminaPlus 的 src/dev/mockApi.ts 与
+src/types/models.ts（它的 zod 是 .catch() 降级，只能当参照，不能当检查器）。
+
+刷新方式（二选一）：
+
+1) 从运行中的 hub 录制（推荐，最贴近真实）：
+
+   node scripts/refresh-monitor-golden.mjs --from-hub-url http://127.0.0.1:8080
+
+   需要有可访问的 hub（本仓库的上游 monitor 可直接 cargo run），
+   脚本会请求 /api/me、/api/nodes、/api/nodes/<在线节点>/metrics?hours=6
+   与 ?series=ping，抽取形状后写回本文件。
+   注意：`--from-hub-url` 的 hub 版本必须与上面的 pin 一致，否则先升级 pin。
+
+2) 从 themes 仓库的 preview/hub.js 录制：
+
+   node scripts/refresh-monitor-golden.mjs --from-capture ./capture.json
+
+   capture.json 是 {"me":..., "nodes":..., "metrics":..., "ping":...} 的
+   原始响应快照（可由 preview/hub.js 或线上 hub 录制）。themes 仓库不在
+   本机时先用方式 1。
+
+更新形状后必须同时更新三处基线：GOLDEN_SOURCE 的 hub commit / 默认主题 pin /
+golden 来源、hub-golden.json 的 contractVersion 与 hubCommit / themePin /
+goldenSource、contract.ts 的 MONITOR_CONTRACT_VERSION。golden 测试会校验
+contractVersion 与主题 pin 版本一致，也会校验本文件与 hub-golden.json 记录的是
+同一个 hub commit 和同一个 pin。
+
+定时比对：`.github/workflows/monitor-golden.yml` 每周（及手动触发）从
+workflow_dispatch 输入或仓库变量 `MONITOR_HUB_URL` 指向的 hub 录制一次形状，
+与仓库里的 golden 做 git diff；形状漂移会让该 job 红灯。未配置 hub 地址时
+job 跳过并留 notice，不算失败。

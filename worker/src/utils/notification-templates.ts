@@ -28,6 +28,36 @@ export function formatNotificationTime(value: string | Date): string {
   ].join(':');
 }
 
+/** 北京时间（UTC+8）的月份键，例如 `2026-11`。 */
+export function beijingMonthKey(value: string | number | Date): string {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const beijing = new Date(date.getTime() + 8 * 60 * 60 * 1000);
+  return `${beijing.getUTCFullYear()}-${pad2(beijing.getUTCMonth() + 1)}`;
+}
+
+/** 北京时间当月 1 日 00:00 对应的 Unix 毫秒。 */
+export function beijingMonthStartMs(value: string | number | Date): number {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return 0;
+  const beijing = new Date(date.getTime() + 8 * 60 * 60 * 1000);
+  return Date.UTC(beijing.getUTCFullYear(), beijing.getUTCMonth(), 1) - 8 * 60 * 60 * 1000;
+}
+
+/** 把毫秒时长格式化成通知里可读的中文时长。 */
+export function formatOfflineDuration(ms: number): string {
+  const totalMinutes = Math.max(0, Math.round(Number(ms || 0) / 60000));
+  if (totalMinutes < 60) return `${totalMinutes} 分钟`;
+  const totalHours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (totalHours < 24) {
+    return minutes === 0 ? `${totalHours} 小时` : `${totalHours} 小时 ${minutes} 分钟`;
+  }
+  const days = Math.floor(totalHours / 24);
+  const hours = totalHours % 24;
+  return hours === 0 ? `${days} 天` : `${days} 天 ${hours} 小时`;
+}
+
 function message(subject: string, lines: string[], meta: Omit<NotificationMessage, 'subject' | 'body'> = {}): NotificationMessage {
   return { subject, body: lines.join('\n'), ...meta };
 }
@@ -71,7 +101,7 @@ export function buildOfflineNotification(input: {
       `离线 ${input.offlineMinutes} 分钟`,
       `最后上报 ${input.lastSeen === '从未上报' ? input.lastSeen : formatNotificationTime(input.lastSeen)}`,
       ...(input.createdAt ? [`创建时间 ${formatNotificationTime(input.createdAt)}`] : []),
-    ].join('；'),
+    ].join('\n'),
     time: input.eventTime,
   });
 }
@@ -79,13 +109,18 @@ export function buildOfflineNotification(input: {
 export function buildNodeRecoveryNotification(input: {
   nodeName: string;
   recoveredAt: string;
+  offlineMinutes: number;
+  monthOfflineMs: number;
   eventTime?: string | Date;
 }): NotificationMessage {
   return eventMessage({
     emoji: '🟢',
     event: '恢复上线',
     clients: input.nodeName,
-    message: `节点已恢复上报；最新上报 ${formatNotificationTime(input.recoveredAt)}`,
+    message: [
+      `离线 ${Math.max(1, Math.round(input.offlineMinutes))} 分钟后恢复上线，本月累计离线 ${formatOfflineDuration(input.monthOfflineMs)}`,
+      `最新上报 ${formatNotificationTime(input.recoveredAt)}`,
+    ].join('\n'),
     time: input.eventTime,
   });
 }
@@ -120,39 +155,6 @@ export function buildLoadNotification(input: {
     event: '负载告警',
     clients: input.nodeName,
     message: `${input.ruleName || `${input.metricLabel} 告警`}；${input.metricLabel} 平均 ${input.avgValue.toFixed(1)}% (阈值 ${input.threshold}%)；超标率 ${(input.exceedRatio * 100).toFixed(0)}% / ${(input.requiredRatio * 100).toFixed(0)}%`,
-    time: input.eventTime,
-  });
-}
-
-export function buildWebsiteAlertNotification(input: {
-  name: string;
-  url: string;
-  downMinutes: number;
-  lastStatus: string;
-  checkedAt: string;
-}): NotificationMessage {
-  return eventMessage({
-    emoji: '🌐',
-    event: '网站告警',
-    clients: input.name,
-    message: `${input.url}；状态 ${input.lastStatus}；持续 ${input.downMinutes} 分钟`,
-    time: input.checkedAt,
-  });
-}
-
-export function buildWebsiteRecoveryNotification(input: {
-  name: string;
-  url: string;
-  downMinutes: number;
-  statusCode: number | null;
-  latencyMs: number | null;
-  eventTime?: string | Date;
-}): NotificationMessage {
-  return eventMessage({
-    emoji: '🟢',
-    event: '网站恢复',
-    clients: input.name,
-    message: `${input.url}；HTTP ${input.statusCode ?? 'unknown'}；延迟 ${input.latencyMs ?? 0}ms；故障时长 ${input.downMinutes} 分钟`,
     time: input.eventTime,
   });
 }

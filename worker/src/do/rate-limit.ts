@@ -13,6 +13,10 @@ export class RateLimitDO {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (request.method === 'GET' && url.pathname === '/health') {
+      // 只读探针：健康检查不应写计数，否则每次检查都消耗一次 DO 写入。
+      return Response.json({ ok: true });
+    }
     if (request.method === 'POST' && url.pathname === '/rate-limit') {
       return this.checkRateLimit(request);
     }
@@ -54,9 +58,26 @@ export class RateLimitDO {
     const state = !current || current.resetAt <= now
       ? { count: 0, resetAt: now + windowMs }
       : current;
+    const reset = Math.ceil(state.resetAt / 1000);
+
+    // 已超限时只读不写：否则攻击流量的每一次拒绝都会再产生一次存储写入，
+    // 限流器自己反而放大对共享 DO 额度的消耗。窗口内计数已经到顶，无需续写。
+    if (state.count >= max) {
+      return Response.json({
+        allowed: false,
+        retry_after: Math.max(1, Math.ceil((state.resetAt - now) / 1000)),
+        limit: max,
+        remaining: 0,
+        reset,
+      });
+    }
+
     state.count += 1;
     await this.state.storage.put(key, state);
-    await this.scheduleCleanupAlarm(now);
+    // alarm 自己会续期，不必每次请求都 getAlarm()；实例重启后的第一次请求兜底调度。
+    if (this.sweepCounter === 1 || this.sweepCounter % 64 === 0) {
+      await this.scheduleCleanupAlarm(now);
+    }
     if (this.sweepCounter % 1024 === 0) {
       await this.enforceBucketLimit(now);
     }
@@ -64,11 +85,11 @@ export class RateLimitDO {
     const retryAfter = Math.max(1, Math.ceil((state.resetAt - now) / 1000));
     const remaining = Math.max(0, max - state.count);
     return Response.json({
-      allowed: state.count <= max,
+      allowed: true,
       retry_after: retryAfter,
       limit: max,
       remaining,
-      reset: Math.ceil(state.resetAt / 1000),
+      reset,
     });
   }
 

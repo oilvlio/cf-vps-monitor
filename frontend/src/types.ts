@@ -21,10 +21,12 @@ export interface ClientInfo {
   group: string;
   tags: string;
   hidden: boolean;
+  // 价格原值公开下发，展示方式由主题决定。
   price: number;
   billing_cycle: number;
   currency: string;
-  expired_at: string;
+  auto_renewal?: boolean;
+  expired_at: string | null;
   traffic_limit: number;
   traffic_limit_type: string;
   traffic_reset_day?: number;

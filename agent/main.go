@@ -3,35 +3,34 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/shirou/gopsutil/v3/cpu"
-	"github.com/shirou/gopsutil/v3/disk"
-	"github.com/shirou/gopsutil/v3/host"
-	"github.com/shirou/gopsutil/v3/load"
-	"github.com/shirou/gopsutil/v3/mem"
-	gnet "github.com/shirou/gopsutil/v3/net"
-	"github.com/shirou/gopsutil/v3/process"
+	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/disk"
+	"github.com/shirou/gopsutil/v4/host"
+	"github.com/shirou/gopsutil/v4/load"
+	"github.com/shirou/gopsutil/v4/mem"
+	gnet "github.com/shirou/gopsutil/v4/net"
+	"github.com/shirou/gopsutil/v4/process"
 )
 
 var Version = "dev"
@@ -42,6 +41,43 @@ const minReportInterval = 3 * time.Second
 const maxHTTPErrorBodyBytes = 4096
 const publicIPProbeTimeout = 3 * time.Second
 const publicIPProbeBodyLimit = 4096
+
+// Control-plane requests (report upload and policy polling) share one client so
+// they reuse keep-alive connections instead of building a client per call.
+const (
+	agentServerRequestTimeout = 30 * time.Second
+	agentPolicyRequestTimeout = 15 * time.Second
+)
+
+var agentServerHTTPClient = &http.Client{
+	Timeout:   agentServerRequestTimeout,
+	Transport: newAgentServerTransport(),
+}
+
+func newAgentServerTransport() *http.Transport {
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	return &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           dialer.DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          16,
+		MaxIdleConnsPerHost:   4,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+}
+
+func setAgentRequestHeaders(req *http.Request) {
+	req.Header.Set("User-Agent", "cf-vps-monitor-agent/"+Version)
+}
+
+// Ping 任务的超时是探测的硬期限，超过即记为丢包（-1），与 Zeno-Agent 的
+// timeout_ms 语义一致。DNS 解析单独限时，不计入延迟，也不受任务超时影响。
+const defaultPingTimeoutMS = 3000
+const minPingTimeoutMS = 100
+const maxPingTimeoutMS = 5000
+const pingResolveTimeout = 3 * time.Second
 const maxReasonableCgroupLimit = uint64(1 << 60)
 
 // defaultExcludedNetworkInterfacePrefixes 是默认不计入流量/速率的网卡前缀。
@@ -93,21 +129,22 @@ var defaultExcludedNetworkInterfacePrefixes = []string{
 }
 
 var (
-	token                   string
-	serverURL               string
-	reportInterval          int
-	clientName              string
-	reportMode              string
-	reconnectInterval       int
-	pingInterval            int
-	trafficResetDay         int
-	mountInclude            string
-	mountExclude            string
-	containerDiskTotalBytes containerDiskTotalValue
-	nicInclude              string
-	nicExclude              string
-	trafficTracker          *trafficResetTracker
-	publicIPv4ProbeURLs     = []string{
+	token               string
+	serverURL           string
+	reportInterval      int
+	clientName          string
+	reportMode          string
+	reconnectInterval   int
+	pingInterval        int
+	mountInclude        string
+	mountExclude        string
+	nicInclude          string
+	nicExclude          string
+	allowHostLoad       bool
+	hostCPUCores        int
+	enableGPU           bool
+	logLevelName        string
+	publicIPv4ProbeURLs = []string{
 		"https://api.ipify.org",
 		"https://ipv4.icanhazip.com",
 	}
@@ -177,31 +214,39 @@ type Report struct {
 	// 容器，/proc/loadavg 直接透传宿主机数值）。序列化成 null，服务端据此跳过负载告警。
 	// 不能报 0——0 会被读成「空闲」，比报错值更误导。
 	Load *float64 `json:"load"`
-	Temp *float64 `json:"temp"`
+	// Load5/Load15 与 Load 同门控：可信才赋值，否则保持 nil（序列化成 null）。
+	// Load（Load1）保留做兼容，老链路行为不变。
+	Load5  *float64 `json:"load5"`
+	Load15 *float64 `json:"load15"`
+	Temp   *float64 `json:"temp"`
 	// A nil disk or uptime value is unavailable, including host data that
 	// cannot be attributed to the current container. Keep JSON null explicit.
-	Disk                *int64               `json:"disk"`
-	DiskTotal           *int64               `json:"disk_total"`
-	DiskSource          string               `json:"disk_source,omitempty"`
-	DiskSampledAt       int64                `json:"disk_sampled_at,omitempty"`
-	NetIn               int64                `json:"net_in"`
-	NetOut              int64                `json:"net_out"`
-	NetTotalUp          int64                `json:"net_total_up"`
-	NetTotalDown        int64                `json:"net_total_down"`
-	ProcessCount        int                  `json:"process_count"`
-	Connections         int                  `json:"connections"`
-	ConnectionsUdp      int                  `json:"connections_udp"`
-	Uptime              *int64               `json:"uptime"`
-	Version             string               `json:"version"`
-	Name                string               `json:"name,omitempty"`
-	ReportInterval      int                  `json:"report_interval,omitempty"`
-	Timestamp           int64                `json:"timestamp,omitempty"`
-	IPv4                string               `json:"ipv4,omitempty"`
-	IPv6                string               `json:"ipv6,omitempty"`
-	GPUs                []GPUInfo            `json:"gpus,omitempty"`
-	BasicInfo           *BasicInfo           `json:"basic_info,omitempty"`
-	PingResults         []PingResult         `json:"ping_results,omitempty"`
-	WebsiteProbeResults []WebsiteProbeResult `json:"website_probe_results,omitempty"`
+	Disk      *int64 `json:"disk"`
+	DiskTotal *int64 `json:"disk_total"`
+	NetIn     int64  `json:"net_in"`
+	NetOut    int64  `json:"net_out"`
+	// NetTotalUp/Down 是各网卡自开机以来的累计字节数（不含任何周期聚合）。
+	// 面板展示的月度流量由服务端用 TrafficSample 换算后覆盖这两个字段；
+	// 对没有流量账本的旧服务端，它们保持原始累计值。
+	NetTotalUp   int64 `json:"net_total_up"`
+	NetTotalDown int64 `json:"net_total_down"`
+	// TrafficSample 是各网卡的累计读数，服务端据此换算增量并记入每日流量。
+	// TrafficImport 只在存在旧版本地历史时、在服务端确认前随上报发送。
+	TrafficSample  *TrafficSample `json:"traffic_sample,omitempty"`
+	TrafficImport  *TrafficImport `json:"traffic_import,omitempty"`
+	ProcessCount   int            `json:"process_count"`
+	Connections    int            `json:"connections"`
+	ConnectionsUdp int            `json:"connections_udp"`
+	Uptime         *int64         `json:"uptime"`
+	Version        string         `json:"version"`
+	Name           string         `json:"name,omitempty"`
+	ReportInterval int            `json:"report_interval,omitempty"`
+	Timestamp      int64          `json:"timestamp,omitempty"`
+	IPv4           string         `json:"ipv4,omitempty"`
+	IPv6           string         `json:"ipv6,omitempty"`
+	GPUs           []GPUInfo      `json:"gpus,omitempty"`
+	BasicInfo      *BasicInfo     `json:"basic_info,omitempty"`
+	PingResults    []PingResult   `json:"ping_results,omitempty"`
 
 	hasRawNetTotals bool
 	rawNetTotalUp   int64
@@ -210,11 +255,10 @@ type Report struct {
 	// 不能只靠上面的汇总标量做差：一旦参与统计的接口集合发生变化
 	//（隧道/VPN 接口起来、容器网卡出现），汇总值会跳增该接口的历史累计流量，
 	// 被当成一个采样周期内的增量，算出几百 MB/s 的荒谬速率。
-	netPerInterface     map[string]interfaceCounters
-	pingResultLeases    map[int]uint64
-	websiteResultLeases map[int]uint64
-	basicInfoOwner      *reportPreparer
-	basicInfoRevision   uint64
+	netPerInterface   map[string]interfaceCounters
+	pingResultSeqs    []uint64
+	basicInfoOwner    *reportPreparer
+	basicInfoRevision uint64
 }
 
 // interfaceCounters 是单个网卡的累计收发字节数。
@@ -242,42 +286,24 @@ type GPUInfo struct {
 }
 
 type PingTask struct {
-	ID          int      `json:"id"`
-	Name        string   `json:"name"`
-	Type        string   `json:"type"`
-	Target      string   `json:"target"`
-	IntervalSec int      `json:"interval_sec"`
-	Clients     []string `json:"clients"`
-	AllClients  jsonBool `json:"all_clients"`
+	ID          int    `json:"id"`
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	Target      string `json:"target"`
+	IntervalSec int    `json:"interval_sec"`
+	// TimeoutMS 是该任务在目标节点上的探测硬期限；超过即按丢包上报。
+	// 老服务端不下发该字段时按 defaultPingTimeoutMS 处理。
+	TimeoutMS  int      `json:"timeout_ms"`
+	Clients    []string `json:"clients"`
+	AllClients jsonBool `json:"all_clients"`
 }
 
 type PingResult struct {
 	TaskID int     `json:"task_id"`
 	Value  float64 `json:"value"`
-}
-
-type WebsiteProbeTask struct {
-	ID                int    `json:"id"`
-	ConfigRevision    string `json:"config_revision"`
-	Name              string `json:"name"`
-	URL               string `json:"url"`
-	Method            string `json:"method"`
-	ExpectedStatusMin int    `json:"expected_status_min"`
-	ExpectedStatusMax int    `json:"expected_status_max"`
-	TimeoutSec        int    `json:"timeout_sec"`
-	IntervalSec       int    `json:"interval_sec"`
-}
-
-type WebsiteProbeResult struct {
-	MonitorID       int     `json:"monitor_id"`
-	ConfigRevision  string  `json:"config_revision"`
-	OK              bool    `json:"ok"`
-	EffectiveStatus string  `json:"effective_status"`
-	EffectiveReason string  `json:"effective_reason"`
-	StatusCode      *int    `json:"status_code"`
-	RawStatusCode   *int    `json:"raw_status_code"`
-	LatencyMS       int64   `json:"latency_ms"`
-	Error           *string `json:"error"`
+	// Timestamp 是这次探测的开始时间（Unix 毫秒）。探测结果会先在本地积压，
+	// 等到下一次常规上报才发送，所以接收端必须按它而不是上报时间记录这条结果。
+	Timestamp int64 `json:"timestamp,omitempty"`
 }
 
 type jsonBool bool
@@ -305,10 +331,6 @@ type pingTaskScheduler struct {
 	lastRunByTaskID map[int]time.Time
 }
 
-type websiteProbeScheduler struct {
-	lastRunByTaskID map[int]time.Time
-}
-
 func newPingTaskScheduler() *pingTaskScheduler {
 	return &pingTaskScheduler{lastRunByTaskID: make(map[int]time.Time)}
 }
@@ -318,14 +340,6 @@ func pingTaskInterval(task PingTask) time.Duration {
 	if interval < 1 {
 		interval = pingInterval
 	}
-	if interval < 1 {
-		interval = defaultPingIntervalSec
-	}
-	return time.Duration(interval) * time.Second
-}
-
-func websiteProbeInterval(task WebsiteProbeTask) time.Duration {
-	interval := task.IntervalSec
 	if interval < 1 {
 		interval = defaultPingIntervalSec
 	}
@@ -365,35 +379,6 @@ func (s *pingTaskScheduler) dueTasks(tasks []PingTask, now time.Time, blocked ..
 	return due
 }
 
-func (s *websiteProbeScheduler) dueTasks(tasks []WebsiteProbeTask, now time.Time, blocked ...map[int]bool) []WebsiteProbeTask {
-	if s.lastRunByTaskID == nil {
-		s.lastRunByTaskID = make(map[int]time.Time)
-	}
-	seen := make(map[int]struct{}, len(tasks))
-	due := make([]WebsiteProbeTask, 0, len(tasks))
-	for _, task := range tasks {
-		if task.ID <= 0 {
-			continue
-		}
-		seen[task.ID] = struct{}{}
-		if len(blocked) > 0 && blocked[0][task.ID] {
-			continue
-		}
-		lastRun, ok := s.lastRunByTaskID[task.ID]
-		if ok && now.Sub(lastRun) < websiteProbeInterval(task) {
-			continue
-		}
-		s.lastRunByTaskID[task.ID] = now
-		due = append(due, task)
-	}
-	for taskID := range s.lastRunByTaskID {
-		if _, ok := seen[taskID]; !ok {
-			delete(s.lastRunByTaskID, taskID)
-		}
-	}
-	return due
-}
-
 type reportEnvelope struct {
 	Type string `json:"type"`
 	Data Report `json:"data"`
@@ -405,23 +390,22 @@ type reportsEnvelope struct {
 }
 
 type serverMessage struct {
-	Type              string             `json:"type"`
-	Timestamp         int64              `json:"timestamp,omitempty"`
-	Mode              string             `json:"mode,omitempty"`
-	SampleIntervalSec int                `json:"sample_interval_sec,omitempty"`
-	ReportIntervalSec int                `json:"report_interval_sec,omitempty"`
-	PingIntervalSec   int                `json:"ping_interval_sec,omitempty"`
-	PingPolicyVersion string             `json:"ping_policy_version,omitempty"`
-	PingTasks         []PingTask         `json:"ping_tasks,omitempty"`
-	WebsiteProbeTasks []WebsiteProbeTask `json:"website_probe_tasks,omitempty"`
-	ReportNow         bool               `json:"report_now,omitempty"`
-	ViewerCount       int                `json:"viewer_count,omitempty"`
-	ViewerTTLSec      int                `json:"viewer_ttl_sec,omitempty"`
-	PolicyTTL         int                `json:"policy_ttl_sec,omitempty"`
-	IdlePolicyTTL     int                `json:"idle_policy_ttl_sec,omitempty"`
-	// 指针：字段缺席表示「后台没有这个节点的重置日」，此时保留本地取值，
-	// 不能被一个默认 1 悄悄改掉安装时指定的 --traffic-reset-day。
-	TrafficResetDay *int `json:"traffic_reset_day,omitempty"`
+	Type              string     `json:"type"`
+	Code              string     `json:"code,omitempty"`
+	Timestamp         int64      `json:"timestamp,omitempty"`
+	Mode              string     `json:"mode,omitempty"`
+	SampleIntervalSec int        `json:"sample_interval_sec,omitempty"`
+	ReportIntervalSec int        `json:"report_interval_sec,omitempty"`
+	PingIntervalSec   int        `json:"ping_interval_sec,omitempty"`
+	PingPolicyVersion string     `json:"ping_policy_version,omitempty"`
+	PingTasks         []PingTask `json:"ping_tasks,omitempty"`
+	ReportNow         bool       `json:"report_now,omitempty"`
+	ViewerCount       int        `json:"viewer_count,omitempty"`
+	ViewerTTLSec      int        `json:"viewer_ttl_sec,omitempty"`
+	PolicyTTL         int        `json:"policy_ttl_sec,omitempty"`
+	IdlePolicyTTL     int        `json:"idle_policy_ttl_sec,omitempty"`
+	// TrafficImported 出现在 ack / HTTP 响应里：服务端已入库旧版本地流量历史，可以改名旧状态文件。
+	TrafficImported bool `json:"traffic_imported,omitempty"`
 }
 
 type agentPolicy = serverMessage
@@ -441,28 +425,22 @@ type reportPreparer struct {
 }
 
 type pingReportState struct {
-	mu               sync.Mutex
-	scheduler        *pingTaskScheduler
-	websiteScheduler *websiteProbeScheduler
-	tasks            []PingTask
-	websiteTasks     []WebsiteProbeTask
-	policyVersion    string
-	intervalSec      int
-	pendingPing      map[int]*queuedPingResult
-	pendingWebsites  map[int]*queuedWebsiteResult
-	pingOrder        []int
-	websiteOrder     []int
-	nextResultID     uint64
-	retryQueue       []Report
-	ctx              context.Context
-	cancel           context.CancelFunc
-	probeWake        chan struct{}
-	probeDone        chan struct{}
-	probeWorkers     sync.WaitGroup
-	runningPing      map[int]*probeRun
-	runningWebsites  map[int]*probeRun
-	activeProbes     int
-	preferWebsite    bool
+	mu            sync.Mutex
+	scheduler     *pingTaskScheduler
+	tasks         []PingTask
+	policyVersion string
+	intervalSec   int
+	pendingPing   map[int][]*queuedPingResult
+	pingOrder     []int
+	nextResultID  uint64
+	retryQueue    []Report
+	ctx           context.Context
+	cancel        context.CancelFunc
+	probeWake     chan struct{}
+	probeDone     chan struct{}
+	probeWorkers  sync.WaitGroup
+	runningPing   map[int]*probeRun
+	activeProbes  int
 }
 
 type safeWebSocketConn struct {
@@ -480,24 +458,24 @@ func init() {
 	flag.StringVar(&reportMode, "mode", "websocket", "Report mode: websocket or http")
 	flag.IntVar(&reconnectInterval, "reconnect-interval", 5, "WebSocket reconnect interval in seconds")
 	flag.IntVar(&pingInterval, "ping-interval", defaultPingIntervalSec, "Ping task poll interval in seconds")
-	flag.IntVar(&trafficResetDay, "traffic-reset-day", 1, "Monthly traffic reset day for network totals, from 1 to 31")
 	flag.StringVar(&mountInclude, "mount-include", "", "Comma-separated mountpoint/device patterns to include in disk totals, for example /,/data,/dev/sd*")
 	flag.StringVar(&mountExclude, "mount-exclude", "", "Comma-separated mountpoint/device patterns to exclude from disk totals, for example /boot,tmpfs,/run")
-	flag.Var(&containerDiskTotalBytes, "container-disk-total-bytes", "Verified container root disk allocation in decimal bytes, used only when automatic capacity is unavailable (0 = automatic)")
-	flag.StringVar(&diskUsageFile, "disk-usage-file", "", "Read a root-owned container file allocation cache (empty = disabled)")
-	flag.String("disk-usage-collector", "", "Local-only root disk collector for SERVICE_NAME; does not start the Agent")
-	flag.Bool("disk-usage-once", false, "With --disk-usage-collector, collect one sample and exit")
-	flag.Bool("disk-usage-check", false, "Check whether root directory collection is required (exit 0 required, 3 not required)")
 	flag.StringVar(&nicInclude, "nic-include", "", "Comma-separated network interface patterns to include in traffic totals, for example eth*,ens*")
+	flag.BoolVar(&allowHostLoad, "allow-host-load", true, "In containers whose /proc/loadavg is the host's (no lxcfs loadavg), report the host load average; pass --allow-host-load=false to leave load unavailable there")
+	flag.IntVar(&hostCPUCores, "host-cpu-cores", 0, "Host CPU core count; with --allow-host-load, host load is scaled to this container's core count so load/cores reflects host utilization (0 = report the raw host load)")
 	flag.StringVar(&nicExclude, "nic-exclude", "", "Comma-separated network interface patterns to exclude from traffic totals, for example lo,docker*,veth*")
+	flag.StringVar(&logLevelName, "log-level", "info", "Log level: debug, info, warn or error (routine report/ack lines are debug; debug/info go to stdout, warn/error to stderr)")
+	flag.BoolVar(&enableGPU, "enable-gpu", false, "Probe and report GPUs (runs nvidia-smi / rocm-smi); off by default")
 }
 
 func main() {
-	if handled, code := handleDirectoryCollectorCLI(os.Args[1:], os.Stderr); handled {
-		os.Exit(code)
-	}
 	flag.Parse()
 	applyEnvDefaults()
+	if level, err := parseLogLevel(logLevelName); err != nil {
+		logFatalf("%v", err)
+	} else {
+		currentLogLevel.Store(level)
+	}
 
 	if reportInterval < int(minReportInterval/time.Second) {
 		reportInterval = int(minReportInterval / time.Second)
@@ -508,43 +486,47 @@ func main() {
 	if pingInterval < 1 {
 		pingInterval = defaultPingIntervalSec
 	}
-	trafficResetDay = normalizeTrafficResetDay(trafficResetDay)
 
 	normalizedServer, err := normalizeServerURL(serverURL)
 	if err != nil {
-		log.Fatalf("invalid server URL: %v", err)
+		logFatalf("invalid server URL: %v", err)
 	}
 	serverURL = normalizedServer
 	reportMode = strings.ToLower(strings.TrimSpace(reportMode))
 
 	if token == "" {
-		log.Fatal("missing token: pass --token or set CF_MONITOR_TOKEN")
+		logFatalf("missing token: pass --token or set CF_MONITOR_TOKEN")
 	}
-	trafficTracker = newTrafficResetTracker(trafficResetDay, token, trafficCounterScope())
-	trafficResetDay = trafficTracker.resetDay
+	legacyImport = loadLegacyTrafficImport(trafficStatePath(), time.Now())
 
-	log.Printf("CF VPS Monitor Agent %s", Version)
-	log.Printf("server: %s", serverURL)
-	log.Printf("interval: %ds", reportInterval)
-	log.Printf("mode: %s", reportMode)
-	log.Printf("ping interval: every %ds", pingInterval)
-	log.Printf("traffic reset day: %d", trafficResetDay)
+	logInfof("CF VPS Monitor Agent %s", Version)
+	logInfof("server: %s", serverURL)
+	logInfof("interval: %ds", reportInterval)
+	logInfof("mode: %s", reportMode)
+	logInfof("ping interval: every %ds", pingInterval)
+	logInfof("traffic: counters are reported as-is; daily totals and the reset day are kept on the server")
 	logFilter("disk include", mountInclude)
 	logFilter("disk exclude", mountExclude)
-	if containerDiskTotalBytes > 0 {
-		log.Printf("configured container root disk allocation: %d bytes; this does not measure used space", containerDiskTotalBytes)
-	}
 	logFilter("network include", nicInclude)
 	logFilter("network exclude", nicExclude)
+	if enableGPU {
+		logInfof("GPU collection enabled (--enable-gpu)")
+	}
+
+	// Cancellation from SIGINT/SIGTERM is propagated into the reporter loops so
+	// sampling and reconnect waits exit promptly instead of sleeping out.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	switch reportMode {
 	case "websocket", "ws":
-		runWebSocketReporter()
+		runWebSocketReporter(ctx)
 	case "http":
-		runHTTPReporter()
+		runHTTPReporter(ctx)
 	default:
-		log.Fatalf("unsupported mode %q, expected websocket or http", reportMode)
+		logFatalf("unsupported mode %q, expected websocket or http", reportMode)
 	}
+	logInfof("shutdown complete")
 }
 
 func applyEnvDefaults() {
@@ -557,6 +539,9 @@ func applyEnvDefaults() {
 	if clientName == "" {
 		clientName = os.Getenv("CF_MONITOR_NAME")
 	}
+	if level := os.Getenv("CF_MONITOR_LOG_LEVEL"); !flagWasSet("log-level") && level != "" {
+		logLevelName = level
+	}
 	if mode := os.Getenv("CF_MONITOR_MODE"); !flagWasSet("mode") && mode != "" {
 		reportMode = mode
 	}
@@ -566,26 +551,32 @@ func applyEnvDefaults() {
 	if mountExclude == "" {
 		mountExclude = os.Getenv("CF_MONITOR_MOUNT_EXCLUDE")
 	}
-	if !flagWasSet("container-disk-total-bytes") {
-		if value := strings.TrimSpace(os.Getenv("CF_MONITOR_CONTAINER_DISK_TOTAL_BYTES")); value != "" {
-			if err := containerDiskTotalBytes.Set(value); err != nil {
-				log.Fatalf("invalid CF_MONITOR_CONTAINER_DISK_TOTAL_BYTES: %v", err)
-			}
-		}
-	}
-	if !flagWasSet("disk-usage-file") {
-		diskUsageFile = os.Getenv("CF_MONITOR_DISK_USAGE_FILE")
-	}
 	if nicInclude == "" {
 		nicInclude = os.Getenv("CF_MONITOR_NIC_INCLUDE")
 	}
 	if nicExclude == "" {
 		nicExclude = os.Getenv("CF_MONITOR_NIC_EXCLUDE")
 	}
-	if !flagWasSet("traffic-reset-day") {
-		if value := strings.TrimSpace(os.Getenv("CF_MONITOR_TRAFFIC_RESET_DAY")); value != "" {
-			if parsed, err := strconv.Atoi(value); err == nil {
-				trafficResetDay = parsed
+	if !flagWasSet("allow-host-load") {
+		switch strings.ToLower(strings.TrimSpace(os.Getenv("CF_MONITOR_ALLOW_HOST_LOAD"))) {
+		case "1", "true", "yes", "on":
+			allowHostLoad = true
+		case "0", "false", "no", "off":
+			allowHostLoad = false
+		}
+	}
+	if !flagWasSet("enable-gpu") {
+		switch strings.ToLower(strings.TrimSpace(os.Getenv("CF_MONITOR_ENABLE_GPU"))) {
+		case "1", "true", "yes", "on":
+			enableGPU = true
+		case "0", "false", "no", "off":
+			enableGPU = false
+		}
+	}
+	if !flagWasSet("host-cpu-cores") {
+		if value := strings.TrimSpace(os.Getenv("CF_MONITOR_HOST_CPU_CORES")); value != "" {
+			if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+				hostCPUCores = parsed
 			}
 		}
 	}
@@ -604,7 +595,7 @@ func flagWasSet(name string) bool {
 func logFilter(label string, value string) {
 	value = strings.TrimSpace(value)
 	if value != "" {
-		log.Printf("%s: %s", label, value)
+		logInfof("%s: %s", label, value)
 	}
 }
 
@@ -690,13 +681,13 @@ func detectNvidiaGPU() ([]string, []GPUInfo) {
 		"--format=csv,noheader,nounits",
 	)
 	if err != nil {
-		log.Printf("nvidia-smi query failed: %v", err)
+		logWarnf("nvidia-smi query failed: %v", err)
 		return nil, nil
 	}
 
 	names, details := parseNvidiaGPUOutput(string(output))
 	for _, detail := range details {
-		log.Printf("GPU[%d] %s: util=%.1f%% mem=%d/%dMiB temp=%dC",
+		logDebugf("GPU[%d] %s: util=%.1f%% mem=%d/%dMiB temp=%dC",
 			detail.DeviceIndex,
 			detail.DeviceName,
 			detail.Utilization,
@@ -806,7 +797,7 @@ func detectAMDGPU() ([]string, []GPUInfo) {
 
 	output, err := runBoundedCommand(context.Background(), auxiliaryCommandTimeout, rocmSmi, "--showproductname", "--showmeminfo", "vram", "--showuse", "--showtemp")
 	if err != nil {
-		log.Printf("rocm-smi query failed: %v", err)
+		logWarnf("rocm-smi query failed: %v", err)
 		return nil, nil
 	}
 
@@ -818,13 +809,11 @@ func detectAMDGPU() ([]string, []GPUInfo) {
 func newPingReportState() *pingReportState {
 	ctx, cancel := context.WithCancel(context.Background())
 	state := &pingReportState{
-		scheduler:        newPingTaskScheduler(),
-		websiteScheduler: &websiteProbeScheduler{lastRunByTaskID: make(map[int]time.Time)},
-		intervalSec:      defaultPingIntervalSec,
-		pendingPing:      make(map[int]*queuedPingResult),
-		pendingWebsites:  make(map[int]*queuedWebsiteResult),
-		ctx:              ctx, cancel: cancel, probeWake: make(chan struct{}, 1), probeDone: make(chan struct{}),
-		runningPing: make(map[int]*probeRun), runningWebsites: make(map[int]*probeRun), preferWebsite: true,
+		scheduler:   newPingTaskScheduler(),
+		intervalSec: defaultPingIntervalSec,
+		pendingPing: make(map[int][]*queuedPingResult),
+		ctx:         ctx, cancel: cancel, probeWake: make(chan struct{}, 1), probeDone: make(chan struct{}),
+		runningPing: make(map[int]*probeRun),
 	}
 	go state.runProbeScheduler()
 	return state
@@ -847,21 +836,15 @@ func (s *pingReportState) applyPolicy(policy agentPolicy) {
 		if task.IntervalSec < 1 {
 			task.IntervalSec = s.intervalSec
 		}
+		task.TimeoutMS = int(normalizePingTimeout(task.TimeoutMS) / time.Millisecond)
 		tasks = append(tasks, task)
 	}
-	websiteTasks := make([]WebsiteProbeTask, 0, len(policy.WebsiteProbeTasks))
-	for _, task := range policy.WebsiteProbeTasks {
-		if task.IntervalSec < 1 {
-			task.IntervalSec = s.intervalSec
-		}
-		websiteTasks = append(websiteTasks, task)
-	}
-	s.invalidateResultsForPolicyLocked(tasks, websiteTasks)
-	s.tasks, s.websiteTasks = tasks, websiteTasks
+	s.invalidateResultsForPolicyLocked(tasks)
+	s.tasks = tasks
 	s.policyVersion = policy.PingPolicyVersion
 	s.signalProbeScheduler()
-	if len(tasks) > 0 || len(websiteTasks) > 0 {
-		log.Printf("policy updated: %d ping task(s), %d website probe(s), interval=%ds, version=%s", len(tasks), len(websiteTasks), s.intervalSec, s.policyVersion)
+	if len(tasks) > 0 {
+		logInfof("policy updated: %d ping task(s), interval=%ds, version=%s", len(tasks), s.intervalSec, s.policyVersion)
 	}
 }
 
@@ -993,36 +976,64 @@ func dialResolvedTCP(ctx context.Context, network string, ips []net.IP, port str
 	return nil, fmt.Errorf("no dialable IP addresses")
 }
 
-func executeICMPPing(target string) float64 {
-	return executeICMPPingWithContext(context.Background(), target)
+// normalizePingTimeout 把任务超时限制在服务端允许的范围内；
+// 老任务没有 timeout_ms 时使用默认值，保证升级后行为可预期。
+func normalizePingTimeout(timeoutMS int) time.Duration {
+	if timeoutMS <= 0 {
+		timeoutMS = defaultPingTimeoutMS
+	}
+	if timeoutMS < minPingTimeoutMS {
+		timeoutMS = minPingTimeoutMS
+	}
+	if timeoutMS > maxPingTimeoutMS {
+		timeoutMS = maxPingTimeoutMS
+	}
+	return time.Duration(timeoutMS) * time.Millisecond
 }
 
-func executeICMPPingWithContext(parent context.Context, target string) float64 {
-	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
-	defer cancel()
-	ips, err := resolvePublicIPsForPing(ctx, target)
+func executeICMPPing(target string) float64 {
+	return executeICMPPingWithContext(context.Background(), target, defaultPingTimeoutMS)
+}
+
+func executeICMPPingWithContext(parent context.Context, target string, timeoutMS int) float64 {
+	timeout := normalizePingTimeout(timeoutMS)
+	// DNS 只用于取得目标 IP，不参与延迟计时；单独限时避免域名解析无限挂起。
+	resolveCtx, cancelResolve := context.WithTimeout(parent, pingResolveTimeout)
+	ips, err := resolvePublicIPsForPing(resolveCtx, target)
+	cancelResolve()
 	if err != nil {
-		log.Printf("ICMP target resolution failed for %q: %v", target, err)
+		logWarnf("ICMP target resolution failed for %q: %v", target, err)
 		return -1
 	}
-	program, args, err := icmpPingCommand(runtime.GOOS, ips[0])
+	program, args, err := icmpPingCommand(runtime.GOOS, ips[0], timeout)
 	if err != nil {
-		log.Printf("ICMP command unavailable for %q: %v", target, err)
+		logWarnf("ICMP command unavailable for %q: %v", target, err)
 		return -1
 	}
 	started := time.Now()
-	output, err := runBoundedCommand(ctx, 2*time.Second, program, args...)
-	if err != nil {
-		log.Printf("ICMP ping failed for %q: %v: %s", target, err, strings.TrimSpace(string(output)))
+	output, err := runBoundedCommand(parent, timeout, program, args...)
+	elapsed := time.Since(started)
+	if err != nil || elapsed > timeout {
+		logWarnf("ICMP ping failed for %q (timeout %s): %v: %s", target, timeout, err, strings.TrimSpace(string(output)))
 		return -1
 	}
-	return float64(time.Since(started).Milliseconds())
+	return float64(elapsed.Milliseconds())
 }
 
 func executeTCPPing(target string) float64 {
-	value, err := executeTCPProbeWithContext(context.Background(), target, 3*time.Second)
+	return executeTCPPingWithContext(context.Background(), target, defaultPingTimeoutMS)
+}
+
+// executeTCPPingWithContext 是调度器实际使用的 TCP 延迟测量。
+// 连接耗时超过任务 timeout_ms 即按丢包(-1)上报，不再做 >1000ms 的补测。
+func executeTCPPingWithContext(ctx context.Context, target string, timeoutMS int) float64 {
+	timeout := normalizePingTimeout(timeoutMS)
+	value, err := executeTCPProbeWithContext(ctx, target, timeout)
 	if err != nil {
-		log.Printf("TCP ping failed for %q: %v", target, err)
+		if ctx.Err() == nil {
+			logWarnf("TCP ping failed for %q (timeout %s): %v", target, timeout, err)
+		}
+		return -1
 	}
 	return value
 }
@@ -1032,28 +1043,33 @@ func executeTCPProbeWithContext(parent context.Context, target string, timeout t
 	if err != nil {
 		return -1, err
 	}
+	// 名称解析不计入 TCP 连接延迟，也不占用任务超时预算。
+	resolveCtx, cancelResolve := context.WithTimeout(parent, pingResolveTimeout)
+	ips, err := resolvePublicIPsForPing(resolveCtx, host)
+	cancelResolve()
+	if err != nil {
+		return -1, fmt.Errorf("DNS resolution for %s: %w", address, err)
+	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	ips, err := resolvePublicIPsForPing(ctx, host)
-	if err != nil {
-		return -1, fmt.Errorf("%s: %w", address, err)
-	}
-	// The budget includes DNS, but TCP latency still measures only the connect phase.
 	started := time.Now()
 	conn, err := dialResolvedTCP(ctx, "tcp", ips, port, timeout)
-	elapsed := time.Since(started).Milliseconds()
+	elapsed := time.Since(started)
 	if err != nil {
-		return -1, err
+		return -1, fmt.Errorf("TCP connect to %s: %w", address, err)
 	}
 	_ = conn.Close()
-	return float64(elapsed), nil
+	if elapsed > timeout {
+		return -1, fmt.Errorf("TCP connect to %s exceeded %s", address, timeout)
+	}
+	return float64(elapsed.Milliseconds()), nil
 }
 
 func executeHTTPPing(target string) float64 {
-	return executeHTTPPingWithContext(context.Background(), target)
+	return executeHTTPPingWithContext(context.Background(), target, defaultPingTimeoutMS)
 }
 
-func executeHTTPPingWithContext(parent context.Context, target string) float64 {
+func executeHTTPPingWithContext(parent context.Context, target string, timeoutMS int) float64 {
 	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
 		target = "https://" + target
 	}
@@ -1061,14 +1077,15 @@ func executeHTTPPingWithContext(parent context.Context, target string) float64 {
 	if err != nil || parsed.Hostname() == "" {
 		return -1
 	}
-	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	timeout := normalizePingTimeout(timeoutMS)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
 		return -1
 	}
 	started := time.Now()
-	client := &http.Client{Timeout: 5 * time.Second, Transport: publicHTTPTransport(5 * time.Second)}
+	client := &http.Client{Timeout: timeout, Transport: publicHTTPTransport(timeout)}
 	defer client.CloseIdleConnections()
 	response, err := client.Do(request)
 	if err != nil {
@@ -1078,129 +1095,11 @@ func executeHTTPPingWithContext(parent context.Context, target string) float64 {
 	if response.StatusCode >= 400 {
 		return -1
 	}
-	return float64(time.Since(started).Milliseconds())
-}
-
-func intPtr(value int) *int {
-	return &value
-}
-
-func stringPtr(value string) *string {
-	return &value
-}
-
-func normalizeWebsiteProbeHTTPResult(task WebsiteProbeTask, status int, latency int64) WebsiteProbeResult {
-	minStatus := task.ExpectedStatusMin
-	if minStatus < 100 {
-		minStatus = 200
+	elapsed := time.Since(started)
+	if elapsed > timeout {
+		return -1
 	}
-	maxStatus := task.ExpectedStatusMax
-	if maxStatus < minStatus || maxStatus > 599 {
-		maxStatus = 399
-	}
-	inRange := status >= minStatus && status <= maxStatus
-	challengeReachable := minStatus == 200 && maxStatus == 399 && (status == http.StatusUnauthorized || status == http.StatusForbidden || status == http.StatusMethodNotAllowed || status == http.StatusPreconditionFailed || status == http.StatusTooManyRequests)
-	ok := inRange || challengeReachable
-	reason := "http_status_mismatch"
-	if inRange {
-		reason = "status_in_expected_range"
-	} else if challengeReachable {
-		reason = "reachable_challenge"
-	}
-	result := WebsiteProbeResult{
-		MonitorID:       task.ID,
-		ConfigRevision:  task.ConfigRevision,
-		OK:              ok,
-		EffectiveStatus: "down",
-		EffectiveReason: reason,
-		StatusCode:      intPtr(status),
-		RawStatusCode:   intPtr(status),
-		LatencyMS:       latency,
-	}
-	if ok {
-		result.EffectiveStatus = "up"
-		return result
-	}
-	result.Error = stringPtr(fmt.Sprintf("http_%d", status))
-	return result
-}
-
-func websiteProbeError(task WebsiteProbeTask, latency int64, reason string) WebsiteProbeResult {
-	return WebsiteProbeResult{
-		MonitorID:       task.ID,
-		ConfigRevision:  task.ConfigRevision,
-		OK:              false,
-		EffectiveStatus: "down",
-		EffectiveReason: reason,
-		LatencyMS:       latency,
-		Error:           stringPtr(reason),
-	}
-}
-
-func websiteProbeTimeout(task WebsiteProbeTask) time.Duration {
-	seconds := task.TimeoutSec
-	if seconds <= 0 {
-		seconds = 5
-	}
-	if seconds > 30 {
-		seconds = 30
-	}
-	return time.Duration(seconds) * time.Second
-}
-
-func probeFailureReason(err error) string {
-	var networkError net.Error
-	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &networkError) && networkError.Timeout()) || strings.Contains(strings.ToLower(err.Error()), "timeout") {
-		return "timeout"
-	}
-	return "network_error"
-}
-
-func executeWebsiteHTTPProbe(task WebsiteProbeTask) WebsiteProbeResult {
-	return executeWebsiteHTTPProbeWithContext(context.Background(), task)
-}
-
-func executeWebsiteHTTPProbeWithContext(ctx context.Context, task WebsiteProbeTask) WebsiteProbeResult {
-	timeout := websiteProbeTimeout(task)
-	client := &http.Client{Timeout: timeout, Transport: publicHTTPTransport(timeout)}
-	defer client.CloseIdleConnections()
-	return executeWebsiteHTTPProbeWithClientContext(ctx, task, client)
-}
-
-func executeWebsiteHTTPProbeWithClient(task WebsiteProbeTask, client *http.Client) WebsiteProbeResult {
-	return executeWebsiteHTTPProbeWithClientContext(context.Background(), task, client)
-}
-
-func executeWebsiteHTTPProbeWithClientContext(parent context.Context, task WebsiteProbeTask, client *http.Client) WebsiteProbeResult {
-	target := task.URL
-	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
-		target = "https://" + target
-	}
-	parsed, err := url.Parse(target)
-	if err != nil || parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return websiteProbeError(task, 0, "invalid_url")
-	}
-	method := strings.ToUpper(task.Method)
-	if method != http.MethodHead {
-		method = http.MethodGet
-	}
-	ctx, cancel := context.WithTimeout(parent, websiteProbeTimeout(task))
-	defer cancel()
-	started := time.Now()
-	request, err := http.NewRequestWithContext(ctx, method, parsed.String(), nil)
-	if err != nil {
-		return websiteProbeError(task, 0, "invalid_url")
-	}
-	request.Header.Set("User-Agent", "cf-vps-monitor-agent/"+Version)
-	response, err := client.Do(request)
-	if err != nil {
-		return websiteProbeError(task, time.Since(started).Milliseconds(), probeFailureReason(err))
-	}
-	defer response.Body.Close()
-	if _, err := io.Copy(io.Discard, io.LimitReader(response.Body, 512)); err != nil {
-		return websiteProbeError(task, time.Since(started).Milliseconds(), probeFailureReason(err))
-	}
-	return normalizeWebsiteProbeHTTPResult(task, response.StatusCode, time.Since(started).Milliseconds())
+	return float64(elapsed.Milliseconds())
 }
 
 func publicHTTPTransport(timeout time.Duration) *http.Transport {
@@ -1216,37 +1115,20 @@ func publicHTTPTransport(timeout time.Duration) *http.Transport {
 	return transport
 }
 
-func executeWebsiteTCPProbe(task WebsiteProbeTask) WebsiteProbeResult {
-	return executeWebsiteTCPProbeWithContext(context.Background(), task)
-}
-
-func executeWebsiteTCPProbeWithContext(ctx context.Context, task WebsiteProbeTask) WebsiteProbeResult {
-	target := task.URL
-	if strings.HasPrefix(strings.ToLower(target), "tcp://") {
-		parsed, err := url.Parse(target)
-		if err != nil || parsed.Hostname() == "" || parsed.Port() == "" {
-			return websiteProbeError(task, 0, "invalid_url")
-		}
-		target = net.JoinHostPort(parsed.Hostname(), parsed.Port())
-	}
-	started := time.Now()
-	value, err := executeTCPProbeWithContext(ctx, target, websiteProbeTimeout(task))
-	if err != nil {
-		return websiteProbeError(task, time.Since(started).Milliseconds(), probeFailureReason(err))
-	}
-	return WebsiteProbeResult{MonitorID: task.ID, ConfigRevision: task.ConfigRevision, OK: true, EffectiveStatus: "up", EffectiveReason: "tcp_connect", LatencyMS: int64(value)}
-}
-
 // ==================== Original Functions (Enhanced) ====================
 
-func runHTTPReporter() {
-	log.Println("HTTP reporter started")
-	preparer := &reportPreparer{}
+func runHTTPReporter(ctx context.Context) {
+	runHTTPReporterWithPreparer(ctx, &reportPreparer{})
+}
+
+func runHTTPReporterWithPreparer(ctx context.Context, preparer *reportPreparer) {
+	logInfof("HTTP reporter started")
 	pingState := newPingReportState()
 	defer pingState.close()
 	currentSampleInterval := normalizeReportDuration(time.Duration(reportInterval) * time.Second)
 	currentUploadInterval := currentSampleInterval
 	nextUploadAt := time.Now()
+	nextSampleAt := time.Now()
 	var pending []Report
 
 	// Policy caching — only refetch when TTL expires.
@@ -1255,8 +1137,13 @@ func runHTTPReporter() {
 	var policyExpiresAt time.Time
 
 	for {
+		if ctx.Err() != nil {
+			logInfof("HTTP reporter stopped")
+			return
+		}
+		collected := false
 		if time.Now().After(policyExpiresAt) {
-			if newPolicy, err := fetchAgentPolicy(); err == nil {
+			if newPolicy, err := fetchAgentPolicy(ctx); err == nil {
 				policy = newPolicy
 				// Pick TTL: use service-provided value, otherwise default idle=120s active=30s.
 				ttl := policy.IdlePolicyTTL
@@ -1271,14 +1158,14 @@ func runHTTPReporter() {
 				}
 				policyExpiresAt = time.Now().Add(time.Duration(ttl) * time.Second)
 				pingState.applyPolicy(policy)
-				applyTrafficResetDayPolicy(policy)
 				nextSampleInterval, nextUploadInterval := policyDurations(policy, currentSampleInterval)
 				if nextSampleInterval != currentSampleInterval || nextUploadInterval != currentUploadInterval {
 					currentSampleInterval = nextSampleInterval
 					currentUploadInterval = nextUploadInterval
 					reportInterval = int(currentSampleInterval / time.Second)
+					nextSampleAt = time.Now()
 					nextUploadAt = time.Now().Add(currentUploadInterval)
-					log.Printf("HTTP policy: mode=%s sample=%s upload=%s viewers=%d ttl=%ds cache=%ds",
+					logInfof("HTTP policy: mode=%s sample=%s upload=%s viewers=%d ttl=%ds cache=%ds",
 						policy.Mode,
 						currentSampleInterval,
 						currentUploadInterval,
@@ -1288,13 +1175,19 @@ func runHTTPReporter() {
 					)
 				}
 				if policy.ReportNow {
+					nextSampleAt = time.Now()
 					pending = append(pending, prepareReportsWithPing(preparer, pingState, currentSampleInterval)...)
-					_ = deliverHTTPReports(pingState, pending)
+					collected = true
+					_ = deliverHTTPReportsContext(ctx, pingState, pending)
 					pending = nil
-					nextUploadAt = time.Now().Add(currentUploadInterval)
+					nextUploadAt = nextReportDeadline(nextSampleAt.Add(currentUploadInterval), currentUploadInterval, time.Now())
 				}
 			} else {
-				log.Printf("HTTP policy fetch failed: %v", err)
+				if ctx.Err() != nil {
+					logInfof("HTTP reporter stopped")
+					return
+				}
+				logWarnf("HTTP policy fetch failed: %v", err)
 				// Keep current policy but force a short retry.
 				if policyExpiresAt.IsZero() {
 					policyExpiresAt = time.Now().Add(30 * time.Second)
@@ -1304,49 +1197,70 @@ func runHTTPReporter() {
 			}
 		}
 
-		pending = append(pending, prepareReportsWithPing(preparer, pingState, currentSampleInterval)...)
-		if currentUploadInterval <= currentSampleInterval || !time.Now().Before(nextUploadAt) {
-			_ = deliverHTTPReports(pingState, pending)
-			pending = nil
-			nextUploadAt = time.Now().Add(currentUploadInterval)
+		if !collected {
+			pending = append(pending, prepareReportsWithPing(preparer, pingState, currentSampleInterval)...)
 		}
-		time.Sleep(currentSampleInterval)
+		if len(pending) > 0 && (currentUploadInterval <= currentSampleInterval || !time.Now().Before(nextUploadAt)) {
+			_ = deliverHTTPReportsContext(ctx, pingState, pending)
+			pending = nil
+			nextUploadAt = nextReportDeadline(nextUploadAt, currentUploadInterval, time.Now())
+		}
+		nextSampleAt = nextReportDeadline(nextSampleAt, currentSampleInterval, time.Now())
+		if !waitForContext(ctx, time.Until(nextSampleAt)) {
+			logInfof("HTTP reporter stopped")
+			return
+		}
 	}
 }
 
-func runWebSocketReporter() {
+func runWebSocketReporter(ctx context.Context) {
 	endpoint, err := webSocketEndpoint(serverURL, token)
 	if err != nil {
-		log.Fatalf("invalid WebSocket endpoint: %v", err)
+		logFatalf("invalid WebSocket endpoint: %v", err)
 	}
 
-	log.Printf("WebSocket reporter started: %s", endpoint)
+	logInfof("WebSocket reporter started: %s", endpoint)
 	preparer := &reportPreparer{}
 	pingState := newPingReportState()
 	defer pingState.close()
 
 	for {
+		if ctx.Err() != nil {
+			logInfof("WebSocket reporter stopped")
+			return
+		}
 		conn, err := connectWebSocket(endpoint, token)
 		if err != nil {
 			delay := webSocketReconnectDelay(err)
-			log.Printf("WebSocket connect failed: %v; reconnecting in %s", err, delay)
-			time.Sleep(delay)
+			logWarnf("WebSocket connect failed: %v; reconnecting in %s", err, delay)
+			if !waitForContext(ctx, delay) {
+				logInfof("WebSocket reporter stopped")
+				return
+			}
 			continue
 		}
 
-		log.Println("WebSocket connected")
+		logInfof("WebSocket connected")
 		err = runWebSocketSession(
+			ctx,
 			conn,
 			preparer,
 			pingState,
 			time.Duration(reportInterval)*time.Second,
 			30*time.Second,
 		)
-		if err != nil {
-			log.Printf("WebSocket session ended: %v", err)
+		if err != nil && ctx.Err() == nil {
+			logWarnf("WebSocket session ended: %v", err)
 		}
-		log.Printf("reconnecting in %ds", reconnectInterval)
-		time.Sleep(time.Duration(reconnectInterval) * time.Second)
+		if ctx.Err() != nil {
+			logInfof("WebSocket reporter stopped")
+			return
+		}
+		logInfof("reconnecting in %ds", reconnectInterval)
+		if !waitForContext(ctx, time.Duration(reconnectInterval)*time.Second) {
+			logInfof("WebSocket reporter stopped")
+			return
+		}
 	}
 }
 
@@ -1358,6 +1272,7 @@ func webSocketReconnectDelay(err error) time.Duration {
 }
 
 func runWebSocketSession(
+	parent context.Context,
 	conn *safeWebSocketConn,
 	preparer *reportPreparer,
 	pingState *pingReportState,
@@ -1371,7 +1286,7 @@ func runWebSocketSession(
 	if err := conn.configureLiveness(heartbeatInterval); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parent)
 	done := make(chan error, 2) // Reader and heartbeat each send at most one failure.
 	policies := make(chan serverMessage, 8)
 	acks := make(chan struct{}, 1)
@@ -1411,6 +1326,7 @@ func runWebSocketSession(
 
 	currentInterval := normalizeReportDuration(dataInterval)
 	currentUploadInterval := currentInterval
+	startedAt := time.Now()
 	pending := prepareReportsWithPing(preparer, pingState, currentInterval)
 	var inFlight []Report
 	uploadReady := true
@@ -1427,7 +1343,7 @@ func runWebSocketSession(
 			<-acks
 		}
 		count := min(len(pending), maxReportsPerEnvelope)
-		inFlight = pingState.currentReportResults(pending[:count])
+		inFlight = attachTrafficImport(pingState.currentReportResults(pending[:count]))
 		pending = pending[count:]
 		uploadReady = len(pending) > 0
 		if err := sendWebSocketReports(conn, inFlight); err != nil {
@@ -1441,9 +1357,11 @@ func runWebSocketSession(
 	if err := flush(); err != nil {
 		return err
 	}
-	sampleTimer := time.NewTimer(currentInterval)
+	nextSampleAt := nextReportDeadline(startedAt.Add(currentInterval), currentInterval, time.Now())
+	nextUploadAt := nextReportDeadline(startedAt.Add(currentUploadInterval), currentUploadInterval, time.Now())
+	sampleTimer := time.NewTimer(time.Until(nextSampleAt))
 	defer sampleTimer.Stop()
-	uploadTimer := time.NewTimer(currentUploadInterval)
+	uploadTimer := time.NewTimer(time.Until(nextUploadAt))
 	defer uploadTimer.Stop()
 
 	for {
@@ -1455,15 +1373,18 @@ func runWebSocketSession(
 				if err := flush(); err != nil {
 					return err
 				}
-				resetTimer(uploadTimer, currentUploadInterval)
+				nextUploadAt = nextReportDeadline(nextUploadAt, currentUploadInterval, time.Now())
+				resetTimer(uploadTimer, time.Until(nextUploadAt))
 			}
-			resetTimer(sampleTimer, currentInterval)
+			nextSampleAt = nextReportDeadline(nextSampleAt, currentInterval, time.Now())
+			resetTimer(sampleTimer, time.Until(nextSampleAt))
 		case <-uploadTimer.C:
 			uploadReady = len(pending) > 0
 			if err := flush(); err != nil {
 				return err
 			}
-			resetTimer(uploadTimer, currentUploadInterval)
+			nextUploadAt = nextReportDeadline(nextUploadAt, currentUploadInterval, time.Now())
+			resetTimer(uploadTimer, time.Until(nextUploadAt))
 		case <-acks:
 			if len(inFlight) > 0 {
 				stopAckTimer()
@@ -1478,8 +1399,17 @@ func runWebSocketSession(
 				continue
 			}
 			pingState.applyPolicy(policy)
-			applyTrafficResetDayPolicy(policy)
-			currentInterval, currentUploadInterval = policyDurations(policy, currentInterval)
+			nextInterval, nextUploadInterval := policyDurations(policy, currentInterval)
+			now := time.Now()
+			resetSample := nextInterval != currentInterval || policy.ReportNow
+			resetUpload := nextUploadInterval != currentUploadInterval || policy.ReportNow
+			if resetSample {
+				nextSampleAt = now.Add(nextInterval)
+			}
+			if resetUpload {
+				nextUploadAt = now.Add(nextUploadInterval)
+			}
+			currentInterval, currentUploadInterval = nextInterval, nextUploadInterval
 			reportInterval = int(currentInterval / time.Second)
 			if policy.ReportNow {
 				pending = append(pending, prepareReportsWithPing(preparer, pingState, currentInterval)...)
@@ -1488,10 +1418,22 @@ func runWebSocketSession(
 					return err
 				}
 			}
-			resetTimer(sampleTimer, currentInterval)
-			resetTimer(uploadTimer, currentUploadInterval)
+			// Unchanged policy refreshes retain both deadlines, including overdue ones.
+			// ReportNow may itself take longer than an interval; do not catch up in a burst.
+			if policy.ReportNow {
+				nextSampleAt = nextReportDeadline(nextSampleAt, currentInterval, time.Now())
+				nextUploadAt = nextReportDeadline(nextUploadAt, currentUploadInterval, time.Now())
+			}
+			if resetSample {
+				resetTimer(sampleTimer, time.Until(nextSampleAt))
+			}
+			if resetUpload {
+				resetTimer(uploadTimer, time.Until(nextUploadAt))
+			}
 		case <-ackDeadline:
 			return errors.New("WebSocket report acknowledgement timed out")
+		case <-ctx.Done():
+			return ctx.Err()
 		case err := <-done:
 			return err
 		}
@@ -1522,14 +1464,38 @@ func intervalSeconds(interval time.Duration) int {
 	return int(normalizeReportDuration(interval) / time.Second)
 }
 
-func resetTimer(timer *time.Timer, interval time.Duration) {
+// nextReportDeadline keeps the original cadence and skips missed slots rather
+// than adding collection/network time to every period or catching up in a burst.
+func nextReportDeadline(deadline time.Time, interval time.Duration, now time.Time) time.Time {
+	interval = normalizeReportDuration(interval)
+	if !deadline.After(now) {
+		deadline = deadline.Add((now.Sub(deadline)/interval + 1) * interval)
+	}
+	return deadline
+}
+
+func resetTimer(timer *time.Timer, delay time.Duration) {
 	if !timer.Stop() {
 		select {
 		case <-timer.C:
 		default:
 		}
 	}
-	timer.Reset(normalizeReportDuration(interval))
+	timer.Reset(delay)
+}
+
+// waitForContext waits for d, but returns false as soon as ctx is cancelled.
+// Reporters use it instead of time.Sleep so shutdown does not wait out a full
+// sample or reconnect interval.
+func waitForContext(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func outboundIP(network, address string) string {
@@ -1623,7 +1589,7 @@ func fetchPublicIPFromURLs(ctx context.Context, client *http.Client, urls []stri
 		if err != nil {
 			continue
 		}
-		req.Header.Set("User-Agent", "cf-vps-monitor-agent/"+Version)
+		setAgentRequestHeaders(req)
 		resp, err := client.Do(req)
 		if err != nil {
 			continue
@@ -1744,8 +1710,12 @@ func getBasicInfo() BasicInfo {
 		info.DiskTotal = *diskTotal
 	}
 
-	// GPU detection
-	gpuName, gpuDetails := detectGPU()
+	// GPU detection（默认关闭，--enable-gpu 才探测；关闭时完全跳过：不出子进程，也不上报 GPU 字段）
+	var gpuName string
+	var gpuDetails []GPUInfo
+	if enableGPU {
+		gpuName, gpuDetails = detectGPU()
+	}
 	info.GPUName = gpuName
 
 	// Store detailed GPU info globally for reports
@@ -2355,9 +2325,9 @@ func trafficInterfaceSelection(counters []gnet.IOCountersStat) map[string]bool {
 
 	if changed {
 		if fingerprint == "" {
-			log.Printf("traffic interfaces: none matched (check --nic-include/--nic-exclude)")
+			logInfof("traffic interfaces: none matched (check --nic-include/--nic-exclude)")
 		} else {
-			log.Printf("traffic interfaces: %s", fingerprint)
+			logInfof("traffic interfaces: %s", fingerprint)
 		}
 	}
 	return selected
@@ -2540,8 +2510,9 @@ func evaluateLoadAverageTrust(root string) (bool, string) {
 		runtimeName, taskTotal, visibleThreads)
 }
 
-// loadAverageReportable 决定本轮是否上报负载。判定结果缓存，避免每个采样周期都扫 /proc。
-func loadAverageReportable() bool {
+// loadAverageTrusted 判断 /proc/loadavg 是否为本机（容器）自己的口径。判定结果缓存，
+// 避免每个采样周期都扫 /proc。
+func loadAverageTrusted() bool {
 	if runtime.GOOS != "linux" {
 		return true
 	}
@@ -2558,12 +2529,63 @@ func loadAverageReportable() bool {
 	loadAverageTrustStamp = time.Now()
 	if !trusted && !loadAverageTrustLogged {
 		loadAverageTrustLogged = true
-		log.Printf("load average is not container-local (%s); reporting load as unavailable", detail)
+		if allowHostLoad {
+			logInfof("load average is not container-local (%s); --allow-host-load is set, reporting host load", detail)
+		} else {
+			logWarnf("load average is not container-local (%s); reporting load as unavailable", detail)
+		}
 	}
 	if trusted {
 		loadAverageTrustLogged = false
 	}
 	return trusted
+}
+
+// loadAverageReportable 决定本轮是否上报负载：本机口径可信，或运维显式
+// 允许（--allow-host-load）容器上报宿主机负载（宿主机繁忙时容器同样受影响）。
+func loadAverageReportable() bool {
+	trusted := loadAverageTrusted()
+	return trusted || allowHostLoad
+}
+
+// hostLoadScaleFactor 把宿主机负载折算为"本容器核数口径"的系数：
+// 前端用 load / cpu_cores 着色，折算后该比值等于宿主机的整体利用率。
+// 任一核数无效、或宿主机核数不大于容器核数时不折算（返回 1）。
+func hostLoadScaleFactor(containerCores, hostCores int) float64 {
+	if containerCores <= 0 || hostCores <= containerCores {
+		return 1
+	}
+	return float64(containerCores) / float64(hostCores)
+}
+
+// scaleHostLoadAverage 仅在"取自宿主机的负载 + 配置了宿主机核数"时折算；
+// 本机可信的负载一律原样上报。
+func scaleHostLoadAverage(avg load.AvgStat) load.AvgStat {
+	if !allowHostLoad || hostCPUCores <= 0 || loadAverageTrusted() {
+		return avg
+	}
+	containerCores := 1
+	if count, err := cpu.Counts(true); err == nil && count > 0 {
+		containerCores = count
+	}
+	factor := hostLoadScaleFactor(containerCores, hostCPUCores)
+	avg.Load1 *= factor
+	avg.Load5 *= factor
+	avg.Load15 *= factor
+	return avg
+}
+
+// applyLoadAverage 把 load.Avg() 的三元组写入 report，与 Load1 同门控：
+// reportable 为 false（load.Avg() 出错或 loadAverageReportable() 判不可信）
+// 时三个字段都保持 nil，序列化成 null。抽成函数方便单测，不读 /proc。
+func applyLoadAverage(r *Report, avg load.AvgStat, reportable bool) {
+	if r == nil || !reportable {
+		return
+	}
+	load1, load5, load15 := avg.Load1, avg.Load5, avg.Load15
+	r.Load = &load1
+	r.Load5 = &load5
+	r.Load15 = &load15
 }
 
 func processCount() int {
@@ -2657,357 +2679,6 @@ func countProcNetFile(path string) (int, error) {
 	return count, nil
 }
 
-type trafficInterfaceState struct {
-	Sent uint64 `json:"sent"`
-	Recv uint64 `json:"recv"`
-}
-
-type trafficResetState struct {
-	ResetDay          int                              `json:"reset_day"`
-	Period            string                           `json:"period"`
-	Scope             string                           `json:"scope"`
-	LastRawUp         int64                            `json:"last_raw_up"`
-	LastRawDown       int64                            `json:"last_raw_down"`
-	PeriodUp          int64                            `json:"period_up"`
-	PeriodDown        int64                            `json:"period_down"`
-	BaselineUp        int64                            `json:"baseline_up,omitempty"`
-	BaselineDown      int64                            `json:"baseline_down,omitempty"`
-	LastBootUnix      int64                            `json:"last_boot_unix,omitempty"`
-	CounterVersion    int                              `json:"counter_version,omitempty"`
-	Interfaces        map[string]trafficInterfaceState `json:"interfaces,omitempty"`
-	ResetDaySource    string                           `json:"reset_day_source,omitempty"`
-	PolicyResetDay    *int                             `json:"policy_reset_day,omitempty"`
-	Revision          uint64                           `json:"revision,omitempty"`
-	HistoryIncomplete bool                             `json:"history_incomplete,omitempty"`
-}
-
-type trafficResetTracker struct {
-	mu             sync.Mutex
-	resetDay       int
-	scope          string
-	statePath      string
-	state          trafficResetState
-	loaded         bool
-	resetDaySource string
-	policyResetDay *int
-}
-
-func normalizeTrafficResetDay(day int) int {
-	if day < 1 {
-		return 1
-	}
-	if day > 31 {
-		return 31
-	}
-	return day
-}
-
-func newTrafficResetTracker(resetDay int, token string, scope string) *trafficResetTracker {
-	tracker := &trafficResetTracker{
-		resetDay:       normalizeTrafficResetDay(resetDay),
-		scope:          scope,
-		statePath:      trafficResetStatePath(token),
-		resetDaySource: "local",
-	}
-	tracker.load()
-	tracker.loaded = true
-	if day := tracker.state.PolicyResetDay; day != nil && *day >= 1 && *day <= 31 {
-		tracker.resetDay, tracker.policyResetDay, tracker.resetDaySource = *day, intPtr(*day), "server"
-	} else if tracker.state.ResetDay >= 1 && tracker.state.ResetDay <= 31 && tracker.state.Period != "" && tracker.state.ResetDaySource != "local" {
-		// Legacy state did not record policy origin. Preserve its valid effective cycle until a fresh policy arrives.
-		tracker.resetDay, tracker.resetDaySource = tracker.state.ResetDay, "restored"
-	}
-	return tracker
-}
-
-// setResetDay 更新重置日。改动会让下一次 adjust 因 period key 变化而走重建分支，
-// 当期累计从此刻重新起算——这是设计意图（周期定义变了，旧累计无法换算），
-// 所以后台表单上必须提示用户。
-func (t *trafficResetTracker) setResetDay(day int) bool {
-	if t == nil {
-		return false
-	}
-	day = normalizeTrafficResetDay(day)
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.resetDay == day {
-		return false
-	}
-	t.resetDay = day
-	t.resetDaySource = "local"
-	t.policyResetDay = nil
-	return true
-}
-
-func (t *trafficResetTracker) setPolicyResetDay(day int) bool {
-	if t == nil {
-		return false
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	changed := t.resetDay != day
-	known := t.policyResetDay != nil && *t.policyResetDay == day
-	t.resetDay = day
-	t.resetDaySource = "server"
-	t.policyResetDay = intPtr(day)
-	if !known {
-		// Keep period counters intact until adjust applies an intentional cycle change.
-		t.state.PolicyResetDay = intPtr(day)
-		t.state.ResetDaySource = "server"
-		t.save()
-	}
-	return changed
-}
-
-// applyTrafficResetDayPolicy 应用后台下发的流量重置日。
-// 优先级：policy > --traffic-reset-day > 环境变量 > 默认 1。
-// 非法值一律忽略而不是钳到边界：服务端已校验 1~31，能到这里的越界值只可能是异常，
-// 钳成 1 会把用户的配置悄悄改掉。
-func applyTrafficResetDayPolicy(policy agentPolicy) {
-	if policy.TrafficResetDay == nil {
-		return
-	}
-	day := *policy.TrafficResetDay
-	if day < 1 || day > 31 {
-		return
-	}
-	previous := trafficResetDay
-	trafficResetDay = day
-	if trafficTracker.setPolicyResetDay(day) {
-		log.Printf("traffic reset day updated by server policy: %d -> %d (current period restarts)", previous, day)
-	}
-}
-
-func trafficCounterScope() string {
-	// 统计口径的版本号。scope 一变，adjust 会走「重建」分支重新起基线；
-	// 不变则旧的 traffic-state.json 基线继续有效。
-	//
-	// 因此**只要参与统计的网卡集合的算法变了，这里就必须跟着变**——
-	// 不只是用户传的 --nic-include/--nic-exclude。v2 收敛到默认路由网卡、
-	// 并把 wg/tun/ipip/warp 等隧道前缀加进内置排除表，raw 计数因此骤降；
-	// 若沿用 v1 的 scope，旧基线会被当成有效值，负 delta 被当作计数器回绕处理，
-	// 把整个物理网卡计数器再加一遍到当期累计上（一次性虚增）。
-	const counterBasisVersion = "v2-default-route"
-	return shortHash(counterBasisVersion + "\n" + strings.TrimSpace(nicInclude) + "\n" + strings.TrimSpace(nicExclude))
-}
-
-func trafficResetStatePath(_ string) string {
-	if override := strings.TrimSpace(os.Getenv("CF_MONITOR_TRAFFIC_STATE_FILE")); override != "" {
-		return override
-	}
-	if exePath, err := os.Executable(); err == nil {
-		if dir := filepath.Dir(exePath); strings.TrimSpace(dir) != "" && dir != "." {
-			return filepath.Join(dir, "traffic-state.json")
-		}
-	}
-	baseDir, err := os.UserConfigDir()
-	if err != nil || strings.TrimSpace(baseDir) == "" {
-		baseDir = os.TempDir()
-	}
-	return filepath.Join(baseDir, "cf-vps-monitor-agent", "traffic-state.json")
-}
-
-func shortHash(value string) string {
-	sum := sha256.Sum256([]byte(value))
-	return hex.EncodeToString(sum[:])[:16]
-}
-
-func trafficResetPeriodKey(now time.Time, resetDay int) string {
-	resetDay = normalizeTrafficResetDay(resetDay)
-	return lastTrafficResetDate(resetDay, now).Format(time.DateOnly)
-}
-
-func lastTrafficResetDate(resetDay int, currentDate time.Time) time.Time {
-	resetDay = normalizeTrafficResetDay(resetDay)
-	thisMonth := actualTrafficResetDate(currentDate.Year(), currentDate.Month(), resetDay, currentDate.Location())
-	if !currentDate.Before(thisMonth) {
-		return thisMonth
-	}
-	previousMonth := time.Date(currentDate.Year(), currentDate.Month(), 1, 0, 0, 0, 0, currentDate.Location()).AddDate(0, -1, 0)
-	return actualTrafficResetDate(previousMonth.Year(), previousMonth.Month(), resetDay, currentDate.Location())
-}
-
-func actualTrafficResetDate(year int, month time.Month, resetDay int, location *time.Location) time.Time {
-	firstDayOfNextMonth := time.Date(year, month+1, 1, 0, 0, 0, 0, location)
-	lastDayOfMonth := firstDayOfNextMonth.AddDate(0, 0, -1).Day()
-	if resetDay <= lastDayOfMonth {
-		return time.Date(year, month, resetDay, 0, 0, 0, 0, location)
-	}
-	return firstDayOfNextMonth
-}
-
-func trafficBootTime(now time.Time) time.Time {
-	info, err := host.Info()
-	if err != nil || info.BootTime == 0 {
-		return time.Time{}
-	}
-	return time.Unix(int64(info.BootTime), 0).In(now.Location())
-}
-
-func rawTrafficCoversPeriod(periodStart time.Time, now time.Time, bootedAt time.Time) bool {
-	return !bootedAt.IsZero() && !bootedAt.Before(periodStart) && !bootedAt.After(now)
-}
-
-func trafficBootUnix(bootedAt time.Time) int64 {
-	if bootedAt.IsZero() {
-		return 0
-	}
-	return bootedAt.Unix()
-}
-
-func maxInt64(a int64, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func (t *trafficResetTracker) adjust(rawUp int64, rawDown int64, now time.Time) (int64, int64) {
-	return t.adjustSinceBoot(rawUp, rawDown, now, trafficBootTime(now))
-}
-
-func (t *trafficResetTracker) adjustSinceBoot(rawUp int64, rawDown int64, now time.Time, bootedAt time.Time) (int64, int64) {
-	// An empty interface name represents the original single-counter API.
-	return t.adjustInterfacesSinceBoot(map[string]interfaceCounters{
-		"": {sent: uint64(maxInt64(0, rawUp)), recv: uint64(maxInt64(0, rawDown))},
-	}, now, bootedAt)
-}
-
-func (t *trafficResetTracker) adjustInterfaces(current map[string]interfaceCounters, now time.Time) (int64, int64) {
-	return t.adjustInterfacesSinceBoot(current, now, trafficBootTime(now))
-}
-
-func trafficCounterDelta(previous, current uint64) int64 {
-	if current < previous {
-		return int64(current)
-	}
-	return int64(current - previous)
-}
-
-func (t *trafficResetTracker) adjustInterfacesSinceBoot(current map[string]interfaceCounters, now time.Time, bootedAt time.Time) (int64, int64) {
-	var rawUp, rawDown int64
-	snapshot := make(map[string]trafficInterfaceState, len(current))
-	for name, counter := range current {
-		rawUp += int64(counter.sent)
-		rawDown += int64(counter.recv)
-		snapshot[name] = trafficInterfaceState{Sent: counter.sent, Recv: counter.recv}
-	}
-	if t == nil {
-		return rawUp, rawDown
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if !t.loaded {
-		t.load()
-		t.loaded = true
-	}
-
-	periodStart := lastTrafficResetDate(t.resetDay, now)
-	period := periodStart.Format(time.DateOnly)
-	rawCoversPeriod := rawTrafficCoversPeriod(periodStart, now, bootedAt)
-	bootUnix := trafficBootUnix(bootedAt)
-	bootChanged := bootUnix != 0 && t.state.LastBootUnix != 0 && t.state.LastBootUnix != bootUnix
-	if t.state.ResetDay != t.resetDay || t.state.Period == "" || t.state.Scope != t.scope {
-		t.state = trafficResetState{ResetDay: t.resetDay, Period: period, Scope: t.scope, Revision: t.state.Revision, HistoryIncomplete: t.state.HistoryIncomplete}
-		if rawCoversPeriod {
-			t.state.PeriodUp, t.state.PeriodDown = rawUp, rawDown
-		}
-		log.Printf("traffic tracker initialized for period %s", period)
-	} else {
-		previous := t.state.Interfaces
-		migratedTotals := false
-		if t.state.CounterVersion == 0 {
-			switch {
-			case t.state.Period == period && t.state.LastRawUp == 0 && t.state.LastRawDown == 0 &&
-				(t.state.BaselineUp != 0 || t.state.BaselineDown != 0):
-				t.state.PeriodUp = maxInt64(0, rawUp-t.state.BaselineUp)
-				t.state.PeriodDown = maxInt64(0, rawDown-t.state.BaselineDown)
-				migratedTotals = true
-			case t.state.Period == period && rawCoversPeriod && t.state.PeriodUp == 0 && t.state.PeriodDown == 0:
-				// Repair the historical zero-install baseline only during old-format migration.
-				t.state.PeriodUp, t.state.PeriodDown = rawUp, rawDown
-				migratedTotals = true
-			default:
-				if _, singleCounter := current[""]; singleCounter {
-					previous = map[string]trafficInterfaceState{"": {
-						Sent: uint64(maxInt64(0, t.state.LastRawUp)), Recv: uint64(maxInt64(0, t.state.LastRawDown)),
-					}}
-				}
-			}
-			log.Printf("traffic state migrated to per-interface counters; prior period totals retained")
-		}
-		var deltaUp, deltaDown int64
-		if !migratedTotals {
-			for name, counter := range snapshot {
-				if prior, exists := previous[name]; exists {
-					deltaUp += trafficCounterDelta(prior.Sent, counter.Sent)
-					deltaDown += trafficCounterDelta(prior.Recv, counter.Recv)
-				}
-			}
-		}
-		if bootChanged && rawCoversPeriod {
-			deltaUp, deltaDown = rawUp, rawDown
-		}
-		if t.state.Period != period {
-			if rawCoversPeriod {
-				deltaUp, deltaDown = rawUp, rawDown
-			}
-			t.state.Period = period
-			t.state.HistoryIncomplete = false
-			t.state.PeriodUp, t.state.PeriodDown = deltaUp, deltaDown
-			log.Printf("traffic period rotated to %s", period)
-		} else {
-			t.state.PeriodUp += deltaUp
-			t.state.PeriodDown += deltaDown
-		}
-	}
-	t.state.ResetDay = t.resetDay
-	t.state.Scope = t.scope
-	t.state.LastRawUp, t.state.LastRawDown = rawUp, rawDown
-	t.state.BaselineUp, t.state.BaselineDown = 0, 0
-	if bootUnix != 0 {
-		t.state.LastBootUnix = bootUnix
-	}
-	t.state.CounterVersion = 1
-	t.state.Interfaces = snapshot
-	t.state.ResetDaySource = t.resetDaySource
-	t.state.PolicyResetDay = t.policyResetDay
-	t.save()
-	return t.state.PeriodUp, t.state.PeriodDown
-}
-
-func (t *trafficResetTracker) load() {
-	if t.statePath == "" {
-		return
-	}
-	state, _, recoveredFrom, err := readTrafficResetState(t.statePath)
-	if err != nil {
-		var corruption *trafficStateCorruption
-		if errors.As(err, &corruption) {
-			t.state.HistoryIncomplete = true
-			log.Printf("traffic history is incomplete; corrupt generations will be retained while new accumulation resumes")
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			log.Printf("traffic reset state recovery failed; existing files retained: %v", err)
-		}
-		return
-	}
-	if recoveredFrom != t.statePath {
-		log.Printf("traffic reset state recovered from %s", filepath.Base(recoveredFrom))
-	}
-	t.state = state
-}
-
-func (t *trafficResetTracker) save() {
-	if t.statePath == "" {
-		return
-	}
-	t.state.Revision++
-	if err := writeTrafficResetState(t.statePath, t.state, replaceTrafficStateFile); err != nil {
-		log.Printf("traffic reset state save failed; recovery generations retained: %v", err)
-	}
-}
-
 var (
 	globalGPUDetails []GPUInfo
 	gpuDetailsMu     sync.Mutex
@@ -3030,13 +2701,10 @@ func collectReportWithInterval(intervalSec int) Report {
 		}
 	}
 	if loadInfo, err := load.Avg(); err == nil && loadAverageReportable() {
-		value := loadInfo.Load1
-		r.Load = &value
+		applyLoadAverage(&r, scaleHostLoadAverage(*loadInfo), true)
 	}
 	r.Temp = nodeMetrics.temperature(context.Background())
-	diskSnapshot := nodeMetrics.diskSnapshot(mountInclude, mountExclude)
-	r.Disk, r.DiskTotal = diskSnapshot.used, diskSnapshot.total
-	r.DiskSource, r.DiskSampledAt = diskSnapshot.source, diskSnapshot.sampledAt
+	r.Disk, r.DiskTotal = nodeMetrics.diskUsageTotals(mountInclude, mountExclude)
 	if netIO, err := gnet.IOCounters(true); err == nil && len(netIO) > 0 {
 		// 只算一次网卡集合，累计流量与实时速率共用，避免两个数字用不同口径。
 		selected := trafficInterfaceSelection(netIO)
@@ -3045,11 +2713,8 @@ func collectReportWithInterval(intervalSec int) Report {
 		r.rawNetTotalUp = rawUp
 		r.rawNetTotalDown = rawDown
 		r.netPerInterface = collectPerInterfaceCounters(netIO, selected)
-		if trafficTracker != nil {
-			r.NetTotalUp, r.NetTotalDown = trafficTracker.adjustInterfaces(r.netPerInterface, now)
-		} else {
-			r.NetTotalUp, r.NetTotalDown = rawUp, rawDown
-		}
+		r.NetTotalUp, r.NetTotalDown = rawUp, rawDown
+		r.TrafficSample = buildTrafficSample(r.netPerInterface, now, trafficBootUnix())
 	}
 	r.ProcessCount = processCount()
 	r.Connections, r.ConnectionsUdp = connectionsCount()
@@ -3057,7 +2722,7 @@ func collectReportWithInterval(intervalSec int) Report {
 
 	// GPU details
 	gpuDetailsMu.Lock()
-	if len(globalGPUDetails) > 0 {
+	if enableGPU && len(globalGPUDetails) > 0 {
 		// Refresh GPU data for each report
 		_, gpuDetails := detectGPU()
 		r.GPUs = gpuDetails
@@ -3207,7 +2872,7 @@ func (p *reportPreparer) attachBasicInfoIfDue(report *Report, now time.Time) {
 	}
 }
 
-func sendHTTPReports(reports []Report) error {
+func sendHTTPReports(ctx context.Context, reports []Report) error {
 	if len(reports) == 0 {
 		return nil
 	}
@@ -3219,42 +2884,50 @@ func sendHTTPReports(reports []Report) error {
 	if len(reports) > 1 {
 		payload = map[string]any{"reports": reports}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, agentServerRequestTimeout)
 	defer cancel()
 	resp, err := postJSONResponse(ctx, endpoint, payload, token)
 	if err != nil {
-		log.Printf("HTTP report failed: %v", err)
+		logWarnf("HTTP report failed: %v", err)
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return httpStatusError(resp)
 	}
-	var accepted struct{ Success bool }
+	var accepted struct {
+		Success         bool
+		TrafficImported bool `json:"traffic_imported"`
+	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxHTTPErrorBodyBytes)).Decode(&accepted); err != nil {
 		return fmt.Errorf("invalid report acknowledgement: %w", err)
 	}
 	if !accepted.Success {
 		return errors.New("server did not accept the report")
 	}
+	if accepted.TrafficImported {
+		legacyImport.finish()
+	}
 	if len(reports) == 1 {
 		logReport("HTTP report accepted", reports[0])
 	} else {
-		log.Printf("HTTP report batch accepted: %d reports", len(reports))
+		logDebugf("HTTP report batch accepted: %d reports", len(reports))
 	}
 	return nil
 }
 
-func fetchAgentPolicy() (agentPolicy, error) {
+func fetchAgentPolicy(ctx context.Context) (agentPolicy, error) {
 	endpoint := serverURL + "/api/clients/policy"
-	req, err := http.NewRequest("GET", endpoint, nil)
+	ctx, cancel := context.WithTimeout(ctx, agentPolicyRequestTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return agentPolicy{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
+	setAgentRequestHeaders(req)
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := agentServerHTTPClient.Do(req)
 	if err != nil {
 		return agentPolicy{}, err
 	}
@@ -3294,12 +2967,12 @@ func sendWebSocketReports(conn *safeWebSocketConn, reports []Report) error {
 	if err := conn.WriteJSON(reportsEnvelope{Type: "reports", Reports: reports}); err != nil {
 		return err
 	}
-	log.Printf("WebSocket report batch sent: %d reports", len(reports))
+	logDebugf("WebSocket report batch sent: %d reports", len(reports))
 	return nil
 }
 
 func logReport(prefix string, report Report) {
-	log.Printf("%s: CPU %.1f%%, RAM %s/%s, Net in=%dB/s out=%dB/s",
+	logDebugf("%s: CPU %.1f%%, RAM %s/%s, Net in=%dB/s out=%dB/s",
 		prefix,
 		report.CPU,
 		formatMemoryBytes(report.RAM),
@@ -3347,8 +3020,8 @@ func postJSONResponse(ctx context.Context, endpoint string, data interface{}, be
 	if bearerToken != "" {
 		req.Header.Set("Authorization", "Bearer "+bearerToken)
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	return client.Do(req)
+	setAgentRequestHeaders(req)
+	return agentServerHTTPClient.Do(req)
 }
 
 func httpStatusError(resp *http.Response) error {
@@ -3473,8 +3146,14 @@ func readWebSocketMessages(conn *safeWebSocketConn, done chan<- error, policies 
 
 		var message serverMessage
 		if err := json.Unmarshal(raw, &message); err != nil {
-			log.Printf("WebSocket message: %s", string(raw))
+			logWarnf("WebSocket message: %s", string(raw))
 			continue
+		}
+		if message.Type == "error" && message.Code == "REPORT_REJECTED" {
+			// A rejection is terminal for this session: waiting for the ACK
+			// deadline would stall every subsequent upload on the same batch.
+			done <- errors.New("WebSocket report rejected (REPORT_REJECTED)")
+			return
 		}
 		if message.Type == "ack" || message.Type == "policy" {
 			if err := conn.renewReadDeadline(); err != nil {
@@ -3483,7 +3162,10 @@ func readWebSocketMessages(conn *safeWebSocketConn, done chan<- error, policies 
 			}
 		}
 		if message.Type == "ack" {
-			log.Printf("WebSocket ack received: %d", message.Timestamp)
+			logDebugf("WebSocket ack received: %d", message.Timestamp)
+			if message.TrafficImported {
+				legacyImport.finish()
+			}
 			if len(acknowledgements) > 0 {
 				select {
 				case acknowledgements[0] <- struct{}{}:
@@ -3496,10 +3178,10 @@ func readWebSocketMessages(conn *safeWebSocketConn, done chan<- error, policies 
 			select {
 			case policies <- message:
 			default:
-				log.Printf("WebSocket policy dropped: queue full")
+				logWarnf("WebSocket policy dropped: queue full")
 			}
 			continue
 		}
-		log.Printf("WebSocket message type=%s", message.Type)
+		logDebugf("WebSocket message type=%s", message.Type)
 	}
 }

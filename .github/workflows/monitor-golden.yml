@@ -1,0 +1,80 @@
+# monitor 契约黄金样本的定时漂移检查。
+#
+# hub-golden.json 目前是对照 api.rs 手工整理的；这个 workflow 在有可用 hub 时
+# 用 scripts/refresh-monitor-golden.mjs 从真实接口录制一次形状，再与仓库里
+# 提交的版本比对：形状漂移（hub 升级了 /api/nodes、metrics 等公开接口）会让
+# 这个 job 红灯，提醒先升级 monitor/web-theme.pin 与 contractVersion。
+#
+# 基线分三处记录：GOLDEN_SOURCE 与 hub-golden.json 里的 hub commit、默认主题
+# pin（web-theme.pin）、golden 来源；刷新形状后三处一起更新。
+#
+# hub 地址来自 workflow_dispatch 输入或仓库变量 MONITOR_HUB_URL（Settings →
+# Secrets and variables → Actions → Variables）。没有配置时 job 直接跳过并
+# 留一条 notice，不会误报。
+#
+# 注意：录制的 hub 版本必须与 worker/test-support/monitor-golden/GOLDEN_SOURCE
+# 里的 pin 一致；否则先升 pin，再让本次录制落地。
+name: Monitor golden drift
+
+on:
+  schedule:
+    # 每周一 03:17 UTC，避开整点高峰。
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      hub_url:
+        description: 'monitor hub 的公开地址（留空则使用仓库变量 MONITOR_HUB_URL）'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: monitor-golden-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    name: Record pinned hub and compare golden
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+
+      - name: Resolve hub URL
+        id: hub
+        env:
+          HUB_INPUT: ${{ inputs.hub_url }}
+          HUB_VARIABLE: ${{ vars.MONITOR_HUB_URL }}
+        run: |
+          url="${HUB_INPUT:-$HUB_VARIABLE}"
+          if [ -z "$url" ]; then
+            echo "::notice::未配置 hub 地址（workflow_dispatch 输入或仓库变量 MONITOR_HUB_URL），本次跳过录制比对。"
+            echo "url=" >> "$GITHUB_OUTPUT"
+          else
+            echo "url=$url" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Record golden from hub
+        if: steps.hub.outputs.url != ''
+        env:
+          HUB_URL: ${{ steps.hub.outputs.url }}
+        run: node scripts/refresh-monitor-golden.mjs --from-hub-url "$HUB_URL"
+
+      - name: Compare with committed golden
+        if: steps.hub.outputs.url != ''
+        run: |
+          if git diff --exit-code -- worker/test-support/monitor-golden/hub-golden.json; then
+            echo "golden 与 hub 的当前形状一致"
+          else
+            echo "::error::hub 的公开接口形状与提交的 golden 不一致。请核对 monitor/web-theme.pin 是否需要升级，再运行 scripts/refresh-monitor-golden.mjs，并同步更新 GOLDEN_SOURCE 与 hub-golden.json 的 contractVersion / hubCommit / themePin / goldenSource。"
+            git --no-pager diff -- worker/test-support/monitor-golden/hub-golden.json
+            exit 1
+          fi

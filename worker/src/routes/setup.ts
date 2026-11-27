@@ -10,6 +10,9 @@ import * as db from '../db/queries';
 import { sanitizeSetupDiagnosticDetail } from '../utils/setup-diagnostics';
 import { getCloudflareClientIp } from '../utils/request-ip';
 import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
+import { liveDataStub } from '../utils/live-data-object';
+import { checkNativeRateLimit, NATIVE_RATE_LIMIT_BINDINGS } from '../utils/native-rate-limit';
+import { RATE_LIMIT_OBJECT_NAMES, rateLimitStub } from '../utils/rate-limit-object';
 import { BUNDLED_SUPABASE_MIGRATIONS, type BundledMigration } from '../generated/supabase-migrations';
 
 type SetupCheckStatus = 'ok' | 'warning' | 'error' | 'pending' | 'disabled';
@@ -101,25 +104,29 @@ function localSetupRateLimit(c: SetupContext, ip: string, bucket: string, max: n
   return state.count > max ? rateLimitResponse(c, retryAfter) : null;
 }
 
-async function setupRateLimit(c: SetupContext, bucket: string, max: number, windowMs: number): Promise<Response | null> {
+/**
+ * 初始化是一次性敏感操作，保留 RateLimitDO 的跨机房强一致计数，窗口 1 小时，
+ * 只有绑定缺失或异常时才退回本地计数。
+ */
+async function setupInitRateLimit(c: SetupContext): Promise<Response | null> {
+  const bucket = 'setup-init';
   const ip = requestIp(c);
   try {
     const namespace = c.env.RATE_LIMIT;
-    if (!namespace) return localSetupRateLimit(c, ip, bucket, max, windowMs);
-    const doId = namespace.idFromName(bucket);
-    const stub = namespace.get(doId);
+    if (!namespace) return localSetupRateLimit(c, ip, bucket, SETUP_INIT_RATE_LIMIT_MAX, SETUP_INIT_RATE_LIMIT_WINDOW_MS);
+    const stub = rateLimitStub(namespace, bucket);
     const response = await fetchDurableObjectWithTimeout(stub, new Request('https://do/rate-limit', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         bucket,
         ip,
-        max,
-        windowMs,
+        max: SETUP_INIT_RATE_LIMIT_MAX,
+        windowMs: SETUP_INIT_RATE_LIMIT_WINDOW_MS,
       }),
     }));
     if (!response.ok) throw new Error(`DO rate limit HTTP ${response.status}`);
-    const result = await readRateLimitResult(response, { limit: max, remaining: 0 });
+    const result = await readRateLimitResult(response, { limit: SETUP_INIT_RATE_LIMIT_MAX, remaining: 0 });
     if (!result) throw new Error('DO rate limit returned an invalid response');
     c.header('X-RateLimit-Limit', String(result.limit));
     c.header('X-RateLimit-Remaining', String(result.remaining));
@@ -127,16 +134,22 @@ async function setupRateLimit(c: SetupContext, bucket: string, max: number, wind
     if (result.allowed) return null;
     return rateLimitResponse(c, result.retryAfter);
   } catch {
-    return localSetupRateLimit(c, ip, bucket, max, windowMs);
+    return localSetupRateLimit(c, ip, bucket, SETUP_INIT_RATE_LIMIT_MAX, SETUP_INIT_RATE_LIMIT_WINDOW_MS);
   }
 }
 
+/**
+ * setup 状态查询是低频读；用原生绑定（或本地计数）即可，不需要 DO 往返。
+ */
 async function setupStatusRateLimit(c: SetupContext): Promise<Response | null> {
-  return setupRateLimit(c, 'setup-status', SETUP_STATUS_RATE_LIMIT_MAX, SETUP_STATUS_RATE_LIMIT_WINDOW_MS);
-}
-
-async function setupInitRateLimit(c: SetupContext): Promise<Response | null> {
-  return setupRateLimit(c, 'setup-init', SETUP_INIT_RATE_LIMIT_MAX, SETUP_INIT_RATE_LIMIT_WINDOW_MS);
+  const bucket = 'setup-status';
+  const ip = requestIp(c);
+  const check = await checkNativeRateLimit(c.env, bucket, ip, SETUP_STATUS_RATE_LIMIT_MAX);
+  if (check.outcome === 'allowed') return null;
+  if (check.outcome === 'limited') {
+    return rateLimitResponse(c, Math.ceil(SETUP_STATUS_RATE_LIMIT_WINDOW_MS / 1000));
+  }
+  return localSetupRateLimit(c, ip, bucket, SETUP_STATUS_RATE_LIMIT_MAX, SETUP_STATUS_RATE_LIMIT_WINDOW_MS);
 }
 
 function databaseConfigCheck(): SetupCheck {
@@ -167,8 +180,7 @@ function secretsCheck(env: Bindings): SetupCheck {
 
 async function durableObjectsCheck(env: Bindings): Promise<SetupCheck> {
   try {
-    const doId = env.LIVE_DATA.idFromName('global');
-    const stub = env.LIVE_DATA.get(doId);
+    const stub = liveDataStub(env.LIVE_DATA);
     const response = await fetchDurableObjectWithTimeout(stub, new Request('https://do/live', { method: 'GET' }));
     if (!response.ok) {
       return setupCheck('durable_objects', 'error', `LIVE_DATA returned HTTP ${response.status}`);
@@ -186,31 +198,31 @@ async function durableObjectsCheck(env: Bindings): Promise<SetupCheck> {
 async function rateLimitBindingCheck(env: Bindings): Promise<SetupCheck> {
   const namespace = env.RATE_LIMIT;
   if (!namespace) {
-    return setupCheck('rate_limit', 'error', 'RATE_LIMIT binding is missing; requests will use per-isolate fallback limits');
+    return setupCheck('rate_limit', 'error', 'RATE_LIMIT binding is missing; sensitive low-frequency routes will use per-isolate fallback limits');
   }
   try {
-    const doId = namespace.idFromName('setup-diagnostics');
-    const stub = namespace.get(doId);
-    const response = await fetchDurableObjectWithTimeout(stub, new Request('https://do/rate-limit', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        bucket: 'setup-diagnostics',
-        ip: 'probe',
-        max: 1000,
-        windowMs: SETUP_STATUS_RATE_LIMIT_WINDOW_MS,
-      }),
-    }));
-    if (!response.ok) {
-      return setupCheck('rate_limit', 'error', `RATE_LIMIT returned HTTP ${response.status}`);
-    }
-    const result = await readRateLimitResult(response, { limit: 1000, remaining: 1000 });
-    return result
+    // 只读探针：不写入限流计数，避免健康检查本身消耗 DO 额度。
+    const stub = rateLimitStub(namespace, RATE_LIMIT_OBJECT_NAMES.healthProbe);
+    const response = await fetchDurableObjectWithTimeout(stub, new Request('https://do/health', { method: 'GET' }));
+    return response.ok
       ? setupCheck('rate_limit', 'ok', 'RATE_LIMIT responded')
-      : setupCheck('rate_limit', 'error', 'RATE_LIMIT returned an invalid response');
+      : setupCheck('rate_limit', 'error', `RATE_LIMIT returned HTTP ${response.status}`);
   } catch (error) {
     return setupCheck('rate_limit', 'error', `RATE_LIMIT probe failed: ${sanitizeSetupDiagnosticDetail(error)}`);
   }
+}
+
+/** 高频入口依赖原生绑定；缺失时仍能工作，但会退化成 per-isolate 计数。 */
+function nativeRateLimitBindingsCheck(env: Bindings): SetupCheck {
+  const bindings = env as unknown as Record<string, { limit?: unknown } | undefined>;
+  const missing = NATIVE_RATE_LIMIT_BINDINGS.filter(name => typeof bindings[name]?.limit !== 'function');
+  return missing.length === 0
+    ? setupCheck('rate_limit_bindings', 'ok', 'Native rate limit bindings are configured')
+    : setupCheck(
+      'rate_limit_bindings',
+      'warning',
+      `Missing native rate limit bindings: ${missing.join(', ')}; high-frequency routes will use per-isolate fallback limits`,
+    );
 }
 
 function queryLayerCheck(): SetupCheck {
@@ -453,6 +465,7 @@ setupRoutes.get('/status', async (c) => {
   checks.push(secretsCheck(c.env));
   checks.push(await durableObjectsCheck(c.env));
   checks.push(await rateLimitBindingCheck(c.env));
+  checks.push(nativeRateLimitBindingsCheck(c.env));
 
   const ok = checks.every(check => check.status === 'ok' || check.status === 'disabled');
   return c.json({
@@ -482,9 +495,9 @@ setupRoutes.post('/database/init', async (c) => {
     return c.json({ error: 'SUPABASE_URL is not configured as a Supabase project URL.' }, 503);
   }
 
-  let payload: { accessToken?: unknown };
+  let payload: { accessToken?: unknown; confirmHistoryReset?: unknown };
   try {
-    payload = await c.req.json() as { accessToken?: unknown };
+    payload = await c.req.json() as { accessToken?: unknown; confirmHistoryReset?: unknown };
   } catch {
     return c.json({ error: 'Invalid JSON body.' }, 400);
   }
@@ -495,11 +508,40 @@ setupRoutes.post('/database/init', async (c) => {
   }
 
   try {
+    // Read-only preflight, before even creating setup_migrations. Keep this
+    // predicate aligned with 1_schema.sql's legacy layout guard.
+    const resetRequired = await historyResetRequired(projectRef, accessToken);
+    if (resetRequired && payload.confirmHistoryReset !== true) {
+      return c.json({
+        confirmation_required: 'history_reset',
+        error: '检测到旧历史布局：升级将清空历史图表数据，traffic_daily 保留。确认后才会执行升级。',
+      }, 409);
+    }
     const result = await applyBundledMigrations(projectRef, accessToken);
     return c.json({ success: true, project_ref: projectRef, ...result });
   } catch (error) {
     return c.json({ error: redactSetupInitError(error) }, 500);
   }
 });
+
+async function historyResetRequired(projectRef: string, accessToken: string): Promise<boolean> {
+    const preflight = await runSupabaseQuery(projectRef, accessToken, `
+select (
+  exists (select 1 from pg_attribute where attrelid = to_regclass('public.records') and attname = 'id' and not attisdropped)
+  or exists (select 1 from pg_attribute where attrelid = to_regclass('public.ping_snapshots') and attname = 'batch_hash' and not attisdropped)
+  or to_regclass('public.gpu_records') is not null
+  or to_regclass('public.ping_records') is not null
+  or (to_regclass('public.ping_rollup') is not null
+      and (select relkind from pg_class where oid = to_regclass('public.ping_rollup')) <> 'p')
+  or (to_regclass('public.records') is not null
+      and (select relkind from pg_class where oid = to_regclass('public.records')) <> 'p')
+) as history_reset_required;
+`);
+    const preflightRows = extractQueryRows(preflight);
+    if (preflightRows.length !== 1 || typeof preflightRows[0].history_reset_required !== 'boolean') {
+      throw new Error('History layout preflight returned an invalid result; no migrations were executed.');
+    }
+    return preflightRows[0].history_reset_required;
+}
 
 export { setupRoutes };

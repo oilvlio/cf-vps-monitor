@@ -1,30 +1,33 @@
 /**
- * WebSocket routes for agent reports and live viewer snapshots.
+ * 前端与 monitor 主题的实时通道。
+ *
+ * Agent 的上报 WebSocket（`/api/clients/report`）归 `routes/client.ts`，这里只保留
+ * 前端 viewer、monitor 帧与公开实时快照。两边的入口分开后，调整前端实时协议不会
+ * 牵动 Agent 的上报通道（反之亦然）；Upgrade/Origin 这类纯判定放在
+ * `utils/websocket-request.ts`，不靠路由模块互相 import 复用。
  */
 
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import type { Bindings, Variables } from '../index';
-import * as db from '../db/queries';
-import { getDatabase } from '../db/provider';
 import { createViewerToken, verifyViewerToken } from '../auth/viewer-token';
-import { getAgentClientIdentityByToken } from './client';
-import { getCloudflareClientIp, isPublicIpAddress } from '../utils/request-ip';
-import { readLiveSnapshot, readRateLimitResult } from '../utils/do-response';
-import { hasAdminSession, invalidatePublicMetadataCache } from './public';
+import { getCloudflareClientIp } from '../utils/request-ip';
+import { guardPublicLive, hasAdminSession } from './public';
+import { liveDataStub } from '../utils/live-data-object';
+import { isWebSocketUpgrade, requestHasValidOrigin } from '../utils/websocket-request';
+import { loadLiveSnapshot } from '../services/read/live';
+import { readFailureResponse } from '../services/read/failure';
+import { checkNativeRateLimit } from '../utils/native-rate-limit';
+import { getAdminSessionToken } from '../auth/session';
 
 const wsRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+wsRoutes.onError(readFailureResponse);
 type WsContext = Context<{ Bindings: Bindings; Variables: Variables }>;
-type CloudflareRequestMetadata = {
-  city?: unknown;
-  region?: unknown;
-  country?: unknown;
-};
 const VIEWER_TOKEN_RATE_LIMIT_WINDOW_MS = 60_000;
 const VIEWER_TOKEN_RATE_LIMIT_MAX = 20;
-const LIVE_CLIENTS_RATE_LIMIT_WINDOW_MS = 60_000;
-const LIVE_CLIENTS_RATE_LIMIT_MAX = 180;
 const LIVE_CLIENTS_CACHE_SECONDS = 2;
+const MONITOR_WS_RATE_LIMIT_WINDOW_MS = 60_000;
+const MONITOR_WS_RATE_LIMIT_MAX = 30;
 /**
  * 通行证有效期。刻意与 viewer 窗口解耦并保持很短——它只是"取证 → 建连"
  * 这一瞬间的一次性凭据，有效期越短，被截获后的可用窗口越小。
@@ -41,28 +44,6 @@ export function invalidateLiveViewerSettingsCache(): void {
   // Kept for the settings save path; viewer tokens stay on the fast default.
 }
 
-function bearerToken(c: WsContext): string {
-  const authHeader = c.req.header('Authorization') || '';
-  return authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
-}
-
-function requestHasValidOrigin(c: WsContext): boolean {
-  const origin = c.req.header('Origin');
-  if (!origin) return true;
-
-  try {
-    const requestUrl = new URL(c.req.url);
-    const originUrl = new URL(origin);
-    return originUrl.protocol === requestUrl.protocol && originUrl.host === requestUrl.host;
-  } catch {
-    return false;
-  }
-}
-
-function isWebSocketUpgrade(c: WsContext): boolean {
-  return (c.req.header('Upgrade') || '').toLowerCase() === 'websocket';
-}
-
 function viewerTokenFromProtocol(c: WsContext): string {
   const protocols = (c.req.header('Sec-WebSocket-Protocol') || '')
     .split(',')
@@ -74,48 +55,6 @@ function viewerTokenFromProtocol(c: WsContext): string {
 
 function requestIp(c: WsContext): string {
   return getCloudflareClientIp(c);
-}
-
-function requestRegion(c: WsContext): string {
-  const cf = (c.req.raw as Request & { cf?: CloudflareRequestMetadata }).cf ?? {};
-  return [cf.city, cf.region, cf.country || c.req.header('CF-IPCountry')]
-    .filter((part): part is string => typeof part === 'string' && part.trim() !== '')
-    .join(', ');
-}
-
-function isUnknownRegion(region: string): boolean {
-  return /^(unknown|未知)$/i.test(region.trim());
-}
-
-function isCountryCodeRegion(region: string): boolean {
-  return /^[A-Z]{2}$/i.test(region.trim());
-}
-
-function isDetailedRegion(region: string): boolean {
-  const text = region.trim();
-  return text !== '' && !isUnknownRegion(text) && !isCountryCodeRegion(text);
-}
-
-async function syncAgentNetworkMetadata(c: WsContext, client: db.ClientIdentity, patch: Partial<db.Client>): Promise<void> {
-  const safePatch: Record<string, unknown> = { uuid: client.uuid, ...patch };
-  if (typeof patch.ipv4 === 'string') {
-    safePatch.has_ipv4 = patch.ipv4.trim() !== '';
-  }
-  if (typeof patch.ipv6 === 'string') {
-    safePatch.has_ipv6 = patch.ipv6.trim() !== '';
-  }
-  const stub = c.env.LIVE_DATA.get(c.env.LIVE_DATA.idFromName('global'));
-  await stub.fetch(new Request('https://do/client-meta', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      source: 'agent',
-      uuid: client.uuid,
-      name: client.name || client.uuid,
-      hidden: client.hidden,
-      client: safePatch,
-    }),
-  })).catch(() => undefined);
 }
 
 function cleanupLocalWsRateLimitBuckets(nowMs: number): void {
@@ -171,7 +110,6 @@ function localWsRateLimit(
 
 async function enforceWsRateLimit(
   c: WsContext,
-  doName: string,
   bucket: string,
   ip: string,
   max: number,
@@ -179,38 +117,17 @@ async function enforceWsRateLimit(
   error: string,
   noStore = false,
 ): Promise<Response | null> {
-  try {
-    const namespace = c.env.RATE_LIMIT;
-    if (!namespace) return localWsRateLimit(c, bucket, ip, max, windowMs, error, noStore);
-    const doId = namespace.idFromName(doName);
-    const stub = namespace.get(doId);
-    const response = await stub.fetch(new Request('https://do/rate-limit', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bucket, ip, max, windowMs }),
-    }));
-    if (!response.ok) throw new Error(`DO rate limit HTTP ${response.status}`);
-    const result = await readRateLimitResult(response, { limit: max, remaining: max });
-    if (!result) throw new Error('DO rate limit returned an invalid response');
-    c.header('X-RateLimit-Limit', String(result.limit));
-    c.header('X-RateLimit-Remaining', String(result.remaining));
-    if (result.allowed) return null;
-    return wsRateLimitResponse(
-      error,
-      result.retryAfter,
-      result.limit,
-      result.remaining,
-      noStore,
-    );
-  } catch {
-    return localWsRateLimit(c, bucket, ip, max, windowMs, error, noStore);
+  const check = await checkNativeRateLimit(c.env, bucket, ip, max);
+  if (check.outcome === 'allowed') return null;
+  if (check.outcome === 'limited') {
+    return wsRateLimitResponse(error, Math.ceil(windowMs / 1000), max, 0, noStore);
   }
+  return localWsRateLimit(c, bucket, ip, max, windowMs, error, noStore);
 }
 
 async function enforceViewerTokenRateLimit(c: WsContext, ip: string): Promise<Response | null> {
   return enforceWsRateLimit(
     c,
-    'viewer-token',
     'viewer-token',
     ip,
     VIEWER_TOKEN_RATE_LIMIT_MAX,
@@ -220,16 +137,15 @@ async function enforceViewerTokenRateLimit(c: WsContext, ip: string): Promise<Re
   );
 }
 
-async function enforceLiveClientsRateLimit(c: WsContext, ip: string): Promise<Response | null> {
-  return enforceWsRateLimit(
+async function enforceMonitorWsRateLimit(c: WsContext, ip: string): Promise<Response | null> {
+  // 建连限流不要求跨机房强一致：本地计数即可省掉一次限流 DO 往返。
+  return localWsRateLimit(
     c,
-    'live-clients',
-    'live-clients',
+    'monitor-ws',
     ip,
-    LIVE_CLIENTS_RATE_LIMIT_MAX,
-    LIVE_CLIENTS_RATE_LIMIT_WINDOW_MS,
-    'Too many live clients requests',
-    true,
+    MONITOR_WS_RATE_LIMIT_MAX,
+    MONITOR_WS_RATE_LIMIT_WINDOW_MS,
+    'Too many monitor websocket connections',
   );
 }
 
@@ -237,64 +153,42 @@ function jwtSecret(c: WsContext): string {
   return String(c.env.JWT_SECRET || '').trim();
 }
 
-wsRoutes.get('/clients/report', async (c) => {
-  const token = bearerToken(c) || String(c.req.query('token') || '').trim();
-
-  if (!token) {
-    return c.json({ error: 'Missing token' }, 401);
-  }
-
-  const database = getDatabase(c.env);
-  const client = await getAgentClientIdentityByToken(database, token, c.env, getCloudflareClientIp(c, ''));
-  if (!client) {
-    return c.json({ error: 'Invalid token' }, 401);
-  }
-  const region = requestRegion(c);
-  const sourceIp = getCloudflareClientIp(c, '');
-  const sourceIpIsPublic = isPublicIpAddress(sourceIp);
-  if (region) {
-    const storedClient = await db.getClient(database, client.uuid);
-    const patch: Partial<db.Client> = {};
-    if (storedClient) {
-      if (
-        region &&
-        (
-          !storedClient.region ||
-          isUnknownRegion(storedClient.region) ||
-          (isCountryCodeRegion(storedClient.region) && isDetailedRegion(region))
-        )
-      ) {
-        patch.region = region;
-      }
-      if (Object.keys(patch).length > 0) {
-        await db.updateClient(database, client.uuid, patch);
-        await syncAgentNetworkMetadata(c, client, patch);
-        invalidatePublicMetadataCache();
-      }
-    }
-  }
-
+/**
+ * monitor 主题契约的实时通道：`{admin, nodes}` 全量帧，`?gzip` 发 gzip 二进制。
+ *
+ * 帧由 Durable Object 从内存里的静态投影 + 实时报告拼装（每帧不查库），推送节奏
+ * 跟随 agent 上报（3–5s），而不是上游 hub 的 2s。普通 GET 按契约回 426。
+ */
+wsRoutes.get('/ws', async (c) => {
   if (!isWebSocketUpgrade(c)) {
-    return c.json({ error: 'WebSocket upgrade required' }, 400);
+    return c.text('需要 WebSocket', 426);
   }
   if (!requestHasValidOrigin(c)) {
     return c.json({ error: 'Invalid WebSocket Origin' }, 403);
   }
+  const limited = await enforceMonitorWsRateLimit(c, requestIp(c));
+  if (limited) return limited;
 
-  const doId = c.env.LIVE_DATA.idFromName('global');
-  const stub = c.env.LIVE_DATA.get(doId);
+  const gzip = c.req.query('gzip') !== undefined && c.req.query('gzip') !== '0';
+
+  // DO 自己从 admin 元数据/数据库派生 monitor 静态投影，路由只负责身份转发。
+  const admin = await hasAdminSession(c);
 
   const url = new URL(c.req.url);
   url.pathname = '/';
   url.search = '';
-  url.searchParams.set('id', client.uuid);
-  url.searchParams.set('name', client.name);
-  url.searchParams.set('hidden', client.hidden ? '1' : '0');
-  url.searchParams.set('role', 'agent');
-  if (sourceIpIsPublic) url.searchParams.set('source_ip', sourceIp);
-  if (region) url.searchParams.set('region', region);
+  url.searchParams.set('id', 'monitor-' + crypto.randomUUID());
+  url.searchParams.set('role', 'monitor');
+  url.searchParams.set('viewer_ip', requestIp(c));
+  // admin 是每个连接自己的身份，不进共享 meta，避免访客被管理员的连接带成 admin。
+  if (admin) url.searchParams.set('admin', '1');
+  if (gzip) url.searchParams.set('gzip', '1');
 
-  return stub.fetch(new Request(url.toString(), c.req.raw));
+  const stub = liveDataStub(c.env.LIVE_DATA);
+  const forwarded = new Request(url.toString(), c.req.raw);
+  forwarded.headers.delete('X-CF-Monitor-Admin-Token');
+  if (admin) forwarded.headers.set('X-CF-Monitor-Admin-Token', getAdminSessionToken(c) || '');
+  return stub.fetch(forwarded);
 });
 
 wsRoutes.get('/ws/live-token', async (c) => {
@@ -317,13 +211,11 @@ wsRoutes.get('/ws/live-token', async (c) => {
 
 wsRoutes.get('/ws/live', async (c) => {
   if (!isWebSocketUpgrade(c)) {
-    const doId = c.env.LIVE_DATA.idFromName('global');
-    const stub = c.env.LIVE_DATA.get(doId);
-    const url = new URL(c.req.url);
-    const includeHidden = url.searchParams.get('include_hidden') === '1' && await hasAdminSession(c);
-    if (includeHidden) url.searchParams.set('include_hidden', '1');
-    else url.searchParams.delete('include_hidden');
-    return stub.fetch(new Request(url.toString(), { method: 'GET' }));
+    const limited = await guardPublicLive(c);
+    if (limited) return limited;
+    const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
+    const snapshot = await loadLiveSnapshot(c.env, includeHidden);
+    return c.json(snapshot, 200, { 'Cache-Control': 'no-store' });
   }
   if (!requestHasValidOrigin(c)) {
     return c.json({ error: 'Invalid WebSocket Origin' }, 403);
@@ -342,8 +234,7 @@ wsRoutes.get('/ws/live', async (c) => {
     return c.json({ error: 'Invalid viewer token' }, 403);
   }
 
-  const doId = c.env.LIVE_DATA.idFromName('global');
-  const stub = c.env.LIVE_DATA.get(doId);
+  const stub = liveDataStub(c.env.LIVE_DATA);
   const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
 
   const url = new URL(c.req.url);
@@ -355,20 +246,28 @@ wsRoutes.get('/ws/live', async (c) => {
   url.searchParams.set('viewer_ip', viewerIp);
   if (includeHidden) url.searchParams.set('include_hidden', '1');
 
-  return stub.fetch(new Request(url.toString(), c.req.raw));
+  const forwarded = new Request(url.toString(), c.req.raw);
+  forwarded.headers.delete('X-CF-Monitor-Admin-Token');
+  if (includeHidden) forwarded.headers.set('X-CF-Monitor-Admin-Token', getAdminSessionToken(c) || '');
+  return stub.fetch(forwarded);
 });
 
 wsRoutes.get('/live/clients', async (c) => {
-  const limited = await enforceLiveClientsRateLimit(c, requestIp(c));
+  const startedAt = performance.now();
+  const limited = await guardPublicLive(c);
+  const rateLimitMs = performance.now() - startedAt;
   if (limited) return limited;
   const includeHidden = c.req.query('include_hidden') === '1' && await hasAdminSession(c);
 
-  const doId = c.env.LIVE_DATA.idFromName('global');
-  const stub = c.env.LIVE_DATA.get(doId);
-
-  const response = await stub.fetch(new Request(`https://do/live${includeHidden ? '?include_hidden=1' : ''}`, { method: 'GET' }));
-  const snapshot = await readLiveSnapshot(response) ?? { online: [], count: 0 };
+  const liveStarted = performance.now();
+  const snapshot = await loadLiveSnapshot(c.env, includeHidden);
+  const liveMs = performance.now() - liveStarted;
   c.header('Cache-Control', includeHidden ? 'no-store' : `public, max-age=${LIVE_CLIENTS_CACHE_SECONDS}, s-maxage=${LIVE_CLIENTS_CACHE_SECONDS}, stale-while-revalidate=${LIVE_CLIENTS_CACHE_SECONDS * 2}`);
+  c.header('Server-Timing', [
+    `rate-limit;dur=${rateLimitMs.toFixed(1)}`,
+    `live;dur=${liveMs.toFixed(1)}`,
+    `total;dur=${(performance.now() - startedAt).toFixed(1)}`,
+  ].join(', '));
   return c.json(snapshot);
 });
 

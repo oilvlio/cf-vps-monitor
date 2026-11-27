@@ -23,16 +23,13 @@ test('V-W01 all Ping entry points share the same per-client persistence reservat
     const namespace = await f.mf.getDurableObjectNamespace('LIVE_DATA');
     return namespace.get(namespace.idFromName(name));
   };
-  const post = (stub, format, timestamp, clientId = 'serial-node') => format === 'standalone'
-    ? stub.fetch('https://do/ping-result', { method: 'POST', body: JSON.stringify({
-      client_id: clientId, timestamp, results: [{ task_id: 1, value: 23, interval_sec: 120 }],
-    }) })
-    : stub.fetch('https://do/client-report', { method: 'POST', body: JSON.stringify({
+  const post = (stub, _format, timestamp, clientId = 'serial-node') =>
+    stub.fetch('https://do/client-report', { method: 'POST', body: JSON.stringify({
       uuid: clientId, name: 'Synthetic serial', report: { cpu: 21, timestamp, ping_results: [{ task_id: 1, value: 23 }] },
     }) });
   const rows = async client => (await f.database.query('select count(*)::int as n from ping_snapshots where client=$1', [client])).rows[0].n;
 
-  for (const firstFormat of ['standalone', 'report']) for (const secondFormat of ['standalone', 'report']) {
+  for (const firstFormat of ['report']) for (const secondFormat of ['report']) {
     await t.test(`${firstFormat} followed by ${secondFormat} preserves one interval while SQL is waiting`, async () => {
       await f.database.exec('delete from ping_snapshots');
       const stub = await stubFor(`ping-serial-${firstFormat}-${secondFormat}`);

@@ -1,0 +1,600 @@
+import assert from 'node:assert/strict';
+import { createWorkerLoader } from '../../test-support/worker-module.mjs';
+
+// 路由里 nowMs 取真实时钟，所以实时载荷的时间戳也要相对当前时间构造。
+const NOW = Date.now();
+const GIB = 1024 ** 3;
+
+const clients = [
+  {
+    uuid: 'node-1', name: '东京', sort_order: 1, hidden: false,
+    region: 'JP', group: '亚洲', public_remark: '直连',
+    os: 'Debian', kernel_version: '6.12.0', arch: 'x86_64', virtualization: 'kvm',
+    cpu_name: 'EPYC', cpu_cores: 2,
+    mem_total: 2 * GIB, swap_total: GIB, disk_total: 40 * GIB,
+    version: '1.2.0', billing_cycle: 30, currency: 'CNY', price: 29.9,
+    expired_at: '2026-01-11T00:00:00.000Z',
+    traffic_limit: 1024 * GIB, traffic_limit_type: 'sum', traffic_reset_day: 1,
+  },
+  {
+    uuid: 'node-2', name: '离线节点', sort_order: 2, hidden: false,
+    region: 'US', group: '', public_remark: '',
+    os: 'Debian', kernel_version: '6.1', arch: 'x86_64', virtualization: 'kvm',
+    cpu_name: 'Xeon', cpu_cores: 1,
+    mem_total: GIB, swap_total: 0, disk_total: 20 * GIB,
+    version: '1.0.0', billing_cycle: 365, currency: 'USD', price: 5,
+    expired_at: '', traffic_limit: 0, traffic_limit_type: 'sum', traffic_reset_day: 1,
+  },
+];
+
+const liveBody = {
+  online: ['node-1'],
+  count: 1,
+  data: {
+    'node-1': {
+      cpu: 12.5, load: 0.5, load5: 0.4, load15: 0.3,
+      ram: GIB, ram_total: 3 * GIB, swap: 0, swap_total: 0,
+      disk: 2 * GIB, disk_total: 42 * GIB,
+      net_in: 111, net_out: 222,
+      net_total_up: 5 * GIB, net_total_down: 9 * GIB,
+      connections: 30, connections_udp: 6, process_count: 120,
+      uptime: 3600, timestamp: NOW - 5000, lastReportTime: NOW - 3000,
+    },
+  },
+  last_known: {
+    'node-2': {
+      cpu: 0, net_total_up: GIB, net_total_down: 2 * GIB, timestamp: NOW - 5 * 3600 * 1000,
+      lastReportTime: NOW - 5 * 3600 * 1000,
+    },
+  },
+  timestamp: NOW,
+};
+
+// 隐藏节点：只对管理员会话可见（getPublicClientsSnapshot 的 includeHidden）。
+const hiddenClient = { ...clients[1], uuid: 'node-hidden', name: '隐藏节点', hidden: true, sort_order: 9 };
+// DO 的 /live：只有带 include_hidden 才包含隐藏节点的实时条目（与真实 DO 一致）。
+function liveBodyFor(includeHidden) {
+  if (!includeHidden) return liveBody;
+  return {
+    ...liveBody,
+    online: [...liveBody.online, 'node-hidden'],
+    count: liveBody.count + 1,
+    data: { ...liveBody.data, 'node-hidden': { cpu: 3, timestamp: NOW - 5000, lastReportTime: NOW - 3000 } },
+  };
+}
+
+const liveRequests = [];
+const env = {
+  LIVE_DATA: {
+    idFromName: () => 'global',
+    get: () => ({
+      fetch: async (request) => {
+        const search = new URL(request.url).search;
+        liveRequests.push(search);
+        return new Response(JSON.stringify(liveBodyFor(search.includes('include_hidden=1'))), { headers: { 'Content-Type': 'application/json' } });
+      },
+    }),
+  },
+};
+
+const recordRow = {
+  ts: Math.floor((NOW - 60_000) / 60_000) * 60,
+  samples: 2,
+  minutes: 2,
+  cpu: 10,
+  cpu_max: 35,
+  mem_used: 100,
+  disk_used: 50,
+  net_rx: 1000,
+  net_tx: 500,
+  net_rx_max: 4000,
+  net_tx_max: 1500,
+  swap_used: 5,
+  tcp: 20,
+  udp: 4,
+  procs: 88,
+};
+
+const totalsByClient = {
+  'node-1': { day_rx: 100, day_tx: 50, total_rx: 1e12, total_tx: 5e11 },
+  'node-2': { day_rx: 0, day_tx: 0, total_rx: 2e9, total_tx: 1e9 },
+};
+
+const recordCalls = [];
+let adminAllowed = false;
+let pingRecordTaskIds = [];
+let pingTaskCalls = 0;
+let settingsCalls = 0;
+let settingFailure = false;
+const monitorThemeConfigs = new Map();
+let hostedThemeEnabled = false;
+
+const loader = createWorkerLoader({
+  db: {
+    listPingTasks: async () => {
+      pingTaskCalls += 1;
+      return [
+      { id: 1, name: '电信', clients: ['node-1'], all_clients: false, sort_order: 2, type: 'icmp', target: '1.1.1.1', interval_sec: 60 },
+      { id: 2, name: '移动', clients: ['node-2'], all_clients: false, sort_order: 3, type: 'icmp', target: '2.2.2.2', interval_sec: 60 },
+      { id: 3, name: '联通', clients: ['node-1'], all_clients: false, sort_order: 1, type: 'icmp', target: '3.3.3.3', interval_sec: 60 },
+      { id: 4, name: '未分配', clients: [], all_clients: false, sort_order: 0, type: 'icmp', target: '4.4.4.4', interval_sec: 60 },
+      ];
+    },
+    listClients: async () => clients,
+    getTheme: async (_database, short) => (
+      short === 'hex' ? { config_json: '{"accent":"#fff"}' }
+        : short === 'LuminaPlus' ? { config_json: '{}', manifest_json: '{}' }
+          : null
+    ),
+    getSetting: async (_database, key) => {
+      if (settingFailure) throw new Error('database unavailable');
+      if (key === 'third_party_theme' && hostedThemeEnabled) {
+        return JSON.stringify({ enabled: true, theme_url: 'https://github.com/example/Monitor-Theme-LuminaPlus' });
+      }
+      return monitorThemeConfigs.get(key) ?? null;
+    },
+    setSetting: async (_database, key, value) => monitorThemeConfigs.set(key, value),
+    getSettingsByKeys: async () => {
+      settingsCalls += 1;
+      return { record_persist_interval_sec: '120' };
+    },
+    getTrafficTotals: async (_database, clients) => Object.fromEntries(
+      clients.map(uuid => [uuid, totalsByClient[uuid] ?? { day_rx: 0, day_tx: 0, total_rx: 0, total_tx: 0 }]),
+    ),
+    getRecordsByTimeRangeAggregated: async (_database, client) => {
+      recordCalls.push(client);
+      return [recordRow];
+    },
+    getPingRecordsForTasksRangeBucketed: async (_database, _client, taskIds) => {
+      pingRecordTaskIds = taskIds;
+      return ({
+        1: [
+          {
+            client: 'node-1', task_id: 1, time: new Date(NOW - 60_000).toISOString(),
+            value: 42, sample_count: 10, loss_count: 3, min_latency: 30, max_latency: 55,
+          },
+          {
+            client: 'node-1', task_id: 1, time: new Date(NOW - 1_800_000).toISOString(),
+            value: -1, sample_count: 2, loss_count: 2,
+          },
+        ],
+        2: [{ client: 'node-1', task_id: 2, time: new Date(NOW - 60_000).toISOString(), value: 5, sample_count: 5, loss_count: 0 }],
+        3: [{ client: 'node-1', task_id: 3, time: new Date(NOW - 60_000).toISOString(), value: 15, sample_count: 1, loss_count: 0 }],
+      });
+    },
+    // 整窗统计：故意给一组与分桶行不同的数字，证明顶层 loss 用全窗口的值，
+    // 而不是被绘图桶 limit 截断后的那一段。
+    getPingStatsForTasksRange: async () => ({
+      1: { samples: 100, loss_count: 7 },
+      3: { samples: 1, loss_count: 0 },
+    }),
+    getPingStatsFromRollupRange: async () => ({ 1: { samples: 100, loss_count: 7 } }),
+  },
+  overrides: {
+    'worker/src/utils/third-party-theme.ts': {
+      THIRD_PARTY_THEME_SETTING_KEY: 'third_party_theme',
+      parseThirdPartyThemeSettings: raw => raw ? JSON.parse(raw) : { enabled: false },
+      parseThemeUrl: () => ({ repository: true }),
+      fetchPublishedThemeFile: async () => Response.json({ short: 'HostedTheme' }),
+    },
+    'worker/src/routes/public.ts': {
+      getPublicClientsSnapshot: async (_c, _database, _force, includeHidden) => {
+        const list = includeHidden ? [...clients, hiddenClient] : clients;
+        return { clients: list, nodes: [], publicClientIds: new Set(list.map(c => c.uuid)) };
+      },
+      guardPublicMetadata: async () => null,
+      guardMonitorMetrics: async () => null,
+      hasAdminSession: async () => adminAllowed,
+    },
+  },
+});
+
+const { monitorCompatRoutes, clearMonitorHistoryCache, clearMonitorMetricsMetaCache, clearThemeConfigCache } = loader.load('worker/src/routes/monitor-compat.ts');
+const { monitorNumericId } = loader.load('worker/src/monitor/contract.ts');
+// 契约里的 id 是整数（UUID 经 monitorNumericId 映射），路径与查找都用这个。
+const ID1 = monitorNumericId('node-1');
+const ID2 = monitorNumericId('node-2');
+const get = path => monitorCompatRoutes.request(path, { method: 'GET' }, env);
+
+// --- /ping-tasks mirrors Monitor's admin-only task shape ---
+{
+  const unauthorized = await get('/ping-tasks');
+  assert.equal(unauthorized.status, 401, 'ping task targets must not be public');
+  adminAllowed = true;
+  const response = await get('/ping-tasks');
+  adminAllowed = false;
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('Cache-Control'), 'private, no-store');
+  const body = await response.json();
+  assert.equal(body.tasks[0].interval, 60);
+  assert.equal(body.tasks[0].target, '1.1.1.1');
+  assert.deepEqual(body.tasks[0].nodes, [ID1]);
+}
+
+// --- /nodes ---
+{
+  const res = await get('/nodes');
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('Cache-Control'), /max-age=4/);
+  assert.match(res.headers.get('Cache-Control'), /s-maxage=4/);
+  const body = await res.json();
+  assert.equal(body.admin, false);
+  assert.equal(body.nodes.length, 2);
+
+  const node = body.nodes.find(n => n.id === ID1);
+  assert.ok(Number.isInteger(node.id), 'id 必须是整数');
+  assert.equal(node.online, true);
+  assert.equal(node.billing_cycle, 'monthly');
+  assert.equal(node.currency, 'CNY');
+  assert.equal(node.month_rx, 9 * GIB);      // net_total_down = 本计费周期下行
+  assert.equal(node.month_tx, 5 * GIB);
+  assert.equal(node.month_used, 14 * GIB);
+  // day_* / total_* 来自 cfm_traffic_totals（批量）。
+  assert.equal(node.day_rx, 100);
+  assert.equal(node.day_tx, 50);
+  assert.equal(node.total_rx, 1e12);
+  assert.equal(node.total_tx, 5e11);
+  // month_start 跟最后一次上报（夹具是 3 秒前）走；重置日是 1 号，所以取那次
+// 上报所在月份的 1 日。这样跨月瞬间不会把仍属于上个周期的合计标成新周期。
+  const reportDate = new Date(NOW - 3000).toISOString().slice(0, 8);
+  assert.equal(node.month_start, `${reportDate}01`);
+  // last_seen_ago 是距最后一次上报的真实秒数（夹具是 3 秒前），不是固定 0。
+  assert.ok(
+    node.last_seen_ago >= 3 && node.last_seen_ago <= 13,
+    `在线节点 last_seen_ago 应约为 3 秒，实际 ${node.last_seen_ago}`,
+  );
+  // 顶层容量与 metrics 同源；在线时报告优先，库里存的旧容量（40G/GiB swap）不生效。
+  assert.equal(node.mem_total, 3 * GIB);
+  assert.equal(node.swap_total, 0);
+  assert.equal(node.disk_total, 42 * GIB);
+  assert.equal(node.metrics.mem_total, node.mem_total);
+  assert.equal(node.metrics.swap_total, node.swap_total);
+  assert.equal(node.metrics.disk_total, node.disk_total);
+  assert.equal(node.traffic_mode, 'sum');
+  assert.ok(node.metrics, '在线节点应有 metrics');
+  assert.equal(node.metrics.tcp, 30);
+
+  const offline = body.nodes.find(n => n.id === ID2);
+  assert.equal(offline.online, false);
+  assert.equal(offline.metrics, null);
+  assert.equal(offline.billing_cycle, 'yearly');
+  // 路由用自己的 Date.now() 计算「已过去秒数」，与夹具的 NOW 可能差几百毫秒到几秒
+  // （并行跑测试时更明显），所以给一个窄区间而不是精确值。
+  assert.ok(
+    offline.last_seen_ago >= 5 * 3600 && offline.last_seen_ago <= 5 * 3600 + 10,
+    `last_seen_ago 应约为 5h，实际 ${offline.last_seen_ago}`,
+  );
+  assert.equal(offline.month_rx, 2 * GIB);   // 离线也读 last_known 的周期合计
+  assert.equal(offline.day_rx, 0);
+  assert.equal(offline.total_rx, 2e9);
+  assert.equal(offline.expires_at, null);
+}
+
+// --- /nodes/:id/metrics 默认（metrics + ping） ---
+{
+  const res = await get(`/nodes/${ID1}/metrics?hours=24&points=1440`);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.step, 60);
+  assert.equal(body.metrics.length, 1);
+  assert.equal(body.metrics[0].cpu, 10);
+  assert.equal(body.metrics[0].cpu_max, 35);
+  assert.equal(body.metrics[0].net_rx_max, 4000);
+  assert.equal(body.metrics[0].minutes, 1);
+  for (const key of ['ts', 'minutes', 'cpu', 'cpu_max', 'mem_used', 'disk_used', 'net_rx', 'net_tx', 'net_rx_max', 'net_tx_max', 'swap_used', 'tcp', 'udp', 'procs']) {
+    assert.ok(key in body.metrics[0], `metrics 行缺 ${key}`);
+  }
+  assert.equal(body.ping.length, 3);
+  assert.deepEqual(JSON.parse(JSON.stringify(pingRecordTaskIds)), [3, 1], 'query only assigned tasks in backend order');
+  assert.deepEqual(body.ping.filter(row => row.ts === body.ping.at(-1).ts).map(row => row.task_id), [3, 1]);
+  const lost = body.ping.find(row => row.latency === null);
+  assert.equal(lost.loss, 100);
+  // 桶内 10 个样本丢 3 个：逐桶 loss 是桶内百分比,不能丢。
+  const partialLoss = body.ping.find(row => row.task_id === 1 && row.latency === 42);
+  assert.equal(partialLoss.loss, 30);
+  // 零丢包的探测不带 loss,也不进窗口字典(主题按缺失 = 0% 读取)。
+  const clean = body.ping.find(row => row.task_id === 3);
+  assert.equal(clean.loss, undefined);
+  assert.deepEqual(body.probes, { 1: '电信', 3: '联通' });
+  // 窗口丢包率来自整窗统计（7/100），不是分桶行累计的 5/12：绘图桶被截断时
+  // 后者只覆盖返回的那一段。
+  assert.deepEqual(body.loss, { 1: 7 });
+  // 数字 id 必须被换回 UUID 再查库。
+  assert.deepEqual(recordCalls, ['node-1']);
+}
+
+// --- series=ping：不要 metrics ---
+{
+  const body = await (await get(`/nodes/${ID1}/metrics?hours=24&points=120&series=ping`)).json();
+  assert.equal(body.step, 720);              // 86400/60/120 -> 12 分钟
+  assert.deepEqual(body.metrics, []);
+  assert.equal(body.ping.length, 3);
+  assert.deepEqual(body.probes, { 1: '电信', 3: '联通' });
+}
+
+// --- series=metrics：不要 ping / probes ---
+{
+  const body = await (await get(`/nodes/${ID1}/metrics?hours=24&series=metrics`)).json();
+  assert.equal(body.metrics.length, 1);
+  assert.deepEqual(body.ping, []);
+  assert.deepEqual(body.probes, {});
+}
+
+// --- 相同查询 10s 内只触达一次数据库（主题按节点扇出轮询） ---
+{
+  clearMonitorHistoryCache();
+  recordCalls.length = 0;
+  const path = `/nodes/${ID1}/metrics?hours=24&points=1&series=metrics`;
+  const first = await get(path);
+  const firstBody = await first.json();
+  const second = await get(path);
+  const secondBody = await second.json();
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  assert.deepEqual(secondBody, firstBody);
+  assert.equal(recordCalls.length, 1, '重复查询应命中进程内缓存');
+  assert.match(second.headers.get('Cache-Control'), /max-age=10/);
+  // 不同 series 不能被同一份缓存冒充。
+  const pingBody = await (await get(`/nodes/${ID1}/metrics?hours=24&points=1&series=ping`)).json();
+  assert.deepEqual(pingBody.metrics, [], 'series=ping 返回的 metrics 应为空');
+  assert.ok(pingBody.ping.length > 0, 'series=ping 应返回 ping 数据');
+  assert.equal(recordCalls.length, 1, 'series=ping 不查 records');
+}
+
+// --- 未知节点：空但形状完整 ---
+{
+  const res = await get('/nodes/missing/metrics?hours=6');
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.deepEqual(body.metrics, []);
+  assert.deepEqual(body.ping, []);
+  assert.deepEqual(body.probes, {});
+  assert.deepEqual(body.loss, {});
+  assert.equal(body.step, 60);
+}
+
+// --- 用 UUID 直接当 id 不再匹配（契约里 id 是整数）---
+{
+  const body = await (await get('/nodes/node-1/metrics?hours=6')).json();
+  assert.deepEqual(body.metrics, [], 'UUID 不是合法 id，应查不到节点');
+}
+
+// --- /themes/:short/config ---
+{
+  assert.deepEqual(await (await get('/themes/hex/config')).json(), { accent: '#fff' });
+  assert.deepEqual(await (await get('/themes/unknown/config')).json(), {});
+
+  const path = '/themes/LuminaPlus/config';
+  const config = { chart: { smooth: true }, colors: ['#123456', '#abcdef'] };
+  const denied = await monitorCompatRoutes.request(path, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  }, env);
+  assert.equal(denied.status, 401, 'writing theme config requires an administrator session');
+
+  adminAllowed = true;
+  try {
+    const sameOrigin = { Origin: 'http://localhost' };
+    const missingOrigin = await monitorCompatRoutes.request(path, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refused: true }),
+    }, env);
+    assert.equal(missingOrigin.status, 403, 'an authenticated browser write still requires same-origin provenance');
+
+    const crossOrigin = await monitorCompatRoutes.request(path, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Origin: 'https://attacker.example' },
+      body: JSON.stringify({ refused: true }),
+    }, env);
+    assert.equal(crossOrigin.status, 403, 'cross-origin writes must be rejected');
+
+    const notInstalled = await monitorCompatRoutes.request('/themes/not-installed/config', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json', ...sameOrigin }, body: '{}',
+    }, env);
+    assert.equal(notInstalled.status, 404, 'only installed/available theme ids are writable');
+
+    hostedThemeEnabled = true;
+    try {
+      const hosted = await monitorCompatRoutes.request('/themes/HostedTheme/config', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json', ...sameOrigin }, body: '{}',
+      }, env);
+      assert.equal(hosted.status, 200, 'an enabled hosted theme is selectable without a themes table row');
+      const wrongShort = await monitorCompatRoutes.request('/themes/OtherTheme/config', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json', ...sameOrigin }, body: '{}',
+      }, env);
+      assert.equal(wrongShort.status, 404, 'hosted manifest must match the requested short');
+    } finally {
+      hostedThemeEnabled = false;
+    }
+
+    const largeButAllowed = await monitorCompatRoutes.request('/themes/monitor/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...sameOrigin },
+      body: JSON.stringify({ note: 'x'.repeat(40 * 1024) }),
+    }, env);
+    assert.equal(largeButAllowed.status, 200, 'theme settings keep the monitor-compatible 64 KiB budget');
+    const tooLarge = await monitorCompatRoutes.request('/themes/monitor/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...sameOrigin },
+      body: JSON.stringify({ note: '中'.repeat(24 * 1024) }),
+    }, env);
+    assert.equal(tooLarge.status, 413, 'the 64 KiB budget counts UTF-8 bytes');
+
+    const saved = await monitorCompatRoutes.request(path, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...sameOrigin },
+      body: JSON.stringify(config),
+    }, env);
+    assert.equal(saved.status, 200);
+    const savedBody = await saved.json();
+    assert.equal(savedBody.success, true);
+    assert.deepEqual(savedBody.config, config, 'PUT 响应应直接带回新配置');
+
+    const loaded = await get(path);
+    assert.equal(loaded.headers.get('Cache-Control'), 'private, no-store');
+    assert.deepEqual(await loaded.json(), config);
+
+    // 5 秒 isolate 缓存：直接改库后立即 GET 仍返回旧值，保存路径清缓存后才更新。
+    monitorThemeConfigs.set(
+      'monitor_theme_config:LuminaPlus',
+      JSON.stringify({ accent: '#000' }),
+    );
+    assert.deepEqual(await (await get(path)).json(), config, '5 秒内应复用 isolate 缓存');
+    clearThemeConfigCache('LuminaPlus');
+    assert.deepEqual(await (await get(path)).json(), { accent: '#000' });
+  } finally {
+    adminAllowed = false;
+  }
+
+  adminAllowed = true;
+  try {
+    const sameOrigin = { Origin: 'http://localhost' };
+    const invalid = await monitorCompatRoutes.request(path, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...sameOrigin },
+      body: '[]',
+    }, env);
+    assert.equal(invalid.status, 400, 'configuration must be a JSON object');
+  } finally {
+    adminAllowed = false;
+  }
+}
+
+// --- 主题配置读失败：不能伪装成空对象 ---
+{
+  clearThemeConfigCache('LuminaPlus');
+  settingFailure = true;
+  try {
+    const failed = await get('/themes/LuminaPlus/config');
+    assert.equal(failed.status, 500, '数据库读失败应返回 500，而不是 {}');
+    assert.match(failed.headers.get('Cache-Control') ?? '', /no-store/);
+  } finally {
+    settingFailure = false;
+  }
+  // 故障恢复后仍能读回原值，失败不能污染 5 秒缓存。
+  const recovered = await get('/themes/LuminaPlus/config');
+  assert.equal(recovered.status, 200);
+  assert.deepEqual(await recovered.json(), { accent: '#000' });
+}
+
+// --- 管理员会话可见隐藏节点（与内置前台一致），访客不可见 ---
+{
+  const HIDDEN_ID = monitorNumericId('node-hidden');
+
+  // 访客：没有隐藏节点，实时数据请求也不带 include_hidden。
+  liveRequests.length = 0;
+  const guest = await (await get('/nodes')).json();
+  assert.equal(guest.admin, false);
+  assert.equal(guest.nodes.some(n => n.id === HIDDEN_ID), false);
+  assert.ok(liveRequests.length > 0 && liveRequests.every(search => !search.includes('include_hidden')));
+  const guestMetrics = await (await get(`/nodes/${HIDDEN_ID}/metrics?hours=1`)).json();
+  assert.deepEqual(guestMetrics.metrics, [], '访客查隐藏节点历史得到空结果');
+
+  adminAllowed = true;
+  try {
+    liveRequests.length = 0;
+    const res = await monitorCompatRoutes.request('/nodes', {
+      method: 'GET',
+      headers: { Cookie: 'cf_monitor_session=test' },
+    }, env);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('Cache-Control'), /no-store/, '管理员响应不能进共享缓存');
+    const body = await res.json();
+    assert.equal(body.admin, true);
+    const hidden = body.nodes.find(n => n.id === HIDDEN_ID);
+    assert.ok(hidden, '管理员应看到隐藏节点');
+    assert.equal(hidden.public, false);
+    assert.equal(hidden.online, true, '隐藏节点的实时数据要带上');
+    assert.equal(hidden.metrics.cpu, 3);
+    // 其余节点与访客视图是同一批；字段集与普通节点一致（不多出私有字段）。
+    assert.deepEqual(body.nodes.filter(n => n.id !== HIDDEN_ID).map(n => n.id), guest.nodes.map(n => n.id));
+    assert.deepEqual(Object.keys(hidden).sort(), Object.keys(body.nodes.find(n => n.id === ID1)).sort());
+    assert.ok(liveRequests.some(search => search.includes('include_hidden=1')), '管理员请求实时数据应带 include_hidden');
+
+    // 管理员可以查看隐藏节点的历史；响应必须按私有缓存处理，不能因为
+    // “绕过了边缘缓存”就声明 public。
+    recordCalls.length = 0;
+    const metricsResponse = await get(`/nodes/${HIDDEN_ID}/metrics?hours=1`);
+    assert.match(metricsResponse.headers.get('Cache-Control') ?? '', /private/);
+    assert.doesNotMatch(metricsResponse.headers.get('Cache-Control') ?? '', /public/);
+    const metrics = await metricsResponse.json();
+    assert.ok(metrics.metrics.length > 0, '管理员能拿到隐藏节点的历史');
+    assert.ok(recordCalls.includes('node-hidden'));
+  } finally {
+    adminAllowed = false;
+  }
+}
+
+// --- 限流/守卫短路也返回既有响应（这里 guard 返回 null，正常走到数据层）---
+{
+  const limitedLoader = createWorkerLoader({
+    db: {},
+    overrides: {
+      'worker/src/routes/public.ts': {
+        getPublicClientsSnapshot: async () => ({ clients: [], nodes: [], publicClientIds: new Set() }),
+        guardPublicMetadata: async () => new Response(JSON.stringify({ error: 'too many' }), { status: 429 }),
+        guardMonitorMetrics: async () => new Response(JSON.stringify({ error: 'too many' }), { status: 429 }),
+        hasAdminSession: async () => false,
+      },
+    },
+  });
+  const routes = limitedLoader.load('worker/src/routes/monitor-compat.ts').monitorCompatRoutes;
+  assert.equal((await routes.request('/nodes', { method: 'GET' }, env)).status, 429);
+  assert.equal((await routes.request(`/nodes/${ID1}/metrics?hours=6`, { method: 'GET' }, env)).status, 429);
+}
+
+// --- 管理员会话的 /nodes 不进共享缓存 ---
+{
+  const adminLoader = createWorkerLoader({
+    db: {
+      getTrafficTotals: async () => ({}),
+    },
+    overrides: {
+      'worker/src/routes/public.ts': {
+        getPublicClientsSnapshot: async () => ({ clients, nodes: [], publicClientIds: new Set(clients.map(c => c.uuid)) }),
+        guardPublicMetadata: async () => null,
+        guardMonitorMetrics: async () => null,
+        hasAdminSession: async () => true,
+      },
+    },
+  });
+  const adminRoutes = adminLoader.load('worker/src/routes/monitor-compat.ts').monitorCompatRoutes;
+  const res = await adminRoutes.request('/nodes', { method: 'GET' }, env);
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).admin, true);
+  assert.match(res.headers.get('Cache-Control'), /private/);
+  assert.doesNotMatch(res.headers.get('Cache-Control'), /public/);
+}
+
+// --- metrics 元数据缓存：任务列表/落库间隔 30 秒内只查一次 ---
+{
+  clearMonitorHistoryCache();
+  clearMonitorMetricsMetaCache();
+  pingTaskCalls = 0;
+  settingsCalls = 0;
+  recordCalls.length = 0;
+
+  const first = await get(`/nodes/${ID1}/metrics?hours=24&points=1440`);
+  assert.equal(first.status, 200);
+  assert.equal(pingTaskCalls, 1, '首次 metrics 应查一次 ping 任务');
+  assert.equal(settingsCalls, 1, '首次 metrics 应查一次落库间隔');
+  assert.match(first.headers.get('server-timing') || '', /meta;dur=[\d.]+;desc="database"/);
+  const recordsAfterFirst = recordCalls.length;
+
+  const second = await get(`/nodes/${ID1}/metrics?hours=24&points=1440`);
+  assert.equal(second.status, 200);
+  assert.match(second.headers.get('server-timing') || '', /history;desc="memory"/);
+  assert.equal(pingTaskCalls, 1, '历史缓存命中时不应再查任务列表');
+  assert.equal(settingsCalls, 1, '历史缓存命中时不应再查落库间隔');
+  assert.equal(recordCalls.length, recordsAfterFirst, '历史缓存命中时不应再查区间');
+
+  const third = await get(`/nodes/${ID1}/metrics?hours=6&points=1440`);
+  assert.equal(third.status, 200);
+  assert.match(third.headers.get('server-timing') || '', /meta;dur=[\d.]+;desc="cache"/);
+  assert.equal(pingTaskCalls, 1, '不同窗口仍应复用 30 秒元数据缓存');
+  assert.equal(settingsCalls, 1, '不同窗口仍应复用 30 秒元数据缓存');
+}
+
+console.log('monitor-compat route tests passed');

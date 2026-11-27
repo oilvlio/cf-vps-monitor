@@ -2,9 +2,10 @@ name: CI
 
 on:
   push:
-    branches:
-      - '**'
   pull_request:
+    branches:
+      - main
+  workflow_dispatch:
   workflow_call:
 
 permissions:
@@ -57,29 +58,6 @@ jobs:
       - name: Installer service account permissions
         run: |
           sudo "$(command -v node)" --test --test-name-pattern='^compat (systemd|openrc) (default paths|must not open permissions)' agent/install-compat.test.mjs
-          sudo "$(command -v node)" --test --test-name-pattern='^native ' agent/disk-collector-install.test.mjs
-
-      - name: Agent root collector permissions
-        working-directory: agent
-        run: |
-          go test -c -o "$RUNNER_TEMP/cf-monitor-agent-native.test" .
-          sudo sh -s -- "$RUNNER_TEMP/cf-monitor-agent-native.test" <<'NATIVE'
-          set -eu
-          native_dir="$(mktemp -d /run/cf-monitor-agent-native.XXXXXX)"
-          cleanup() {
-            native_status=$?
-            trap - EXIT HUP INT TERM
-            case "$native_dir" in /run/cf-monitor-agent-native.??????) ;; *) exit 98 ;; esac
-            [ "$(readlink -f -- "$native_dir")" = "$native_dir" ] || exit 99
-            rm -rf -- "$native_dir"
-            exit "$native_status"
-          }
-          trap cleanup EXIT HUP INT TERM
-          chmod 0755 "$native_dir"
-          install -m 0755 "$1" "$native_dir/agent.test"
-          mkdir -m 0755 "$native_dir/tmp"
-          TMPDIR="$native_dir/tmp" "$native_dir/agent.test" -test.run '^TestDirectoryDiskNative' -test.v
-          NATIVE
 
       - name: Agent data race check
         working-directory: agent
@@ -94,3 +72,59 @@ jobs:
         run: |
           npm run build:migrations
           git diff --exit-code -- supabase/ worker/src/generated/
+
+  browser:
+    name: Browser regressions
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Browser regressions
+        run: npm --prefix frontend run test:browser
+
+  postgres:
+    name: Real Postgres concurrency
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # PGlite keeps the fast unit tests; this job is the only place where
+      # multiple real connections exercise partition locks and delete/build races.
+      - name: Real Postgres tests
+        run: npm run test:postgres

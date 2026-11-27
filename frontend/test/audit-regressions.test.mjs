@@ -3,36 +3,29 @@ import assert from 'node:assert/strict';
 import { getChangedSettings } from '../src/utils/settingsDiff.ts';
 import { normalizeLiveDataResponse } from '../src/utils/liveDataResponse.ts';
 import { normalizePublicClients } from '../src/utils/publicClients.ts';
-import { normalizePublicMonitorRecords, normalizePublicGpuRecords } from '../src/utils/publicHistory.ts';
+import { normalizePublicMonitorRecord, normalizePublicMonitorRecords } from '../src/utils/publicHistory.ts';
+import { buildMonitorChartData, getMonitorChartRenderData } from '../src/utils/monitorChartData.ts';
 import { buildApiRequest } from '../src/utils/api.ts';
 import { runWithMfaStepUpRetry } from '../src/utils/mfa.ts';
 import { shouldClearAuthForStatus } from '../src/contexts/auth-state.ts';
+import { validateAdminPasswordLength } from '../src/utils/passwordPolicy.ts';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { BroadcastChannel as NativeBroadcastChannel } from 'node:worker_threads';
 import { productionDeclaration, productionJsx, productionModule, productionEffect, productionSelected } from './helpers/production-module.mjs';
 
 const require = createRequire(new URL('../package.json', import.meta.url));
-const { renderToStaticMarkup } = require('react-dom/server');
-const { TextField, Text } = require('@radix-ui/themes');
-
 const notifications = 'src/pages/admin/Notifications.tsx';
+const notificationSource = readFileSync(new URL('../src/pages/admin/Notifications.tsx', import.meta.url), 'utf8');
 
-const capacitySettings = { record_enabled: 'true', record_preserve_time: '72', ping_record_preserve_time: '72', live_poll_active_interval_sec: '3', live_poll_idle_interval_sec: '120', record_persist_interval_sec: '120', ping_record_persist_interval_sec: '120', record_high_watermark_bytes: '419430400', record_high_watermark_rows: '700000', capacity_daily_view_minutes: '0' };
-function capacityInput(overrides = {}) {
-  return { clients: 50, gpu_clients: 0, ping_records_per_day: 36000, ping_tasks: [{ id: 1, target_client_count: 50 }, { id: 2, target_client_count: 50 }], history_total_bytes: 900 * 1024 ** 2, history_storage_usage: { live_rows: 100, live_row_bytes: 100 * 1024 ** 2, estimated_live_storage_bytes: 100 * 1024 ** 2, allocated_bytes: 900 * 1024 ** 2, reusable_bytes: null, measurement: 'live-row-bytes-plus-index-estimate' }, ...overrides };
-}
-function derivedCapacity(capacity, settings = capacitySettings) {
-  return productionSelected('src/pages/admin/SettingsGeneral.tsx', 'derived', { capacity, settings, originalSettings: capacitySettings })();
-}
-
-test('AUD-07 partial maintenance reports remaining work and counts website checks', async () => {
+test('AUD-07 partial maintenance reports remaining work and counts ping records', async () => {
   for (const hasMore of [true, false]) {
     let requests = 0;
     const messages = [];
     const cleanup = productionDeclaration('src/pages/admin/SettingsGeneral.tsx', 'handleMaintenanceCleanup', {
-      setCleaning() {}, refreshCapacity: async () => true,
-      apiFetch: async () => { requests += 1; if (requests > 1) throw new Error('Unexpected client cleanup loop'); return { success: true, has_more: hasMore, deleted: { records: 1, website_checks: 2 } }; },
+      setCleaning() {},
+      apiFetch: async () => { requests += 1; if (requests > 1) throw new Error('Unexpected client cleanup loop'); return { success: true, has_more: hasMore, deleted: { records: 1, ping_records: 2 } }; },
       formatInteger: productionDeclaration('src/pages/admin/SettingsGeneral.tsx', 'formatInteger'),
       toast: { info: message => messages.push(['info', message]), success: message => messages.push(['success', message]), error: message => messages.push(['error', message]) },
     });
@@ -42,41 +35,6 @@ test('AUD-07 partial maintenance reports remaining work and counts website check
     if (hasMore) assert.match(messages[0][1], /仍有|继续清理/);
     assert.equal(requests, 1);
   }
-});
-
-test('AUD-13 frontend history budget uses live data estimate instead of allocated file size', () => {
-  const derived = derivedCapacity(capacityInput());
-  assert.equal(derived.highWatermarkBytesPercent, 25, '100 MiB live data / 400 MiB budget must be 25%, despite 900 MiB allocated');
-  const empty = derivedCapacity(capacityInput({ history_storage_usage: { estimated_live_storage_bytes: 0, allocated_bytes: 900 * 1024 ** 2 } }));
-  assert.equal(empty.hasHistoryBytes, true, 'a measured empty table is a known zero');
-  assert.equal(empty.highWatermarkBytesPercent, 0);
-});
-
-test('AUD-15 frontend estimates include separate DO writes and unknown resource dimensions', () => {
-  const derived = derivedCapacity(capacityInput());
-  const writes = derived.resourceEstimates?.find(row => row.key === 'durable_object_rows_written');
-  // 36000 final snapshots + 36000 history markers + 72000 Ping task states.
-  assert.equal(writes?.websocket, 144000, '50 nodes and two 120-second Ping tasks exceed the 100000 daily DO write allowance');
-  assert.equal(writes.within_free_websocket, false);
-  for (const key of ['durable_object_rows_read', 'durable_object_duration_gb_seconds', 'supabase_egress_bytes']) {
-    assert.equal(derived.resourceEstimates.find(row => row.key === key).websocket, null, key + ' cannot be silently treated as zero');
-  }
-});
-
-test('AUD-15 disabling history in the local preview retains final snapshot writes in both transports', () => {
-  const derived = derivedCapacity(capacityInput(), { ...capacitySettings, record_enabled: 'false' });
-  const writes = derived.resourceEstimates.find(row => row.key === 'durable_object_rows_written');
-  assert.equal(writes.websocket, 36000, 'WebSocket final snapshots persist each monitor report even without Ping history');
-  assert.equal(writes.http, 36000, 'HTTP live state still persists each monitor report without history');
-  assert.equal(writes.within_free_websocket, true);
-  assert.equal(writes.within_free_http, true);
-});
-
-test('AUD-16 frontend Paid comparison uses monthly demand and monthly included quota', () => {
-  const derived = derivedCapacity(capacityInput());
-  assert.equal(derived.mixedWorkerRequestsPerMonth, 23100, '770 estimated daily Worker requests must become 23100 for a 30-day comparison');
-  assert.equal(derived.workerPaidMonthlyRequests, 10000000);
-  assert.ok(Math.abs(derived.mixedPaidWorkerPercent - 0.231) < 1e-10);
 });
 
 function adminActionRunner(errors = []) {
@@ -143,27 +101,6 @@ test('AUD-49 Ping loading and deletion failures remain visible and handled', asy
   }
 });
 
-test('AUD-52 restore invalidates prefetched general settings and reloads restored values', async () => {
-  const settingsCacheRef = { current: { site: { site_title: 'A' }, general: { record_preserve_time: '24' } } };
-  const settingsRequestsRef = { current: {} };
-  const base = { settingsCacheRef, settingsRequestsRef, setSettingsCacheState() {} };
-  const setSettingsScope = productionDeclaration('src/pages/admin/SettingsLayout.tsx', 'setSettingsScope', base);
-  const apiFetch = async path => path.includes('/upload/backup') ? { success: true } : path.endsWith('scope=site') ? { site_title: 'B' } : { record_preserve_time: '72' };
-  const loadSettingsScope = productionDeclaration('src/pages/admin/SettingsLayout.tsx', 'loadSettingsScope', { ...base, apiFetch, setSettingsScope });
-  const restore = productionDeclaration('src/pages/admin/SettingsSite.tsx', 'handleUploadBackup', {
-    requestPassword: async () => 'synthetic-password', downloadBackupFile: async () => {}, apiFetch,
-    backupEncryptPasswordError: productionDeclaration('src/pages/admin/SettingsSite.tsx', 'backupEncryptPasswordError', { MIN_BACKUP_PASSWORD_LENGTH: 6 }),
-    toast: { success() {}, error(message) { throw new Error(message); } },
-    setSettings() {}, setOriginalSettings() {}, setSettingsScope, loadSettingsScope,
-    invalidateSettingsScopes: () => productionDeclaration('src/pages/admin/SettingsLayout.tsx', 'invalidateSettingsScopes', base)(),
-    clearCachedPublicSettings() {}, notifyPublicDataUpdated() {},
-  });
-  await restore({ target: { files: [{ text: async () => '{"synthetic":"encrypted backup"}' }], value: 'synthetic.json' } });
-  const general = await loadSettingsScope('general');
-  assert.equal(general.record_preserve_time, '72', 'a restored general setting must replace the old prefetched value without page reload');
-  assert.equal(settingsCacheRef.current.site.site_title, 'B');
-});
-
 test('AUD-05 initial administrator form requires and sends ownership key', async () => {
   for (const adminPresent of [false, true]) {
     for (const key of ['', 'synthetic-owner-proof']) {
@@ -171,6 +108,7 @@ test('AUD-05 initial administrator form requires and sends ownership key', async
       const errors = [];
       const submit = productionDeclaration('src/pages/Login.tsx', 'handleRecoverySubmit', {
         recoveryStatus: { admin_present: adminPresent }, recoveryKey: key, recoveryUsername: 'synthetic-owner', recoveryPassword: 'synthetic-password',
+        validateAdminPasswordLength,
         fetch: async (_url, options) => { bodies.push(JSON.parse(options.body)); return new Response(JSON.stringify({ mode: 'created' })); },
         toast: { error: message => errors.push(message), success() {} }, setRecoveryLoading() {}, setUsername() {}, setPassword() {}, setRecoveryPassword() {}, setRecoveryKey() {}, setRecoveryStatus() {}, setRecoveryMode() {},
       });
@@ -182,35 +120,6 @@ test('AUD-05 initial administrator form requires and sends ownership key', async
   }
 });
 
-test('AUD-44 backup downloads participate in MFA step-up and stop on cancellation', async () => {
-  for (const approved of [true, false]) {
-    let requests = 0;
-    let stepUps = 0;
-    let downloads = 0;
-    const fetch = async () => {
-      requests += 1;
-      return requests === 1 ? new Response(JSON.stringify({ error: 'MFA_REQUIRED' }), { status: 428 }) : new Response('synthetic encrypted backup');
-    };
-    const requestMfaStepUp = async () => { stepUps += 1; return approved; };
-    const apiResponseFetch = (...args) => productionDeclaration('src/contexts/AuthContext.tsx', 'useApiResponse', {
-      useAuth: () => ({ logout() {} }), useCallback: value => value,
-      buildApiRequest, runWithMfaStepUpRetry, requestMfaStepUp, fetch,
-      shouldClearAuthForStatus, readJson: productionDeclaration('src/contexts/AuthContext.tsx', 'readJson'),
-    })()(...args);
-    const download = productionDeclaration('src/pages/admin/SettingsSite.tsx', 'downloadBackupFile', {
-      buildApiRequest, fetch, apiResponseFetch, requestMfaStepUp,
-      URL: { createObjectURL: () => 'blob:synthetic', revokeObjectURL() {} },
-      document: { createElement: () => ({ click: () => { downloads += 1; } }) },
-    });
-    let failure;
-    try { await download('synthetic.json', 'synthetic-backup-password'); } catch (error) { failure = error; }
-    assert.equal(stepUps, 1, 'a 428 download must offer MFA verification');
-    assert.equal(requests, approved ? 2 : 1);
-    assert.equal(downloads, approved ? 1 : 0);
-    assert.equal(Boolean(failure), !approved);
-  }
-});
-
 function syntheticStorage(seed = []) {
   const values = new Map(seed);
   return { values, getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, String(value)), removeItem: key => values.delete(key) };
@@ -218,57 +127,158 @@ function syntheticStorage(seed = []) {
 
 const collectCursorHistory = (...args) => productionModule('src/utils/publicHistory.ts').collectCursorHistory(...args);
 
-test('AUD-43 monitoring and GPU history include the oldest and newest available three-day points', async () => {
-  for (const kind of ['monitor', 'gpu']) {
-    const done = Promise.withResolvers();
-    let calls = 0;
-    let records = [];
-    const bindings = {
-      uuid: 'node-a', client: { uuid: 'node-a', gpu_name: 'Synthetic GPU' }, authLoading: false, isAuthenticated: false, timeRange: '3d', AbortController,
-      recordsRequestRef: { current: 0 },
-      timeRangeMs: productionDeclaration('src/pages/Instance.tsx', 'timeRangeMs'),
-      timeRangePointLimit: productionDeclaration('src/pages/Instance.tsx', 'timeRangePointLimit'),
-      historyQuery: productionDeclaration('src/pages/Instance.tsx', 'historyQuery'),
-      collectCursorHistory, normalizePublicMonitorRecords, normalizePublicGpuRecords,
-      publicFetch: async url => {
-        calls += 1;
-        const end = Date.parse(new URL(url, 'https://synthetic.invalid').searchParams.get('end'));
-        const time = new Date(end - (calls === 1 ? 3600000 : 70 * 3600000)).toISOString();
-        return { data: [{ time, cpu: calls === 1 ? 99 : 11, utilization: calls === 1 ? 99 : 11 }], has_more: calls === 1, next_cursor: time };
-      },
-      setRecords: value => { records = value; },
-      setGpuRecords: value => { records = value; if (value.length) done.resolve(); },
-      setRecordsLoading() {}, setGpuLoading() {}, setRecordsRangeEnd() {}, setRecordsError() {}, setGpuError: value => { if (value) done.reject(new Error(value)); },
-    };
-    let cleanup;
-    if (kind === 'monitor') await productionDeclaration('src/pages/Instance.tsx', 'loadRecords', bindings)('3d');
-    else {
-      cleanup = productionEffect('src/pages/Instance.tsx', '/records/gpu?', bindings)();
-      await done.promise;
-    }
-    try {
-      assert.deepEqual([...records].map(record => kind === 'monitor' ? record.cpu : record.utilization), [11, 99], `${kind} history must cover both ends of the available range in chronological order`);
-      assert.equal(calls, 2);
-    } finally { cleanup?.(); }
-  }
+test('AUD-43 Host history covers the whole window with one bounded request and no raw cursor traversal', async () => {
+  let calls = 0;
+  let records = [];
+  const bindings = {
+    uuid: 'node-a', client: { uuid: 'node-a' }, authLoading: false, isAuthenticated: false, timeRange: '3d', AbortController,
+    viewTab: 'load',
+    readFreshCache: (...args) => productionModule('src/utils/historyCache.ts').readFreshCache(...args),
+    writeCache: (...args) => productionModule('src/utils/historyCache.ts').writeCache(...args),
+    recordsRequestRef: { current: 0 },
+    timeRangeMs: productionDeclaration('src/pages/Instance.tsx', 'timeRangeMs'),
+    timeRangePointLimit: productionDeclaration('src/pages/Instance.tsx', 'timeRangePointLimit'),
+    historyQuery: productionDeclaration('src/pages/Instance.tsx', 'historyQuery'),
+    collectCursorHistory, normalizePublicMonitorRecords,
+    publicFetch: async url => {
+      calls += 1;
+      const params = new URL(url, 'https://synthetic.invalid').searchParams;
+      assert.equal(params.has('cursor'), false);
+      assert.equal(params.has('page'), false);
+      assert.ok(Number(params.get('limit')) <= 1200);
+      const end = Date.parse(params.get('end'));
+      return [{ time: new Date(end - 70 * 3600000).toISOString(), cpu: 11 },
+        { time: new Date(end - 3600000).toISOString(), cpu: 99 }];
+    },
+    setRecords: value => { records = value; },
+    setRecordsLoading() {}, setRecordsRangeEnd() {}, setRecordsError() {},
+  };
+  await productionDeclaration('src/pages/Instance.tsx', 'loadRecords', bindings)('3d');
+  assert.deepEqual([...records].map(record => record.cpu), [11, 99], 'history must cover both ends of the available range in chronological order');
+  assert.equal(calls, 1);
 });
 
-test('AUD-43 long-range Ping history continues beyond a full recent batch', async () => {
+test('AUD-43 long-range Ping history and statistics use one server-planned window', async () => {
   const end = Date.parse('2026-09-06T00:00:00Z');
-  const batch = Array.from({ length: 360 }, (_, index) => ({ time: new Date(end - (index + 1) * 120000).toISOString(), value: 10, task_id: 1 }));
+  const batch = Array.from({ length: 360 }, (_, index) => ({ time: new Date(end - (index + 1) * 120000).toISOString(), value: 10, task_id: 1, sample_count: 2, success_count: 2, loss_count: 0, avg_latency: 10, max_latency: 12 }));
+  let batchCalls = 0;
+  let batchUrl = null;
   let continuations = 0;
   const ping = productionModule('src/utils/pingChart.ts', {}, {
     fetch: async url => {
-      const path = new URL(url, 'https://synthetic.invalid').pathname;
-      if (path === '/api/task/ping') return new Response(JSON.stringify([{ id: 1, name: 'Synthetic ping', clients: ['node-a'], interval: 120, interval_sec: 120 }]));
-      if (path === '/api/records/ping/batch') return new Response(JSON.stringify({ 1: batch }));
-      if (path === '/api/records/ping') { continuations += 1; return new Response(JSON.stringify({ data: [{ time: new Date(end - 70 * 3600000).toISOString(), value: 25, task_id: 1 }], has_more: false })); }
-      throw new Error(`Unexpected path ${path}`);
+      const parsed = new URL(url, 'https://synthetic.invalid');
+      if (parsed.pathname === '/api/task/ping') return new Response(JSON.stringify([{ id: 1, name: 'Synthetic ping', clients: ['node-a'], interval: 120, interval_sec: 120 }]));
+      if (parsed.pathname === '/api/records/ping/window') { batchCalls += 1; batchUrl = parsed; return Response.json({ tasks: [{ id: 1 }], records: { 1: batch }, stats: { 1: { samples: 1000, success_count: 900, loss_count: 100, avg: 20 } } }); }
+      if (parsed.pathname === '/api/records/ping') { continuations += 1; return new Response(JSON.stringify({ data: [], has_more: false })); }
+      throw new Error(`Unexpected path ${parsed.pathname}`);
     },
   });
-  const series = await ping.fetchPingTaskSeries('node-a', { rangeHours: 72, cursor: new Date(end).toISOString() });
-  assert.equal(Math.min(...series[0].records.map(record => Date.parse(record.time))), end - 70 * 3600000, 'three-day Ping chart must include its oldest available point');
-  assert.equal(continuations, 1);
+  const { series, stats } = await ping.fetchPingTaskWindow('node-a', { hours: 72 });
+  assert.equal(batchCalls, 1, 'three-day Ping chart must be served by exactly one batch request');
+  assert.equal(batchUrl.searchParams.get('points'), '1440');
+  assert.equal(batchUrl.searchParams.get('hours'), '72');
+  assert.ok(!batchUrl.searchParams.has('start') && !batchUrl.searchParams.has('end') && !batchUrl.searchParams.has('cursor'));
+  assert.equal(stats['1'].samples, 1000, 'whole-window statistics must not be estimated from plotted rows');
+  assert.equal(continuations, 0, 'the bucketed batch already covers the window, so no per-task backfill may run');
+  assert.equal(series[0].records.length, 360, 'single batch rows are returned as-is');
+  assert.equal(Math.min(...series[0].records.map(record => Date.parse(record.time))), end - 360 * 120000);
+});
+
+test('AUD-43 short-range Ping history uses the same hours/points window strategy', async () => {
+  const end = Date.parse('2026-09-06T00:00:00Z');
+  const batch = Array.from({ length: 60 }, (_, index) => ({ time: new Date(end - (index + 1) * 60000).toISOString(), value: 10, task_id: 1 }));
+  let batchCalls = 0;
+  let batchUrl = null;
+  let singleCalls = 0;
+  const ping = productionModule('src/utils/pingChart.ts', {}, {
+    fetch: async url => {
+      const parsed = new URL(url, 'https://synthetic.invalid');
+      if (parsed.pathname === '/api/task/ping') return new Response(JSON.stringify([{ id: 1, name: 'Synthetic ping', clients: ['node-a'], interval: 60, interval_sec: 60 }]));
+      if (parsed.pathname === '/api/records/ping/window') { batchCalls += 1; batchUrl = parsed; return Response.json({ tasks: [{ id: 1 }], records: { 1: batch }, stats: {} }); }
+      if (parsed.pathname === '/api/records/ping') { singleCalls += 1; return new Response(JSON.stringify({ data: [], has_more: false })); }
+      throw new Error(`Unexpected path ${parsed.pathname}`);
+    },
+  });
+  const { series } = await ping.fetchPingTaskWindow('node-a', { hours: 1 });
+  assert.equal(batchCalls, 1, 'one-hour Ping chart must be served by exactly one batch request');
+  assert.equal(batchUrl.searchParams.get('hours'), '1');
+  assert.equal(batchUrl.searchParams.has('cursor'), false);
+  assert.equal(singleCalls, 0, 'one raw page covers a 60s-interval hour, so no per-task paging may run');
+  assert.equal(series[0].records.length, 60);
+});
+
+test('AUD-43 tiny-interval Ping trusts server buckets without per-task paging', async () => {
+  const end = Date.parse('2026-09-06T00:00:00Z');
+  const rangeStart = end - 4 * 3600000;
+  const batch = Array.from({ length: 1500 }, (_, index) => ({ time: new Date(end - (index + 1) * 5000).toISOString(), value: 10, task_id: 1 }));
+  let singleCalls = 0;
+  const ping = productionModule('src/utils/pingChart.ts', {}, {
+    fetch: async url => {
+      const parsed = new URL(url, 'https://synthetic.invalid');
+      if (parsed.pathname === '/api/task/ping') return new Response(JSON.stringify([{ id: 1, name: 'Synthetic ping', clients: ['node-a'], interval: 5, interval_sec: 5 }]));
+      if (parsed.pathname === '/api/records/ping/window') return Response.json({ tasks: [{ id: 1, interval_sec: 5 }], records: { 1: batch }, stats: {} });
+      if (parsed.pathname === '/api/records/ping') {
+        singleCalls += 1;
+        const cursorMs = Date.parse(parsed.searchParams.get('cursor'));
+        const rows = [];
+        for (let at = cursorMs - 5000; at > cursorMs - 2 * 3600000 && at >= rangeStart; at -= 5000) {
+          rows.push({ time: new Date(at).toISOString(), value: 10, task_id: 1 });
+        }
+        const oldest = rows.length ? Date.parse(rows[rows.length - 1].time) : cursorMs;
+        return new Response(JSON.stringify({ data: rows, has_more: oldest > rangeStart, next_cursor: new Date(oldest).toISOString() }));
+      }
+      throw new Error(`Unexpected path ${parsed.pathname}`);
+    },
+  });
+  const { series } = await ping.fetchPingTaskWindow('node-a', { hours: 4 });
+  assert.equal(singleCalls, 0);
+  assert.equal(series[0].records.length, batch.length);
+});
+
+test('AUD-43 Ping window preserves hidden-node intent in its single request', async () => {
+  const end = Date.parse('2026-09-06T00:00:00Z');
+  // 60s 间隔、4h 窗口：最老一条必然晚于 rangeStart（查询是 time >= start），但条数远小于 limit，没有被截断。
+  const batch = Array.from({ length: 239 }, (_, index) => ({ time: new Date(end - (index + 1) * 60000).toISOString(), value: 10, task_id: 1 }));
+  const calls = [];
+  const ping = productionModule('src/utils/pingChart.ts', {}, {
+    fetch: async url => {
+      const parsed = new URL(url, 'https://synthetic.invalid');
+      calls.push(parsed);
+      if (parsed.pathname === '/api/task/ping') return new Response(JSON.stringify([{ id: 1, name: 'Synthetic ping', clients: ['node-a'], interval: 60, interval_sec: 60 }]));
+      if (parsed.pathname === '/api/records/ping/window') return Response.json({ tasks: [{ id: 1 }], records: { 1: batch }, stats: {} });
+      throw new Error(`Unexpected path ${parsed.pathname}`);
+    },
+  });
+  const { series } = await ping.fetchPingTaskWindow('node-a', { hours: 4, points: 360, includeHidden: true });
+  assert.equal(series[0].records.length, 239);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].searchParams.get('include_hidden'), '1');
+  assert.equal(calls[0].searchParams.get('points'), '360');
+});
+
+test('AUD-43 concurrent Ping windows share one request and cancellation is isolated', async () => {
+  const end = Date.parse('2026-09-06T00:00:00Z');
+  let taskListCalls = 0;
+  const ping = productionModule('src/utils/pingChart.ts', {}, {
+    fetch: async url => {
+      const parsed = new URL(url, 'https://synthetic.invalid');
+      if (parsed.pathname === '/api/records/ping/window') {
+        taskListCalls += 1;
+        return Response.json({ tasks: [{ id: 1 }], records: { 1: [] }, stats: {} });
+      }
+      if (parsed.pathname === '/api/records/ping/batch') return new Response(JSON.stringify({ 1: [] }));
+      throw new Error(`Unexpected path ${parsed.pathname}`);
+    },
+  });
+  const first = new AbortController();
+  const options = { hours: 4, points: 360 };
+  const aborted = ping.fetchPingTaskWindow('node-a', { ...options, signal: first.signal });
+  const surviving = ping.fetchPingTaskWindow('node-a', options);
+  first.abort();
+  await assert.rejects(() => aborted, { name: 'AbortError' });
+  const { series } = await surviving;
+  assert.equal(taskListCalls, 1, 'StrictMode double effect must share the whole window request');
+  assert.equal(series.length, 1);
 });
 
 test('AUD-43 cursor traversal rejects repeated cursors and is bounded and abortable', async () => {
@@ -593,7 +603,7 @@ test('AUD-42 late node history cannot replace the current node history', async (
     setRecordsLoading() {}, setRecordsRangeEnd() {}, setRecordsError() {},
     setRecords: value => { current = value; },
   });
-  const a = load('node-a')('1h');
+  const a = load('node-a')('4h');
   const b = load('node-b')('3d');
   pending.get('node-b')([{ time: recordTime, cpu: 22 }]);
   await b;
@@ -732,7 +742,9 @@ test('AUD-39 authoritative empty client list removes the last deleted client', a
   } finally { fixture.cleanup(); }
 });
 
-test('AUD-38 Windows command data retains literal PowerShell argument values', () => {
+test('AUD-38 Windows command data retains literal PowerShell argument values', {
+  skip: spawnSync('pwsh', ['-NoProfile', '-Command', 'exit 0'], { stdio: 'ignore' }).error?.code === 'ENOENT',
+}, () => {
   const { buildAgentInstallCommand, defaultAgentInstallOptions } = productionModule('src/utils/agentInstallCommand.ts');
   const evaluateOutputOnly = (probe) => {
     const guard = `$probe=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${Buffer.from(probe, 'utf16le').toString('base64')}')); $tokens=$null; $errors=$null; $ast=[Management.Automation.Language.Parser]::ParseInput($probe,[ref]$tokens,[ref]$errors); if($errors.Count) { throw 'Probe parse error' }; $commands=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst]},$true)); foreach($command in $commands) { if($command.GetCommandName() -ne 'Write-Output') { throw 'Unexpected command boundary' } }; if($ast.Find({param($n) $n -is [Management.Automation.Language.InvokeMemberExpressionAst]},$true)) { throw 'Unexpected member invocation' }; & ([scriptblock]::Create($probe))`;
@@ -798,6 +810,26 @@ test('AUD-47 legal stored intervals survive opening and unrelated saving', () =>
   assert.deepEqual(getChangedSettings({ ...opened, record_preserve_time: '48' }, stored), { record_preserve_time: '48' });
 });
 
+test('history retention settings save raw snapshots and clamp the shared rollup setting', () => {
+  const save = productionDeclaration('src/pages/admin/SettingsGeneral.tsx', 'buildSavePayload', {
+    clampInteger: productionDeclaration('src/pages/admin/SettingsGeneral.tsx', 'clampInteger'),
+    DEFAULT_RETENTION_HOURS: 720, MAX_RETENTION_HOURS: 720,
+    DEFAULT_PING_RAW_RETENTION_HOURS: 168, MAX_PING_RAW_RETENTION_HOURS: 720,
+    DEFAULT_PING_ROLLUP_RETENTION_HOURS: 2160, MAX_PING_ROLLUP_RETENTION_HOURS: 8760,
+    DEFAULT_ACTIVE_SAMPLE_SEC: 3, DEFAULT_IDLE_UPLOAD_SEC: 120, MIN_IDLE_UPLOAD_SEC: 60,
+    DEFAULT_VIEWER_TTL_SEC: 120, DEFAULT_RECORD_PERSIST_SEC: 120,
+    DEFAULT_PING_RECORD_PERSIST_SEC: 120, DEFAULT_RECORD_HIGH_WATERMARK_ROWS: 700_000,
+  });
+  const payload = save({ record_preserve_time: '720', ping_record_preserve_time: '168', rollup_preserve_time: '2160' });
+  assert.equal(payload.record_preserve_time, '720');
+  assert.equal(payload.ping_record_preserve_time, '168');
+  assert.equal(payload.rollup_preserve_time, '2160');
+  assert.equal('ping_rollup_preserve_time' in payload, false);
+  const clamped = save({ record_preserve_time: '720', ping_record_preserve_time: '9999', rollup_preserve_time: '99999' });
+  assert.equal(clamped.ping_record_preserve_time, '720');
+  assert.equal(clamped.rollup_preserve_time, '8760');
+});
+
 test('AUD-48 Telegram test pins Telegram independently of global channel', async () => {
   for (const method of ['none', 'email', 'webhook', 'telegram']) {
     let body;
@@ -829,26 +861,307 @@ test('AUD-45 directed load rules reject an empty target list before posting', as
 });
 
 test('AUD-50 controlled load threshold and ratio render legitimate zero values', () => {
-  for (const field of ['threshold', 'ratio']) {
-    const element = productionJsx(notifications, (node, ast, ts) => {
-      if (!ts.isJsxSelfClosingElement(node) || node.tagName.getText(ast) !== 'TextField.Root') return false;
-      const attribute = node.attributes.properties.find(item => ts.isJsxAttribute(item) && item.name.getText(ast) === 'value');
-      return attribute?.initializer?.getText(ast).includes(`loadForm.${field}`);
-    }, { TextField, loadForm: { threshold: 0, ratio: 0 }, setLoadForm() {} });
-    const markup = renderToStaticMarkup(element);
-    assert.match(markup, /value="0"/, `${field}=0 must be the visible controlled input value`);
-  }
+  assert.match(notificationSource, /value=\{String\(loadForm\.threshold \?\? 80\)\}/,
+    'a threshold of zero must be passed through instead of replaced by the default');
+  assert.match(notificationSource, /value=\{String\(loadForm\.ratio \?\? 0\.8\)\}/,
+    'a ratio of zero must be passed through instead of replaced by the default');
 });
 
 test('AUD-50 load rule summaries use metric units and keep zero', () => {
-  for (const [metric, threshold, expected] of [['temp', 0, '0°C'], ['load', 0.5, '0.5'], ['cpu', 0, '0%']]) {
-    const element = productionJsx(notifications, (node, ast, ts) => ts.isJsxElement(node)
-      && node.openingElement.tagName.getText(ast) === 'Text'
-      && node.getText(ast).includes('item.threshold'), {
-      Text, item: { metric, threshold },
-      loadMetricUnit: (value) => productionDeclaration(notifications, 'loadMetricUnit')(value),
+  assert.match(notificationSource, /item\.threshold \?\? 80\}\{loadMetricUnit\(item\.metric\)\}/,
+    'zero thresholds must render with the metric unit');
+  assert.match(notificationSource, /function loadMetricUnit\(metric\?: string\): string/);
+});
+
+test('R-A11 unavailable host temperature preserves the rest of a history sample', () => {
+  const base = { time: '2026-09-09T01:00:00Z', cpu: 23, ram: 512, ram_total: 1024, net_in: 4096 };
+  for (const input of [{}, { temp: null }, { temp: undefined }, { temp: NaN }, { temp: Infinity }, { temp: 'unknown' }]) {
+    const record = normalizePublicMonitorRecord({ ...base, ...input });
+    assert.ok(record, 'unavailable temperature cannot discard CPU/network history');
+    assert.equal(record.temp, null, 'unavailable temperature is not a measured zero');
+    assert.equal(record.cpu, 23);
+    assert.equal(record.net_in, 4096);
+    const point = buildMonitorChartData([record])[0];
+    assert.equal(point.temp, null);
+    assert.equal(point.ram, 50);
+  }
+});
+
+test('R-A11 measured zero and signed Celsius remain numeric', () => {
+  for (const temp of [0, -12.5, 42.25]) {
+    const record = normalizePublicMonitorRecord({ time: '2026-09-09T01:00:00Z', temp, temperature: 87 });
+    assert.equal(record.temp, temp);
+    assert.equal(buildMonitorChartData([record])[0].temp, temp);
+  }
+});
+
+test('R-A11 mixed host temperature history retains null gaps without losing other metrics', () => {
+  const temperatures = [10, 12, null, null, 0, -7, null, 25, 30];
+  const records = normalizePublicMonitorRecords(temperatures.map((temp, index) => ({
+    time: new Date(Date.parse('2026-09-09T01:00:00Z') + index * 1000).toISOString(), cpu: index + 1, temp,
+  })));
+  assert.equal(records.length, temperatures.length, 'every otherwise-valid sample survives');
+  const points = buildMonitorChartData(records);
+  assert.deepEqual(points.map(point => point.temp), temperatures);
+  assert.deepEqual(points.map(point => point.cpu), temperatures.map((_temp, index) => index + 1));
+});
+
+test('R-A11 empty and raw missing-temperature chart points never fabricate zero', () => {
+  const points = getMonitorChartRenderData([], 3600000, Date.parse('2026-09-09T02:00:00Z'));
+  assert.equal(points.length, 2, 'empty history retains its time-axis bounds');
+  assert.ok(points.every(point => point.temp === null), 'axis placeholders contain no measured temperature');
+  assert.equal(buildMonitorChartData([{ time: '2026-09-09T01:00:00Z', cpu: 10 }])[0].temp, null);
+});
+
+test('R-A11 node-card fallback has no fabricated host temperature', () => {
+  const fallback = productionDeclaration('src/components/NodeCard.tsx', 'defaultLive');
+  assert.equal(fallback.temp, null, 'an absent live record is not a measured zero');
+});
+
+test('R-F02 invalid settings responses never become a confirmed cache baseline', async () => {
+  for (const payload of [null, [], 'invalid', { record_preserve_time: null }]) {
+    const settingsCacheRef = { current: {} };
+    const settingsRequestsRef = { current: {} };
+    const load = productionDeclaration('src/pages/admin/SettingsLayout.tsx', 'loadSettingsScope', {
+      settingsCacheRef, settingsRequestsRef, apiFetch: async () => payload,
+      setSettingsScope: (scope, value) => { settingsCacheRef.current[scope] = value; },
     });
-    const visible = renderToStaticMarkup(element).replace(/<[^>]*>/g, '');
-    assert.equal(visible, expected, `${metric} rule must show its stored threshold in the metric's real unit`);
+    await assert.rejects(load('general'), /设置|settings|响应|格式/i, 'invalid response is a read failure');
+    assert.equal(settingsCacheRef.current.general, undefined);
+    assert.equal(settingsRequestsRef.current.general, undefined, 'a rejected request must be retryable');
+  }
+});
+
+test('R-F03 a slow logo reset patches only the latest confirmed logo field', async () => {
+  const response = Promise.withResolvers();
+  const settingsCacheRef = { current: { site: { site_title: 'Original', site_logo_url: '/old.png' } } };
+  const setSettingsScope = productionDeclaration('src/pages/admin/SettingsLayout.tsx', 'setSettingsScope', {
+    settingsCacheRef, setSettingsCacheState() {},
+  });
+  const reset = productionDeclaration('src/pages/admin/SettingsSite.tsx', 'handleResetLogo', {
+    settings: { site_title: 'Unsaved draft', site_logo_url: '/old.png' },
+    apiFetch: () => response.promise, setLogoSaving() {}, setSettings() {}, setOriginalSettings() {},
+    setSettingsScope, notifyPublicDataUpdated() {}, toast: { success() {}, error(message) { throw new Error(message); } },
+  });
+  const pending = reset();
+  setSettingsScope('site', { site_title: 'Newer confirmed title', site_logo_url: '/old.png' });
+  response.resolve({ success: true });
+  await pending;
+  assert.equal(settingsCacheRef.current.site.site_title, 'Newer confirmed title', 'a logo response cannot promote an older draft or revert a newer saved title');
+  assert.equal(settingsCacheRef.current.site.site_logo_url, '');
+});
+
+test('R-F03 a slow title save preserves a logo confirmed while the request was pending', async () => {
+  const response = Promise.withResolvers();
+  const settingsCacheRef = { current: { site: { site_title: 'Original', site_logo_url: '/old.png' } } };
+  const setSettingsScope = productionDeclaration('src/pages/admin/SettingsLayout.tsx', 'setSettingsScope', { settingsCacheRef, setSettingsCacheState() {} });
+  const save = productionDeclaration('src/pages/admin/SettingsSite.tsx', 'handleSave', {
+    settings: { site_title: 'Confirmed title', site_logo_url: '/old.png' }, originalSettings: { site_title: 'Original', site_logo_url: '/old.png' },
+    settingsReady: true, loading: false, loadError: null, saving: false,
+    getChangedSettings: productionModule('src/utils/settingsDiff.ts').getChangedSettings,
+    apiFetch: () => response.promise, setSaving() {}, setOriginalSettings() {}, setSettingsScope,
+    notifyPublicDataUpdated() {}, toast: { success() {}, info() {}, error(message) { throw new Error(message); } },
+  });
+  const pending = save();
+  setSettingsScope('site', { site_title: 'Original', site_logo_url: '/confirmed-logo.png' });
+  response.resolve({ success: true });
+  await pending;
+  assert.equal(settingsCacheRef.current.site.site_logo_url, '/confirmed-logo.png', 'an unrelated title response cannot roll back the confirmed logo');
+  assert.equal(settingsCacheRef.current.site.site_title, 'Confirmed title');
+});
+
+test('R-F04 a failed clients reorder cannot undo another confirmed edit', async () => {
+  const response = Promise.withResolvers();
+  const initial = [{ uuid: 'a', name: 'Alpha', sort_order: 0 }, { uuid: 'b', name: 'Beta', sort_order: 1 }];
+  let current = structuredClone(initial);
+  const update = value => { current = typeof value === 'function' ? value(current) : value; };
+  const reorder = productionDeclaration('src/pages/admin/Dashboard.tsx', 'handleDragEnd', {
+    clients: initial, filtered: initial, dragDisabled: false,
+    setClients: update, updateClients: update,
+    clientOrderRef: { current: 0 },
+    apiFetch: () => response.promise,
+    loadClients: async () => {},
+    moveAdminNodeInVisibleOrder: productionModule('src/utils/adminNodeOrder.ts').moveAdminNodeInVisibleOrder,
+    arrayMove: (items, from, to) => { const list = [...items]; list.splice(to, 0, list.splice(from, 1)[0]); return list; },
+    assertSuccess: result => { if (!result.success) throw new Error('Rejected reorder'); },
+    notifyPublicDataUpdated() {},
+    toast: { error() {}, success() {} },
+  });
+  const pending = reorder({ active: { id: 'a' }, over: { id: 'b' } });
+  current = current.map(item => item.name === 'Alpha' ? { ...item, name: 'Newest persisted name' } : item);
+  response.resolve({ success: false });
+  await pending;
+  assert.ok(current.some(item => item.name === 'Newest persisted name'), 'rollback changes order only, preserving newer fields');
+  assert.equal(current[0].name, 'Newest persisted name', 'the original order is restored');
+});
+
+test('R-F06 logout waits for confirmation, deduplicates and preserves authentication on failure', async () => {
+  const response = Promise.withResolvers();
+  let requests = 0;
+  let clears = 0;
+  const logout = productionDeclaration('src/contexts/AuthContext.tsx', 'logout', {
+    clearAuth: () => { clears += 1; }, API_BASE: '/api', CSRF_COOKIE_NAME: 'csrf', readCookie: () => 'synthetic',
+    logoutRequestRef: { current: null }, authRevisionRef: { current: 0 },
+    readJson: response => response.json(), fetch: () => { requests += 1; return response.promise; },
+  });
+  const first = logout();
+  const second = logout();
+  response.resolve(new Response(JSON.stringify({ error: 'Rejected logout' }), { status: 500 }));
+  const outcomes = await Promise.allSettled([first, second]);
+  assert.equal(requests, 1, 'one server logout while pending');
+  assert.equal(clears, 0, 'a failed logout cannot clear the displayed session');
+  assert.equal(outcomes[0].status, 'rejected', 'the caller receives the error and can offer retry');
+});
+
+test('R-F06 an authenticated API rejection clears local state without an explicit logout request', async () => {
+  let clears = 0;
+  let logouts = 0;
+  const api = productionDeclaration('src/contexts/AuthContext.tsx', 'useApiResponse', {
+    useAuth: () => ({ clearAuth: () => { clears += 1; }, logout: () => { logouts += 1; } }),
+    useCallback: value => value, runWithMfaStepUpRetry: request => request(), requestMfaStepUp() {},
+    buildApiRequest: path => ({ url: path, init: {} }),
+    fetch: async () => new Response(JSON.stringify({ error: 'Session expired' }), { status: 401 }),
+    readJson: response => response.json(), shouldClearAuthForStatus: status => status === 401,
+  })();
+  await assert.rejects(api('/admin/synthetic'), /Session expired/);
+  assert.equal(clears, 1, 'session rejection invalidates local authentication');
+  assert.equal(logouts, 0, '401 handling does not create an extra authenticated mutation');
+});
+
+test('R-F06 an earlier session lookup cannot restore an authenticated user after logout', async () => {
+  const response = Promise.withResolvers();
+  let user = { uuid: 'old', username: 'Old administrator' };
+  const authRevisionRef = { current: 0 };
+  const setUser = update => { user = typeof update === 'function' ? update(user) : update; };
+  const clearAuth = () => { authRevisionRef.current += 1; user = null; };
+  const effect = productionEffect('src/contexts/AuthContext.tsx', 'shouldCheckSession', {
+    API_BASE: '/api', window: { location: { pathname: '/admin' } }, shouldCheckAdminSessionOnLoad: () => true,
+    authRevisionRef, setAuthLoading() {}, clearAuth, setUser, writeStoredUser() {},
+    normalizeAuthUser: payload => payload.uuid ? payload : null, readJson: response => response.json(), fetch: () => response.promise,
+  });
+  const cleanup = effect();
+  clearAuth();
+  response.resolve(new Response(JSON.stringify({ uuid: 'old', username: 'Old administrator' })));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(user, null, 'a completed logout retires pending session hydration');
+  cleanup();
+});
+
+test('R-F08 a retired verification cannot finish a newer MFA dialog', async () => {
+  const response = Promise.withResolvers();
+  const completed = [];
+  const resolver = { current: value => completed.push(['old', value]) };
+  const pendingRequestRef = { current: null };
+  const finish = productionDeclaration('src/components/MfaStepUpDialog.tsx', 'finish', {
+    resolver, pendingRequestRef, setOpen() {}, setSubmitting() {}, setCode() {}, setError() {}, setMethod() {},
+  });
+  const submit = productionDeclaration('src/components/MfaStepUpDialog.tsx', 'submit', {
+    resolver, pendingRequestRef, code: '123456', method: 'totp', AbortController,
+    normalizeMfaCode: productionModule('src/utils/mfa.ts').normalizeMfaCode,
+    setSubmitting() {}, setError() {}, buildApiRequest: () => ({ url: '/synthetic', init: {} }), fetch: () => response.promise, finish,
+  });
+  const pending = submit();
+  finish(false);
+  resolver.current = value => completed.push(['new', value]);
+  response.resolve(new Response(JSON.stringify({ success: true })));
+  await pending;
+  assert.deepEqual(completed, [['old', false]], 'late success cannot resolve the newer dialog');
+  assert.equal(typeof resolver.current, 'function', 'the new dialog stays pending');
+});
+
+test('R-F08 unmount retires verification errors and resolves cancellation', async () => {
+  const response = Promise.withResolvers();
+  const completed = [];
+  let changes = 0;
+  const resolver = { current: value => completed.push(value) };
+  const pendingRequestRef = { current: null };
+  const bindings = {
+    resolver, pendingRequestRef, code: '123456', method: 'totp', AbortController,
+    normalizeMfaCode: productionModule('src/utils/mfa.ts').normalizeMfaCode,
+    setSubmitting: () => { changes += 1; }, setError: () => { changes += 1; },
+    buildApiRequest: () => ({ url: '/synthetic', init: {} }), fetch: () => response.promise, finish() {},
+  };
+  const pending = productionDeclaration('src/components/MfaStepUpDialog.tsx', 'submit', bindings)();
+  changes = 0;
+  productionEffect('src/components/MfaStepUpDialog.tsx', 'resolver.current?.(false)', bindings)()();
+  response.resolve(new Response(JSON.stringify({ error: 'Late failure' }), { status: 500 }));
+  await pending;
+  assert.equal(changes, 0, 'unmounted verification cannot write error/loading state');
+  assert.deepEqual(completed, [false], 'unmount cancels the suspended original operation');
+});
+
+test('R-F09 an initial removal and later update survive a full read without reviving removed fields', () => {
+  const scope = productionModule('src/contexts/LiveDataContext.tsx').createLiveSnapshotScope();
+  scope.patch({ type: 'remove', client: 'a', timestamp: 1 });
+  const read = scope.beginRead();
+  scope.patch({ type: 'update', client: 'a', data: { cpu: 70 }, timestamp: 2 });
+  const result = scope.complete(read, { online: ['a', 'b'], clients: [], data: { a: { cpu: 10, ram: 99 }, b: { cpu: 30 } }, count: 2, timestamp: 0 });
+  assert.equal(result.data.a.cpu, 70);
+  assert.equal(result.data.a.ram, undefined, 'removal before reappearance discards the obsolete node record');
+  assert.equal(result.data.b.cpu, 30, 'unaffected full-snapshot nodes remain');
+});
+
+test('R-F09 cached startup data cannot override a confirmed snapshot and disposed scopes cannot commit', () => {
+  const scope = productionModule('src/contexts/LiveDataContext.tsx').createLiveSnapshotScope();
+  const current = { online: ['a'], clients: [], data: { a: { cpu: 70 } }, count: 1, timestamp: 2 };
+  scope.snapshot(current);
+  assert.equal(scope.seed({ ...current, data: { a: { cpu: 10 } } }), undefined, 'cached reconnect seed cannot replace known live state');
+  const read = scope.beginRead();
+  scope.dispose();
+  assert.equal(scope.complete(read, current), undefined);
+  assert.equal(scope.canReportError(read), false, 'late scope errors are also obsolete');
+  assert.equal(scope.patch({ type: 'update', client: 'a', data: { cpu: 10 }, timestamp: 3 }), undefined);
+});
+
+for (const type of ['update', 'remove']) {
+  test(`R-F09 retry discards a pre-retry ${type} superseded by the new full snapshot`, () => {
+    const scope = productionModule('src/contexts/LiveDataContext.tsx').createLiveSnapshotScope();
+    const first = scope.beginRead();
+    scope.patch({ type, client: 'a', data: { cpu: 10 }, timestamp: 100 });
+    assert.equal(scope.canReportError(first), true, 'a partial update never conceals the initial full-read failure');
+    scope.finishRead(first);
+    const retry = scope.beginRead();
+    const snapshot = { online: ['a', 'b'], clients: [], data: { a: { cpu: 20, ram: 200 }, b: { cpu: 30 } }, count: 2, timestamp: 200 };
+    const result = scope.complete(retry, snapshot);
+    assert.equal(result.data.a?.cpu, 20, 'a successful newer snapshot supersedes pre-retry socket history');
+    assert.equal(result.data.a.ram, 200);
+    assert.equal(result.data.b.cpu, 30);
+    assert.equal(result.timestamp, 200, 'the read must not roll snapshot freshness backward');
+  });
+}
+
+test('R-F09 retry preserves pre-read patches that are newer than a returned cached snapshot', () => {
+  for (const type of ['update', 'remove']) {
+    const scope = productionModule('src/contexts/LiveDataContext.tsx').createLiveSnapshotScope();
+    const first = scope.beginRead();
+    scope.patch({ type, client: 'a', data: { cpu: 70 }, timestamp: 100 });
+    scope.finishRead(first);
+    const retry = scope.beginRead();
+    const result = scope.complete(retry, { online: ['a', 'b'], clients: [], data: { a: { cpu: 20 }, b: { cpu: 30 } }, count: 2, timestamp: 50 });
+    assert.equal(result.data.a?.cpu, type === 'update' ? 70 : undefined);
+    assert.equal(result.data.b.cpu, 30);
+  }
+});
+
+test('R-F09 retry replays during-read updates without resurrecting an older removal', () => {
+  const scope = productionModule('src/contexts/LiveDataContext.tsx').createLiveSnapshotScope();
+  const first = scope.beginRead();
+  scope.patch({ type: 'remove', client: 'a', timestamp: 100 });
+  scope.finishRead(first);
+  const retry = scope.beginRead();
+  scope.patch({ type: 'update', client: 'a', data: { cpu: 70 }, timestamp: 300 });
+  const result = scope.complete(retry, { online: ['a', 'b'], clients: [], data: { a: { cpu: 20, ram: 200 }, b: { cpu: 30 } }, count: 2, timestamp: 200 });
+  assert.equal(result.data.a.cpu, 70);
+  assert.equal(result.data.a.ram, 200, 'a removal already superseded before the retry cannot erase fields from its fresh baseline');
+  assert.equal(result.data.b.cpu, 30);
+});
+
+test('R-F09 cache seed compares initial socket history with the snapshot timestamp', () => {
+  for (const snapshotTime of [50, 200]) {
+    const scope = productionModule('src/contexts/LiveDataContext.tsx').createLiveSnapshotScope();
+    scope.patch({ type: 'update', client: 'a', data: { cpu: 10 }, timestamp: 100 });
+    const result = scope.seed({ online: ['a', 'b'], clients: [], data: { a: { cpu: 20 }, b: { cpu: 30 } }, count: 2, timestamp: snapshotTime });
+    assert.equal(result.data.a.cpu, snapshotTime === 50 ? 10 : 20);
+    assert.equal(result.data.b.cpu, 30);
   }
 });

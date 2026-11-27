@@ -43,7 +43,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     setThemeState(t);
     setLocalStorageItem('cf-monitor-theme', t);
     // 更新 Radix Theme appearance
-    const setter = (window as any).__setThemeAppearance;
+    const setter = window.__setThemeAppearance;
     if (setter) setter(t);
   }, []);
 

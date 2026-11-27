@@ -26,24 +26,28 @@ export function invalidateAdminSessionCache(userId?: string): void {
     if (key.startsWith(`${userId}:`)) adminSessionCache.delete(key);
   }
   for (const key of adminSessionRequests.keys()) {
-    if (key.startsWith(`${userId}:`)) adminSessionRequests.delete(key);
+    if (key.startsWith(`${userId}:`) || key.startsWith(`fresh:${userId}:`)) adminSessionRequests.delete(key);
   }
 }
 
 export async function validateAdminSession(
   database: db.QueryDatabase,
   payload: AdminJwtPayload,
+  options: { fresh?: boolean } = {},
 ): Promise<AdminSessionUser | null> {
   const key = cacheKey(payload);
   const cached = adminSessionCache.get(key);
-  if (cached && cached.expiresAt > Date.now()) return cached.user;
+  if (!options.fresh && cached && cached.expiresAt > Date.now()) return cached.user;
 
-  const pending = adminSessionRequests.get(key);
+  const requestKey = options.fresh ? `fresh:${key}` : key;
+  const pending = adminSessionRequests.get(requestKey);
   if (pending) return pending;
 
   const request = readAdminSession(database, payload, key);
-  adminSessionRequests.set(key, request);
-  request.finally(() => adminSessionRequests.delete(key)).catch(() => {});
+  adminSessionRequests.set(requestKey, request);
+  request.finally(() => {
+    if (adminSessionRequests.get(requestKey) === request) adminSessionRequests.delete(requestKey);
+  }).catch(() => {});
   return request;
 }
 

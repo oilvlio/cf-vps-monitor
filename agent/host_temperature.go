@@ -8,12 +8,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shirou/gopsutil/v3/host"
+	"github.com/shirou/gopsutil/v4/sensors"
 )
 
 const hostTemperatureReadBudget = 250 * time.Millisecond
 
-type temperatureReader func(context.Context) ([]host.TemperatureStat, error)
+type temperatureReader func(context.Context) ([]sensors.TemperatureStat, error)
 
 type temperatureSampler struct {
 	read temperatureReader
@@ -22,7 +22,7 @@ type temperatureSampler struct {
 	inFlight bool
 }
 
-var nodeTemperatureSampler = newHostTemperatureSampler(runtime.GOOS, host.SensorsTemperaturesWithContext)
+var nodeTemperatureSampler = newHostTemperatureSampler(runtime.GOOS, sensors.TemperaturesWithContext)
 
 func newHostTemperatureSampler(goos string, read temperatureReader) *temperatureSampler {
 	// The pinned library identifies Linux hwmon/thermal sources. Windows only
@@ -74,7 +74,7 @@ func (s *temperatureSampler) sample(ctx context.Context) *float64 {
 	}
 }
 
-func measuredHostTemperature(sensors []host.TemperatureStat) *float64 {
+func measuredHostTemperature(sensors []sensors.TemperatureStat) *float64 {
 	var hottest *float64
 	for _, sensor := range sensors {
 		if !isHostTemperatureSensor(sensor.SensorKey) {

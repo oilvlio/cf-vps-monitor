@@ -1,6 +1,6 @@
 /**
  * Agent 客户端 API 路由
- * 用于 Agent 上报数据、获取 Ping 任务等
+ * 用于 Agent 上报数据、获取动态策略
  */
 
 import { Hono } from 'hono';
@@ -10,14 +10,18 @@ import * as db from '../db/queries';
 import { getDatabase } from '../db/provider';
 import { buildAdminSettings } from '../settings/schema';
 import { normalizeMonitorReport, type MonitorReportPayload } from '../utils/monitor-report';
-import { validatePingResults } from '../utils/ping-result';
 import { buildIpChangeNotification } from '../utils/notification-templates';
 import { bestEffortRecordHealthEvent, errorDetail } from '../utils/observability';
 import { NOTIFICATION_DISPATCH_SETTING_KEYS, dispatchNotification } from '../utils/notification-dispatch';
 import { getCloudflareClientIp, isPublicIpAddress } from '../utils/request-ip';
 import { hashAgentToken, isAgentTokenShape } from '../utils/client';
-import { readAcceptedCount, readClientReportResult, readRateLimitResult } from '../utils/do-response';
+import { readClientReportResult, readRateLimitResult, type ClientReportResult } from '../utils/do-response';
+import { liveDataStub } from '../utils/live-data-object';
+import { checkNativeRateLimit } from '../utils/native-rate-limit';
+import { RATE_LIMIT_OBJECT_NAMES, rateLimitStub } from '../utils/rate-limit-object';
+import { isWebSocketUpgrade, requestHasValidOrigin } from '../utils/websocket-request';
 import { invalidatePublicMetadataCache } from './public';
+import { agentPingTasksForClient, pingPolicyVersion } from '../utils/agent-ping-policy';
 
 const clientRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 type ClientContext = Context<{ Bindings: Bindings; Variables: Variables }>;
@@ -32,22 +36,12 @@ export const AGENT_AUTH_CACHE_MS = 120_000;
 const AGENT_AUTH_NEGATIVE_CACHE_MS = 10_000;
 const AGENT_AUTH_CACHE_MAX_ENTRIES = 512;
 const AGENT_TOKEN_USAGE_CACHE_MS = 15 * 60_000;
-const AGENT_PING_TASK_CACHE_MS = 120_000;
-const AGENT_PING_TASK_EMPTY_POLL_SEC = 3600;
-const AGENT_PING_TASK_MAX_POLL_SEC = 3600;
-const AGENT_PING_TASK_MIN_POLL_SEC = 60;
-const AGENT_PING_TASK_DEFAULT_INTERVAL_SEC = 120;
-const AGENT_PING_INTERVAL_SETTING_CACHE_MS = 120_000;
-const AGENT_BASIC_INFO_MAX_BODY_BYTES = 64 * 1024;
 const AGENT_REPORT_MAX_BODY_BYTES = 512 * 1024;
-const AGENT_PING_RESULT_MAX_BODY_BYTES = 64 * 1024;
 const AGENT_REPORT_MAX_BATCH = 300;
 const AGENT_RATE_LIMIT_WINDOW_MS = 60_000;
 const AGENT_AUTH_ATTEMPT_RATE_LIMIT_MAX = 240;
 const AGENT_AUTH_FAILURE_RATE_LIMIT_MAX = 6;
-const AGENT_BASIC_INFO_RATE_LIMIT_MAX = 30;
 const AGENT_REPORT_RATE_LIMIT_MAX = 120;
-const AGENT_PING_RESULT_RATE_LIMIT_MAX = 180;
 const IP_CHANGE_NOTIFICATION_SETTING_KEYS = [
   'enable_ip_change_notification',
   ...NOTIFICATION_DISPATCH_SETTING_KEYS,
@@ -58,7 +52,6 @@ const AGENT_POLICY_SETTING_KEYS = [
   'live_poll_active_max_duration_sec',
   'ping_record_persist_interval_sec',
 ];
-const AGENT_PING_INTERVAL_SETTING_KEYS = ['ping_record_persist_interval_sec'];
 
 type AgentAuthCacheEntry<T> = { value: T | null; expiresAt: number };
 type JsonBodyResult = { body: unknown } | { response: Response };
@@ -67,8 +60,6 @@ type AgentAuthLookupSource = 'memory' | 'do' | 'db' | 'miss';
 let agentAuthCache = new Map<string, AgentAuthCacheEntry<db.Client>>();
 let agentIdentityAuthCache = new Map<string, AgentAuthCacheEntry<db.ClientIdentity>>();
 let agentTokenUsageCache = new Map<string, { ip: string; expiresAt: number }>();
-let agentPingTasksCache: { value: db.PingTask[]; expiresAt: number } | null = null;
-let agentPingIntervalCache: { value: number; expiresAt: number } | null = null;
 const localAgentRateLimitBuckets = new Map<string, { count: number; resetAt: number }>();
 
 function runClientBackground(c: ClientContext, promise: Promise<unknown>): void {
@@ -120,15 +111,8 @@ async function markAgentTokenUsedIfDue(
     ip: normalizedIp,
     expiresAt: now + AGENT_TOKEN_USAGE_CACHE_MS,
   });
-  const tokenUsageUpdated = await db.markClientTokenUsed(database, client.uuid, normalizedIp).catch(() => false);
-  if (tokenUsageUpdated) {
-    await recordAgentTokenSourceIpChange(database, client, normalizedIp).catch(() => undefined);
-  }
-}
-
-export function invalidateAgentPingTaskCache(): void {
-  agentPingTasksCache = null;
-  agentPingIntervalCache = null;
+  // 仅记录 Token 最近使用信息（后台展示用）；不会触发通知。
+  await db.markClientTokenUsed(database, client.uuid, normalizedIp).catch(() => null);
 }
 
 function setAgentAuthCache<T>(
@@ -211,7 +195,7 @@ function normalizeLiveAgentAuthClient(value: unknown): db.Client | null {
     billing_cycle: clientNumberField(value, 'billing_cycle'),
     auto_renewal: clientBooleanField(value, 'auto_renewal'),
     currency: clientStringField(value, 'currency'),
-    expired_at: clientStringField(value, 'expired_at'),
+    expired_at: typeof value.expired_at === 'string' ? value.expired_at : null,
     group: clientStringField(value, 'group'),
     tags: clientStringField(value, 'tags'),
     hidden: clientBooleanField(value, 'hidden'),
@@ -226,8 +210,7 @@ function normalizeLiveAgentAuthClient(value: unknown): db.Client | null {
 
 function liveDataAuthStub(env: Bindings): DurableObjectStub | null {
   try {
-    const doId = env.LIVE_DATA.idFromName('global');
-    return env.LIVE_DATA.get(doId);
+    return liveDataStub(env.LIVE_DATA);
   } catch {
     return null;
   }
@@ -245,47 +228,6 @@ async function readLiveAgentAuthClient(env: Bindings, tokenHash: string): Promis
   const payload = await response.json().catch(() => null);
   if (!isJsonObjectPayload(payload) || !isJsonObjectPayload(payload.client)) return null;
   return normalizeLiveAgentAuthClient(payload.client);
-}
-
-async function upsertLiveAgentAuthClient(env: Bindings, client: db.Client): Promise<void> {
-  if (!client.token_hash) return;
-  const stub = liveDataAuthStub(env);
-  if (!stub) return;
-  const { token: _token, ...safeClient } = client;
-  await stub.fetch(new Request('https://do/agent-auth', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ client: { ...safeClient, token: '' } }),
-  }));
-}
-
-async function sourceIpFingerprint(ip: string): Promise<string> {
-  const normalized = ip.trim().toLowerCase();
-  if (!normalized) return '';
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(normalized));
-  return `sha256:${Array.from(new Uint8Array(digest)).slice(0, 8).map(byte => byte.toString(16).padStart(2, '0')).join('')}`;
-}
-
-async function recordAgentTokenSourceIpChange(
-  database: db.QueryDatabase,
-  client: Pick<db.Client, 'uuid' | 'name' | 'token_last_used_ip'>,
-  ip: string,
-): Promise<void> {
-  const previousIp = (client.token_last_used_ip || '').trim();
-  const nextIp = ip.trim();
-  if (!previousIp || !nextIp || previousIp === nextIp) return;
-
-  const [previousIpFingerprint, nextIpFingerprint] = await Promise.all([
-    sourceIpFingerprint(previousIp),
-    sourceIpFingerprint(nextIp),
-  ]);
-  await db.insertAuditLog(
-    database,
-    'system',
-    'agent_token_source_ip_change',
-    `Agent token source IP changed: uuid=${client.uuid}; name=${client.name || '-'}; previous_ip_fp=${previousIpFingerprint}; new_ip_fp=${nextIpFingerprint}`,
-    'warning',
-  );
 }
 
 export async function getAgentClientByToken(
@@ -319,7 +261,8 @@ export async function getAgentClientByToken(
   if (client) {
     const cachedClient = stripCachedAgentToken(client);
     setAgentAuthCache(agentAuthCache, cacheKey, cachedClient, AGENT_AUTH_CACHE_MS, now);
-    if (deferBackground) deferBackground(upsertLiveAgentAuthClient(env, client));
+    // Only control-plane writes may replace durable auth snapshots. A lookup
+    // started before rotation/deletion can return an obsolete database row.
     onAuthSource?.('db');
     const tokenUsageTask = markAgentTokenUsedIfDue(database, client, cacheKey, ip, now);
     if (deferBackground) deferBackground(tokenUsageTask);
@@ -375,79 +318,6 @@ export async function getAgentClientIdentityByToken(
   return null;
 }
 
-async function listAgentPingTasks(database: db.QueryDatabase): Promise<db.PingTask[]> {
-  const now = Date.now();
-  if (agentPingTasksCache && agentPingTasksCache.expiresAt > now) {
-    return agentPingTasksCache.value;
-  }
-
-  const tasks = await db.listPingTasks(database);
-  agentPingTasksCache = {
-    value: tasks,
-    expiresAt: now + AGENT_PING_TASK_CACHE_MS,
-  };
-  return tasks;
-}
-
-async function getUnifiedPingIntervalSec(database: db.QueryDatabase): Promise<number> {
-  const now = Date.now();
-  if (agentPingIntervalCache && agentPingIntervalCache.expiresAt > now) {
-    return agentPingIntervalCache.value;
-  }
-
-  const settings = buildAdminSettings(await db.getSettingsByKeys(database, AGENT_PING_INTERVAL_SETTING_KEYS));
-  const intervalSec = Number(settings.ping_record_persist_interval_sec);
-  const bounded = Number.isFinite(intervalSec)
-    ? Math.min(Math.max(Math.floor(intervalSec), AGENT_PING_TASK_MIN_POLL_SEC), AGENT_PING_TASK_MAX_POLL_SEC)
-    : AGENT_PING_TASK_DEFAULT_INTERVAL_SEC;
-  agentPingIntervalCache = {
-    value: bounded,
-    expiresAt: now + AGENT_PING_INTERVAL_SETTING_CACHE_MS,
-  };
-  return bounded;
-}
-
-function withUnifiedPingInterval(tasks: db.PingTask[], intervalSec: number): db.PingTask[] {
-  return tasks.map(task => ({ ...task, interval_sec: intervalSec }));
-}
-
-function estimateNextPingTaskPollSec(tasks: db.PingTask[], _unifiedIntervalSec: number): number {
-  if (tasks.length === 0) return AGENT_PING_TASK_EMPTY_POLL_SEC;
-  return AGENT_PING_TASK_MAX_POLL_SEC;
-}
-
-function agentPingTasksForClient(tasks: db.PingTask[], uuid: string, intervalSec: number): db.PingTask[] {
-  return withUnifiedPingInterval(tasks.filter(task => {
-    if (task.all_clients) return true;
-    return task.clients.includes(uuid);
-  }), intervalSec);
-}
-
-async function agentWebsiteProbeTasksForClient(database: db.QueryDatabase, uuid?: string): Promise<db.WebsiteMonitor[]> {
-  if (!uuid) return [];
-  return db.listAgentWebsiteProbeTasks(database, uuid, new Date().toISOString(), 20);
-}
-
-async function pingPolicyVersion(tasks: db.PingTask[], intervalSec: number): Promise<string> {
-  const digestInput = JSON.stringify({
-    interval_sec: intervalSec,
-    tasks: tasks.map(task => ({
-      id: task.id,
-      name: task.name,
-      type: task.type,
-      target: task.target,
-      interval_sec: task.interval_sec,
-      all_clients: task.all_clients,
-      clients: [...task.clients].sort(),
-    })),
-  });
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(digestInput));
-  return Array.from(new Uint8Array(digest))
-    .slice(0, 8)
-    .map(byte => byte.toString(16).padStart(2, '0'))
-    .join('');
-}
-
 function nonEmptyString(value: unknown, fallback = ''): string {
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : fallback;
 }
@@ -485,10 +355,6 @@ function publicIpPatch(reported: unknown, fallback = '', current = ''): string |
 
 function isJsonObjectPayload(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function isJsonObjectArray(value: unknown): value is Record<string, unknown>[] {
-  return Array.isArray(value) && value.every(isJsonObjectPayload);
 }
 
 function positiveNumber(value: unknown, fallback = 0): number {
@@ -539,6 +405,41 @@ function requestRegion(c: ClientContext): string {
   return parts.join(', ');
 }
 
+function isUnknownRegion(region: string): boolean {
+  return /^(unknown|未知)$/i.test(region.trim());
+}
+
+function isDetailedRegion(region: string): boolean {
+  const text = region.trim();
+  return text !== '' && !isUnknownRegion(text) && !isCountryCodeRegion(text);
+}
+
+async function syncAgentNetworkMetadata(
+  c: ClientContext,
+  client: db.ClientIdentity,
+  patch: Partial<db.Client>,
+): Promise<void> {
+  const safePatch: Record<string, unknown> = { uuid: client.uuid, ...patch };
+  if (typeof patch.ipv4 === 'string') {
+    safePatch.has_ipv4 = patch.ipv4.trim() !== '';
+  }
+  if (typeof patch.ipv6 === 'string') {
+    safePatch.has_ipv6 = patch.ipv6.trim() !== '';
+  }
+  const stub = liveDataStub(c.env.LIVE_DATA);
+  await stub.fetch(new Request('https://do/client-meta', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      source: 'agent',
+      uuid: client.uuid,
+      name: client.name || client.uuid,
+      hidden: client.hidden,
+      client: safePatch,
+    }),
+  })).catch(() => undefined);
+}
+
 function liveReportTtlMs(report: MonitorReportPayload): number {
   const intervalSec = Number(report.report_interval ?? report.interval_sec ?? report.interval);
   if (!Number.isFinite(intervalSec) || intervalSec <= 0) return HTTP_LIVE_TTL_FALLBACK_MS;
@@ -556,8 +457,42 @@ function ipChangeParts(oldIpv4: string, oldIpv6: string, newIpv4: string, newIpv
   return parts;
 }
 
-async function recordIpChangeIfEnabled(database: db.QueryDatabase, clientName: string, parts: string[]): Promise<void> {
+/**
+ * 「公网 IP 变更」的判定只认 Agent 自己上报的公网出口 IP（clients.ipv4 / ipv6，
+ * 与节点页面展示的值同源：Agent 经 api.ipify.org 等公网接口探测）。
+ *
+ * 注意不要用连接 Worker 的源 IP 作为触发依据：双栈机器的出站连接会在 v4/v6
+ * 之间来回切换，源 IP 会反复变化；而公网出口 IP 每个地址族是稳定的，只有真的
+ * 换了出口才变。上报里缺失/非公网（探测失败回落到内网地址）时不产生变更。
+ */
+function reportedPublicIpChangeParts(
+  oldIpv4: string,
+  oldIpv6: string,
+  reportedIpv4: string,
+  reportedIpv6: string,
+): string[] {
+  const nextIpv4 = isPublicIpAddress(reportedIpv4) ? reportedIpv4.trim() : '';
+  const nextIpv6 = isPublicIpAddress(reportedIpv6) ? reportedIpv6.trim() : '';
+  return ipChangeParts(
+    isPublicIpAddress(oldIpv4) ? oldIpv4.trim() : '',
+    isPublicIpAddress(oldIpv6) ? oldIpv6.trim() : '',
+    nextIpv4,
+    nextIpv6,
+  );
+}
+
+async function recordIpChangeIfEnabled(
+  database: db.QueryDatabase,
+  uuid: string,
+  clientName: string,
+  parts: string[],
+): Promise<void> {
   if (parts.length === 0) return;
+
+  // 服务器层级开关：通知管理 → IP 变更通知 → 按节点开关。
+  // 未开启的节点直接跳过，连全局设置都不必读。
+  const perServerEnabled = await db.isIpChangeNotificationEnabled(database, uuid).catch(() => false);
+  if (!perServerEnabled) return;
 
   const settings = await db.getSettingsByKeys(database, IP_CHANGE_NOTIFICATION_SETTING_KEYS);
   if (settings['enable_ip_change_notification'] !== 'true') return;
@@ -602,15 +537,17 @@ async function syncClientIpsFromReport(
   if (Object.keys(updates).length === 0) return;
 
   await db.updateClient(database, uuid, updates);
+  await syncLiveBasicInfoMetadata(c, { uuid, ...updates });
   invalidatePublicMetadataCache();
   invalidateAgentClientAuthCache({ uuid, token: oldClient.token });
-  const parts = ipChangeParts(
+  const parts = reportedPublicIpChangeParts(
     oldClient.ipv4 || '',
     oldClient.ipv6 || '',
-    nextIpv4 !== undefined ? nextIpv4 : oldClient.ipv4 || '',
-    nextIpv6 !== undefined ? nextIpv6 : oldClient.ipv6 || '',
+    reportedIpv4,
+    reportedIpv6,
   );
-  await recordIpChangeIfEnabled(database, clientName, parts);
+  await recordIpChangeIfEnabled(database, uuid, clientName, parts);
+  Object.assign(oldClient, updates);
 }
 
 async function updateLiveReport(
@@ -620,7 +557,7 @@ async function updateLiveReport(
   hidden: boolean,
   reportOrReports: MonitorReportPayload | MonitorReportPayload[],
   nowMs: number,
-): Promise<boolean> {
+): Promise<ClientReportResult> {
   let report: MonitorReportPayload | undefined;
   let reportBody: { report: MonitorReportPayload } | { reports: MonitorReportPayload[] };
   if (Array.isArray(reportOrReports)) {
@@ -630,9 +567,8 @@ async function updateLiveReport(
     report = reportOrReports;
     reportBody = { report };
   }
-  if (!report) return false;
-  const doId = c.env.LIVE_DATA.idFromName('global');
-  const stub = c.env.LIVE_DATA.get(doId);
+  if (!report) return { persisted: false, trafficImported: false };
+  const stub = liveDataStub(c.env.LIVE_DATA);
   const response = await stub.fetch(new Request('https://do/client-report', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -652,7 +588,7 @@ async function updateLiveReport(
     throw new Error('Live report persistence was not acknowledged');
   }
   // History may remain queued or disabled after the durable last report is accepted.
-  return result.persisted;
+  return result;
 }
 
 function buildSafeLiveBasicInfoClient(
@@ -698,7 +634,7 @@ function buildSafeLiveBasicInfoClient(
 async function syncLiveBasicInfoMetadata(c: ClientContext, client: Record<string, unknown>): Promise<void> {
   const uuid = typeof client.uuid === 'string' ? client.uuid : '';
   if (!uuid) return;
-  const stub = c.env.LIVE_DATA.get(c.env.LIVE_DATA.idFromName('global'));
+  const stub = liveDataStub(c.env.LIVE_DATA);
   await stub.fetch(new Request('https://do/client-meta', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -758,32 +694,47 @@ async function syncBasicInfoFromReportBatch(
     disk_total: diskTotalFromReport(basicInfoPayload.disk_total, oldClient?.disk_total || 0),
     version: nonEmptyString(basicInfoPayload.version, oldClient?.version || ''),
   });
-  const ipChange = ipChangeParts(
-    oldIpv4,
-    oldIpv6,
-    inferredIpv4 !== undefined ? inferredIpv4 : oldIpv4,
-    inferredIpv6 !== undefined ? inferredIpv6 : oldIpv6,
-  );
+  // basic_info 与顶层 report.ipv4/ipv6 同源（都来自 Agent 的公网探测），
+  // 「/report」请求里已由 syncClientIpsFromReport 统一判定并只通知一次，
+  // 这里不再重复发送，避免同一次 IP 变化收到两条通知。
   if (Object.keys(patch).length > 0) {
     await db.updateClient(database, uuid, patch);
     await syncLiveBasicInfoMetadata(c, buildSafeLiveBasicInfoClient(uuid, displayName, hidden, oldClient, patch)).catch(() => undefined);
+    if (oldClient) Object.assign(oldClient, patch);
     invalidatePublicMetadataCache();
     invalidateAgentClientAuthCache({ uuid, token: oldClient?.token });
-    runClientBackground(c, recordIpChangeIfEnabled(database, displayName, ipChange));
-  } else {
-    runClientBackground(c, recordIpChangeIfEnabled(database, displayName, ipChange));
   }
+}
+
+async function getPolicyPingTasks(database: db.QueryDatabase): Promise<db.PingTask[]> {
+  return db.listPingTasks(database);
+}
+
+async function getPolicyPingTimeouts(database: db.QueryDatabase): Promise<db.PingTaskClientTimeout[]> {
+  return typeof db.listPingTaskClientTimeouts === 'function'
+    ? await db.listPingTaskClientTimeouts(database)
+    : [];
+}
+
+async function getPolicyPingIntervalSec(database: db.QueryDatabase): Promise<number> {
+  const settings = buildAdminSettings(await db.getSettingsByKeys(database, ['ping_record_persist_interval_sec']));
+  const configured = Number(settings.ping_record_persist_interval_sec);
+  return Number.isFinite(configured) ? Math.min(Math.max(Math.floor(configured), 60), 3600) : 120;
 }
 
 async function fallbackAgentPolicy(database: db.QueryDatabase, uuid?: string) {
   const settings = buildAdminSettings(await db.getSettingsByKeys(database, AGENT_POLICY_SETTING_KEYS));
   const reportIntervalSec = Math.min(Math.max(Number(settings.live_poll_idle_interval_sec || 120), 60), 3600);
   const viewerTtlSec = Math.min(Math.max(Number(settings.live_poll_active_max_duration_sec || 120), 60), 3600);
-  const pingIntervalSec = Math.min(Math.max(Number(settings.ping_record_persist_interval_sec || 120), 60), 3600);
+  const pingIntervalSec = await getPolicyPingIntervalSec(database);
   const pingTasks = uuid
-    ? agentPingTasksForClient(await listAgentPingTasks(database), uuid, Math.floor(pingIntervalSec))
+    ? agentPingTasksForClient(
+      await getPolicyPingTasks(database),
+      await getPolicyPingTimeouts(database),
+      uuid,
+      Math.floor(pingIntervalSec),
+    )
     : [];
-  const websiteProbeTasks = await agentWebsiteProbeTasksForClient(database, uuid);
   const client = uuid ? await db.getClient(database, uuid).catch(() => null) : null;
   const trafficResetDay = Number(client?.traffic_reset_day);
   return {
@@ -794,7 +745,6 @@ async function fallbackAgentPolicy(database: db.QueryDatabase, uuid?: string) {
     ping_interval_sec: Math.floor(pingIntervalSec),
     ping_policy_version: await pingPolicyVersion(pingTasks, Math.floor(pingIntervalSec)),
     ping_tasks: pingTasks,
-    website_probe_tasks: websiteProbeTasks,
     report_now: false,
     viewer_count: 0,
     viewer_ttl_sec: Math.floor(viewerTtlSec),
@@ -856,31 +806,12 @@ async function enforceAgentBucketRateLimit(
   max: number,
 ): Promise<Response | null> {
   const localKey = `${bucket}:${key}`;
-  try {
-    const namespace = c.env.RATE_LIMIT;
-    if (!namespace) return localAgentRateLimit(c, localKey, max, AGENT_RATE_LIMIT_WINDOW_MS);
-    const doId = namespace.idFromName('agent-ingress');
-    const stub = namespace.get(doId);
-    const response = await stub.fetch(new Request('https://do/rate-limit', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        bucket,
-        ip: key,
-        max,
-        windowMs: AGENT_RATE_LIMIT_WINDOW_MS,
-      }),
-    }));
-    if (!response.ok) throw new Error(`DO rate limit HTTP ${response.status}`);
-    const result = await readRateLimitResult(response, { limit: max, remaining: 0 });
-    if (!result) throw new Error('DO rate limit returned an invalid response');
-    c.header('X-RateLimit-Limit', String(result.limit));
-    c.header('X-RateLimit-Remaining', String(result.remaining));
-    if (result.allowed) return null;
-    return rateLimitResponse(c, result.retryAfter, result.limit, result.remaining);
-  } catch {
-    return localAgentRateLimit(c, localKey, max, AGENT_RATE_LIMIT_WINDOW_MS);
+  const check = await checkNativeRateLimit(c.env, bucket, key, max);
+  if (check.outcome === 'allowed') return null;
+  if (check.outcome === 'limited') {
+    return rateLimitResponse(c, Math.ceil(AGENT_RATE_LIMIT_WINDOW_MS / 1000), max, 0);
   }
+  return localAgentRateLimit(c, localKey, max, AGENT_RATE_LIMIT_WINDOW_MS);
 }
 
 async function enforceAgentRateLimit(
@@ -901,28 +832,59 @@ async function agentPresentedTokenKey(c: ClientContext, token: string): Promise<
 }
 
 async function enforceAgentAuthAttemptLimit(c: ClientContext, token: string): Promise<Response | null> {
-  const ipLimited = localAgentRateLimit(
-    c,
-    `agent-auth-attempt:${requestClientIp(c) || 'unknown'}`,
-    AGENT_AUTH_ATTEMPT_RATE_LIMIT_MAX,
-    AGENT_RATE_LIMIT_WINDOW_MS,
-  );
-  if (ipLimited) return ipLimited;
-  return localAgentRateLimit(
-    c,
-    `agent-auth-presented-token:${await agentPresentedTokenKey(c, token)}`,
-    AGENT_AUTH_ATTEMPT_RATE_LIMIT_MAX,
-    AGENT_RATE_LIMIT_WINDOW_MS,
-  );
+  const ipKey = requestClientIp(c) || 'unknown';
+  const presentedKey = await agentPresentedTokenKey(c, token);
+  for (const [bucket, key] of [
+    ['agent-auth-attempt-ip', ipKey],
+    ['agent-auth-attempt-token', presentedKey],
+  ] as const) {
+    const check = await checkNativeRateLimit(c.env, bucket, key, AGENT_AUTH_ATTEMPT_RATE_LIMIT_MAX);
+    if (check.outcome === 'allowed') continue;
+    if (check.outcome === 'limited') {
+      return rateLimitResponse(c, Math.ceil(AGENT_RATE_LIMIT_WINDOW_MS / 1000), AGENT_AUTH_ATTEMPT_RATE_LIMIT_MAX, 0);
+    }
+    const local = localAgentRateLimit(
+      c,
+      `${bucket}:${key}`,
+      AGENT_AUTH_ATTEMPT_RATE_LIMIT_MAX,
+      AGENT_RATE_LIMIT_WINDOW_MS,
+    );
+    if (local) return local;
+  }
+  return null;
 }
 
 async function enforceAgentAuthFailureLimit(c: ClientContext, token: string): Promise<Response | null> {
-  return enforceAgentBucketRateLimit(
-    c,
-    'agent-auth-failure',
-    await agentPresentedTokenKey(c, token),
-    AGENT_AUTH_FAILURE_RATE_LIMIT_MAX,
-  );
+  const key = await agentPresentedTokenKey(c, token);
+  try {
+    const namespace = c.env.RATE_LIMIT;
+    if (!namespace) {
+      return localAgentRateLimit(c, `agent-auth-failure:${key}`, AGENT_AUTH_FAILURE_RATE_LIMIT_MAX, AGENT_RATE_LIMIT_WINDOW_MS);
+    }
+    const stub = rateLimitStub(namespace, RATE_LIMIT_OBJECT_NAMES.agentIngress);
+    const response = await stub.fetch(new Request('https://do/rate-limit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        bucket: 'agent-auth-failure',
+        ip: key,
+        max: AGENT_AUTH_FAILURE_RATE_LIMIT_MAX,
+        windowMs: AGENT_RATE_LIMIT_WINDOW_MS,
+      }),
+    }));
+    if (!response.ok) throw new Error(`DO rate limit HTTP ${response.status}`);
+    const result = await readRateLimitResult(response, {
+      limit: AGENT_AUTH_FAILURE_RATE_LIMIT_MAX,
+      remaining: 0,
+    });
+    if (!result) throw new Error('DO rate limit returned an invalid response');
+    c.header('X-RateLimit-Limit', String(result.limit));
+    c.header('X-RateLimit-Remaining', String(result.remaining));
+    if (result.allowed) return null;
+    return rateLimitResponse(c, result.retryAfter, result.limit, result.remaining);
+  } catch {
+    return localAgentRateLimit(c, `agent-auth-failure:${key}`, AGENT_AUTH_FAILURE_RATE_LIMIT_MAX, AGENT_RATE_LIMIT_WINDOW_MS);
+  }
 }
 
 async function readJsonBodyWithLimit(c: ClientContext, maxBytes: number): Promise<JsonBodyResult> {
@@ -1055,9 +1017,66 @@ async function clientIdentityAuth(c: ClientContext, next: Next) {
   return next();
 }
 
-// 旧自动注册入口：功能已移除，仅返回明确拒绝，避免旧安装脚本静默失败。
-clientRoutes.post('/register', async (c) => {
-  return c.json({ error: 'Agent 自动注册已移除，请在后台创建节点并使用节点 Token 安装 Agent' }, 410);
+// Agent 上报 WebSocket（与 POST /report 共用 `/api/clients/report`）。
+// 归属 Agent 路由模块：调整前端实时通道不会碰这里，反之亦然。
+clientRoutes.get('/report', async (c) => {
+  // Agent credentials belong in headers, never in URLs retained by proxies/logs.
+  const token = bearerToken(c).trim();
+
+  if (!token) {
+    return c.json({ error: 'Missing token' }, 401);
+  }
+
+  const database = getDatabase(c.env);
+  const client = await getAgentClientIdentityByToken(database, token, c.env, getCloudflareClientIp(c, ''));
+  if (!client) {
+    return c.json({ error: 'Invalid token' }, 401);
+  }
+  const region = requestRegion(c);
+  const sourceIp = getCloudflareClientIp(c, '');
+  const sourceIpIsPublic = isPublicIpAddress(sourceIp);
+  if (region) {
+    const storedClient = await db.getClient(database, client.uuid);
+    const patch: Partial<db.Client> = {};
+    if (storedClient) {
+      if (
+        region &&
+        (
+          !storedClient.region ||
+          isUnknownRegion(storedClient.region) ||
+          (isCountryCodeRegion(storedClient.region) && isDetailedRegion(region))
+        )
+      ) {
+        patch.region = region;
+      }
+      if (Object.keys(patch).length > 0) {
+        await db.updateClient(database, client.uuid, patch);
+        await syncAgentNetworkMetadata(c, client, patch);
+        invalidatePublicMetadataCache();
+      }
+    }
+  }
+
+  if (!isWebSocketUpgrade(c)) {
+    return c.json({ error: 'WebSocket upgrade required' }, 400);
+  }
+  if (!requestHasValidOrigin(c)) {
+    return c.json({ error: 'Invalid WebSocket Origin' }, 403);
+  }
+
+  const stub = liveDataStub(c.env.LIVE_DATA);
+
+  const url = new URL(c.req.url);
+  url.pathname = '/';
+  url.search = '';
+  url.searchParams.set('id', client.uuid);
+  url.searchParams.set('name', client.name);
+  url.searchParams.set('hidden', client.hidden ? '1' : '0');
+  url.searchParams.set('role', 'agent');
+  if (sourceIpIsPublic) url.searchParams.set('source_ip', sourceIp);
+  if (region) url.searchParams.set('region', region);
+
+  return stub.fetch(new Request(url.toString(), c.req.raw));
 });
 
 // 获取 Agent 动态上报策略（HTTP 模式使用）
@@ -1076,7 +1095,6 @@ clientRoutes.get('/policy', clientIdentityAuth, async (c) => {
         ping_interval_sec: 120,
         ping_policy_version: 'fallback',
         ping_tasks: [],
-        website_probe_tasks: [],
         report_now: false,
         viewer_count: 0,
         viewer_ttl_sec: 120,
@@ -1085,73 +1103,6 @@ clientRoutes.get('/policy', clientIdentityAuth, async (c) => {
         timestamp: Date.now(),
       });
     }
-  }
-});
-
-// 上传基本信息（受保护）
-clientRoutes.post('/uploadBasicInfo', clientAuth, async (c) => {
-  try {
-    const limited = await enforceAgentRateLimit(c, 'agent-basic-info', AGENT_BASIC_INFO_RATE_LIMIT_MAX);
-    if (limited) return limited;
-    const parsed = await readJsonBodyWithLimit(c, AGENT_BASIC_INFO_MAX_BODY_BYTES);
-    if ('response' in parsed) return parsed.response;
-    const objectBody = requireJsonObjectBody(c, parsed.body);
-    if ('response' in objectBody) return objectBody.response;
-    const body = objectBody.body;
-    const uuid = c.get('clientUuid')!;
-    const authClient = c.get('clientRecord') as db.Client | undefined;
-
-    // Fetch old client info for IP change detection
-    const database = getDatabase(c.env);
-    const oldClient = authClient || await db.getClient(database, uuid);
-    const oldIpv4 = oldClient?.ipv4 || '';
-    const oldIpv6 = oldClient?.ipv6 || '';
-    const fallbackIp = requestClientIp(c);
-    const inferredIpv4 = publicIpPatch(body.ipv4, fallbackIp && !isIPv6(fallbackIp) ? fallbackIp : '', oldIpv4);
-    const inferredIpv6 = publicIpPatch(body.ipv6, fallbackIp && isIPv6(fallbackIp) ? fallbackIp : '', oldIpv6);
-    const displayName = oldClient?.name || c.get('clientName') || uuid;
-    const ipChanged =
-      (inferredIpv4 !== undefined && oldIpv4 !== inferredIpv4) ||
-      (inferredIpv6 !== undefined && oldIpv6 !== inferredIpv6);
-    const edgeRegion = requestRegion(c);
-
-    const patch = buildChangedClientPatch(oldClient, {
-      cpu_name: nonEmptyString(body.cpu_name, oldClient?.cpu_name || ''),
-      virtualization: nonEmptyString(body.virtualization, oldClient?.virtualization || ''),
-      arch: nonEmptyString(body.arch, oldClient?.arch || ''),
-      cpu_cores: positiveNumber(body.cpu_cores, oldClient?.cpu_cores || 0),
-      os: nonEmptyString(body.os, oldClient?.os || ''),
-      kernel_version: nonEmptyString(body.kernel_version, oldClient?.kernel_version || ''),
-      gpu_name: nonEmptyString(body.gpu_name, oldClient?.gpu_name || ''),
-      ...(inferredIpv4 !== undefined ? { ipv4: inferredIpv4 } : {}),
-      ...(inferredIpv6 !== undefined ? { ipv6: inferredIpv6 } : {}),
-      region: ipChanged
-        ? preferredRegion(body.region, edgeRegion, oldClient?.region)
-        : preferredRegion(body.region, oldClient?.region, edgeRegion),
-      mem_total: positiveNumber(body.mem_total, oldClient?.mem_total || 0),
-      swap_total: nonNegativeNumber(body.swap_total, oldClient?.swap_total || 0),
-      disk_total: diskTotalFromReport(body.disk_total, oldClient?.disk_total || 0),
-      version: nonEmptyString(body.version, oldClient?.version || ''),
-    });
-    const ipChange = ipChangeParts(
-      oldIpv4,
-      oldIpv6,
-      inferredIpv4 !== undefined ? inferredIpv4 : oldIpv4,
-      inferredIpv6 !== undefined ? inferredIpv6 : oldIpv6,
-    );
-    if (Object.keys(patch).length > 0) {
-      await db.updateClient(database, uuid, patch);
-      await syncLiveBasicInfoMetadata(c, buildSafeLiveBasicInfoClient(uuid, displayName, Boolean(c.get('clientHidden')), oldClient, patch)).catch(() => undefined);
-      invalidatePublicMetadataCache();
-      invalidateAgentClientAuthCache({ uuid, token: oldClient?.token });
-      runClientBackground(c, recordIpChangeIfEnabled(database, displayName, ipChange));
-    } else {
-      runClientBackground(c, recordIpChangeIfEnabled(database, displayName, ipChange));
-    }
-
-    return c.json({ success: true });
-  } catch {
-    return c.json({ error: '上传失败' }, 500);
   }
 });
 
@@ -1180,107 +1131,24 @@ clientRoutes.post('/report', clientAuth, async (c) => {
     const authClient = c.get('clientRecord') as db.Client | undefined;
     const database = getDatabase(c.env);
 
-    runClientBackground(c, syncClientIpsFromReport(database, c, uuid, liveName, report, authClient || null));
+    await syncClientIpsFromReport(database, c, uuid, liveName, report, authClient || null);
     await syncBasicInfoFromReportBatch(database, c, uuid, liveName, hidden, authClient || null, reports);
 
-    const persisted = await updateLiveReport(c, uuid, liveName, hidden, reports.length > 1 ? reports : report, nowMs);
+    const { persisted, trafficImported } = await updateLiveReport(c, uuid, liveName, hidden, reports.length > 1 ? reports : report, nowMs);
     if (report.version && clientFieldChanged(authClient?.version, report.version)) {
-      runClientBackground(c, (async () => {
+      await (async () => {
         await db.updateClient(database, uuid, {
           version: report.version,
         });
+        await syncLiveBasicInfoMetadata(c, { uuid, version: report.version });
         invalidatePublicMetadataCache();
         invalidateAgentClientAuthCache({ uuid, token: authClient?.token });
-      })());
+      })();
     }
 
-    return c.json({ success: true, persisted });
+    // traffic_imported：旧版 Agent 的本地流量历史已入库，Agent 据此改名旧状态文件（没有旧历史的 Agent 不会收到该字段）。
+    return c.json({ success: true, persisted, ...(trafficImported ? { traffic_imported: true } : {}) });
   } catch (e) {
-    return c.json({ error: '上报失败' }, 500);
-  }
-});
-
-// 获取 Ping 任务列表（受保护）
-clientRoutes.get('/ping/tasks', clientIdentityAuth, async (c) => {
-  try {
-    const uuid = c.get('clientUuid')!;
-    const database = getDatabase(c.env);
-    const allTasks = await listAgentPingTasks(database);
-
-    // 筛选适用于此客户端的任务
-    const tasks = allTasks.filter(task => {
-      if (task.all_clients) return true;
-      return task.clients.includes(uuid);
-    });
-    const unifiedPingIntervalSec = await getUnifiedPingIntervalSec(database);
-    const responseTasks = withUnifiedPingInterval(tasks, unifiedPingIntervalSec);
-
-    if (c.req.query('format') === 'v2') {
-      return c.json({
-        tasks: responseTasks,
-        next_poll_sec: estimateNextPingTaskPollSec(responseTasks, unifiedPingIntervalSec),
-      });
-    }
-
-    return c.json(responseTasks);
-  } catch {
-    return c.json({ error: '获取失败' }, 500);
-  }
-});
-
-// 上报 Ping 结果（受保护）
-clientRoutes.post('/ping/result', clientIdentityAuth, async (c) => {
-  try {
-    const limited = await enforceAgentRateLimit(c, 'agent-ping-result', AGENT_PING_RESULT_RATE_LIMIT_MAX);
-    if (limited) return limited;
-    const parsed = await readJsonBodyWithLimit(c, AGENT_PING_RESULT_MAX_BODY_BYTES);
-    if ('response' in parsed) return parsed.response;
-    const body = parsed.body;
-    if (!isJsonObjectPayload(body) && !isJsonObjectArray(body)) {
-      return c.json({ error: 'Ping 结果参数无效' }, 400);
-    }
-    const uuid = c.get('clientUuid')!;
-
-    // body 应该是 { task_id, value } 或包含多个结果的数组
-    const tasks = await listAgentPingTasks(getDatabase(c.env));
-    const validated = validatePingResults(body, tasks, uuid);
-    if (!validated.ok) {
-      return c.json({ error: validated.error }, validated.status as 400 | 403);
-    }
-    const taskMap = new Map(tasks.map(task => [task.id, task]));
-
-    const doId = c.env.LIVE_DATA.idFromName('global');
-    const stub = c.env.LIVE_DATA.get(doId);
-    const doResponse = await stub.fetch(new Request('https://do/ping-result', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        client_id: uuid,
-        results: validated.results.map(result => ({
-          task_id: result.taskId,
-          value: result.value,
-          interval_sec: taskMap.get(result.taskId)?.interval_sec || 60,
-        })),
-        timestamp: Date.now(),
-      }),
-    }));
-    if (!doResponse.ok) {
-      return c.json({ error: '上报失败' }, 500);
-    }
-    const accepted = await readAcceptedCount(doResponse) ?? 0;
-    return c.json({ success: true, accepted });
-  } catch (error) {
-    try {
-      await bestEffortRecordHealthEvent(
-        getDatabase(c.env),
-        'ping_persistence',
-        'error',
-        `ping persist failed: ${errorDetail(error)}`,
-        { auditAction: 'ping_persistence_error' },
-      );
-    } catch {
-      // Best effort only; preserve the original API response.
-    }
     return c.json({ error: '上报失败' }, 500);
   }
 });

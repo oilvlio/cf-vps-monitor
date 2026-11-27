@@ -8,7 +8,7 @@ import {
   type LoginResult,
   type MfaMethod,
 } from '../utils/mfa';
-import { normalizeAuthUser, shouldCheckAdminSessionOnLoad, shouldClearAuthForStatus, type User } from './auth-state';
+import { AUTH_USER_STORAGE_KEY, normalizeAuthUser, shouldCheckAdminSessionOnLoad, shouldClearAuthForStatus, type User } from './auth-state';
 
 interface AuthContextType {
   user: User | null;
@@ -31,8 +31,6 @@ const AuthContext = createContext<AuthContextType>({
   isAuthenticated: false,
   authLoading: true,
 });
-
-const AUTH_USER_STORAGE_KEY = 'cf_monitor_user';
 
 async function readJson(res: Response) {
   return res.json().catch(() => ({}));

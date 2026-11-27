@@ -10,9 +10,12 @@
   "scripts": {
     "postinstall": "node scripts/install-wrangler-wrapper.mjs",
     "lint": "npm --prefix frontend run lint && npm --prefix worker run lint",
+    "lint:eslint": "eslint frontend/src worker/src",
+    "format": "prettier --write .",
     "build:migrations": "node scripts/generate-migrations.mjs",
     "build": "npm --prefix frontend run build && npm --prefix worker run build",
     "test:js": "node --test",
+    "test:postgres": "node --test --test-concurrency=1 worker/test/db/history-postgres.test.mjs worker/test/db/history-catalog.test.mjs worker/test/db/history-rpc-smoke.test.mjs worker/test/db/history-review-regressions.test.mjs worker/test/db/history-audit-fixes.test.mjs",
     "test:go": "cd agent && go test ./...",
     "test": "npm run test:js && npm run test:go",
     "security:check": "node scripts/security-check.mjs",
@@ -37,13 +40,20 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.5.8",
+    "@eslint/js": "^10.0.1",
     "esbuild": "0.28.1",
-    "miniflare": "4.20260730.0"
+    "eslint": "^10.15.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.0.0",
+    "miniflare": "4.20260730.0",
+    "pg": "8.13.1",
+    "prettier": "^3.10.1",
+    "typescript-eslint": "^8.74.0"
   },
   "overrides": {
     "miniflare": {
-      "sharp": "0.35.4",
-      "undici": "7.29.0"
+      "sharp": "0.35.5",
+      "undici": "7.30.1"
     }
   }
 }

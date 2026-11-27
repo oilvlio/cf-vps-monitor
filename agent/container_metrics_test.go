@@ -5,14 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/shirou/gopsutil/v3/disk"
-	"github.com/shirou/gopsutil/v3/host"
+	"github.com/shirou/gopsutil/v4/disk"
+	"github.com/shirou/gopsutil/v4/sensors"
 )
 
 func TestContainerMetricsUnknownReportJSON(t *testing.T) {
@@ -83,68 +85,20 @@ func assertContainerMetricInt(t *testing.T, label string, got *int64, want int64
 	}
 }
 
-func TestContainerMetricsDiskScope(t *testing.T) {
-	for _, tc := range []struct {
-		name, mountinfo, fstype, source string
-		want                            int64
-	}{
-		{"independent ext4", independentContainerMount, "ext4", "/dev/mapper/vg-container", 100},
-		{"independent xfs", "31 20 253:1 / / rw - xfs /dev/mapper/vg-container rw\n", "xfs", "/dev/dm-1", 100},
-		{"shared host directory", sharedContainerMount, "ext4", "/dev/bcache0", -1},
-		{"escaped shared directory", "31 20 253:1 /containers/name\\040space/rootfs / rw - ext4 /dev/vda1 rw\n", "ext4", "/dev/vda1", -1},
-		{"overlay host backing store", "31 20 0:10 / / rw - overlay overlay rw,lowerdir=/lower,upperdir=/upper\n", "overlay", "overlay", -1},
-		{"unproven zfs quota", "31 20 0:10 / / rw - zfs pool/container rw\n", "zfs", "pool/container", -1},
-		{"unproven btrfs subvolume", "31 20 0:10 /@container / rw - btrfs /dev/vda1 rw\n", "btrfs", "/dev/vda1", -1},
-		{"unidentified block source", "31 20 0:10 / / rw - ext4 none rw\n", "ext4", "none", -1},
-		{"conflicting stacked mount", independentContainerMount + "32 20 0:10 / / rw - overlay overlay rw\n", "ext4", "/dev/mapper/vg-container", -1},
-		{"missing root mount", lxcfsUptimeMount, "ext4", "/dev/mapper/vg-container", -1},
-		{"malformed mount evidence", "31 20 253:1 / / rw ext4 /dev/vda1\n", "ext4", "/dev/vda1", -1},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			source := containerMetricFixture(t, tc.mountinfo)
-			source.partitions = func(bool) ([]disk.PartitionStat, error) {
-				return []disk.PartitionStat{{Device: tc.source, Mountpoint: "/", Fstype: tc.fstype}}, nil
-			}
-			var calls int
-			source.diskUsage = func(name string) (*disk.UsageStat, error) {
-				calls++
-				return &disk.UsageStat{Path: name, Used: 20, Total: 100}, nil
-			}
-			used, total := source.diskUsageTotals("", "")
-			wantUsed := int64(20)
-			if tc.want < 0 {
-				wantUsed = -1
-				if calls != 0 {
-					t.Errorf("sampled %d unproven host filesystems", calls)
-				}
-			}
-			assertContainerMetricInt(t, "disk used", used, wantUsed)
-			assertContainerMetricInt(t, "disk total", total, tc.want)
-		})
-	}
-}
-
 func TestContainerMetricsDiskFiltersAndAggregation(t *testing.T) {
 	for _, tc := range []struct {
 		name, include, exclude string
-		container              bool
 		used, total            int64
 	}{
-		{"container cannot count host bind", "", "", true, -1, -1},
-		{"exclude shared bind", "", "/shared", true, 20, 100},
-		{"explicit root", "/", "", true, 20, 100},
-		{"explicit host bind stays unknown", "/shared", "", true, -1, -1},
-		{"exclude wins over include", "/", "/", true, -1, -1},
-		{"bare metal preserves device dedup", "", "", false, 900, 10000},
-		{"bare metal preserves explicit mount sum", "/,/shared", "", false, 920, 10100},
+		{"default dedup keeps the larger filesystem", "", "", 900, 10000},
+		{"exclude shared bind", "", "/shared", 20, 100},
+		{"explicit root", "/", "", 20, 100},
+		{"explicit shared bind", "/shared", "", 900, 10000},
+		{"explicit mounts sum", "/,/shared", "", 920, 10100},
+		{"exclude wins over include", "/", "/", 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			source := containerMetricFixture(t, independentContainerMount+"32 20 253:1 /host/shared /shared rw - ext4 /dev/mapper/vg-container rw\n")
-			if !tc.container {
-				if err := os.Remove(filepath.Join(source.root, "run", "systemd", "container")); err != nil {
-					t.Fatal(err)
-				}
-			}
 			source.partitions = func(bool) ([]disk.PartitionStat, error) {
 				return []disk.PartitionStat{
 					{Device: "/dev/mapper/vg-container", Mountpoint: "/", Fstype: "ext4"},
@@ -171,13 +125,24 @@ func TestContainerMetricsDiskFiltersAndAggregation(t *testing.T) {
 }
 
 func TestContainerMetricsDiskReadFailures(t *testing.T) {
-	for _, name := range []string{"partitions", "mountinfo", "usage", "zero total", "used exceeds total", "overflow", "partial multiple disks"} {
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		used, total int64
+	}{
+		{"partitions", 0, 0},
+		{"missing mountinfo", 20, 100},
+		{"usage", 0, 0},
+		{"zero total", 0, 0},
+		{"used exceeds total", 101, 100},
+		{"overflow", 0, 0},
+		{"partial multiple disks", 20, 100},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			source := containerMetricFixture(t, independentContainerMount)
-			switch name {
+			switch tc.name {
 			case "partitions":
 				source.partitions = func(bool) ([]disk.PartitionStat, error) { return nil, errors.New("denied") }
-			case "mountinfo":
+			case "missing mountinfo":
 				if err := os.Remove(filepath.Join(source.root, "proc", "self", "mountinfo")); err != nil {
 					t.Fatal(err)
 				}
@@ -190,7 +155,6 @@ func TestContainerMetricsDiskReadFailures(t *testing.T) {
 			case "overflow":
 				source.diskUsage = func(string) (*disk.UsageStat, error) { return &disk.UsageStat{Total: 1 << 63}, nil }
 			case "partial multiple disks":
-				writeFileTree(t, source.root, map[string]string{"proc/self/mountinfo": independentContainerMount + "32 20 253:2 / /data rw - xfs /dev/vdb1 rw\n"})
 				source.partitions = func(bool) ([]disk.PartitionStat, error) {
 					return []disk.PartitionStat{{Device: "/dev/mapper/vg-container", Mountpoint: "/", Fstype: "ext4"}, {Device: "/dev/vdb1", Mountpoint: "/data", Fstype: "xfs"}}, nil
 				}
@@ -202,8 +166,8 @@ func TestContainerMetricsDiskReadFailures(t *testing.T) {
 				}
 			}
 			used, total := source.diskUsageTotals("", "")
-			assertContainerMetricInt(t, "used", used, -1)
-			assertContainerMetricInt(t, "total", total, -1)
+			assertContainerMetricInt(t, "used", used, tc.used)
+			assertContainerMetricInt(t, "total", total, tc.total)
 		})
 	}
 }
@@ -277,9 +241,9 @@ func TestContainerMetricsTemperatureScope(t *testing.T) {
 			source.root, source.platform = t.TempDir(), tc.platform
 			writeFileTree(t, source.root, tc.files)
 			var calls atomic.Int32
-			nodeTemperatureSampler = newHostTemperatureSampler("linux", func(context.Context) ([]host.TemperatureStat, error) {
+			nodeTemperatureSampler = newHostTemperatureSampler("linux", func(context.Context) ([]sensors.TemperatureStat, error) {
 				calls.Add(1)
-				return []host.TemperatureStat{{SensorKey: "coretemp_package_id_0", Temperature: 60}}, nil
+				return []sensors.TemperatureStat{{SensorKey: "coretemp_package_id_0", Temperature: 60}}, nil
 			})
 			value := source.temperature(context.Background())
 			if tc.container {
@@ -294,28 +258,17 @@ func TestContainerMetricsTemperatureScope(t *testing.T) {
 }
 
 func TestContainerMetricsCollectorWiring(t *testing.T) {
-	for _, tc := range []struct {
-		trustedUptime   bool
-		configuredTotal string
-		wantTotal       int64
-	}{
-		{false, "0", -1},
-		{true, "0", -1},
-		{true, "5024000000", 5024000000},
-	} {
-		t.Run(fmt.Sprintf("trusted uptime %t capacity %s", tc.trustedUptime, tc.configuredTotal), func(t *testing.T) {
-			containerDiskConfigFixture(t)
-			t.Setenv(containerDiskConfigEnv, tc.configuredTotal)
-			applyEnvDefaults()
+	for _, trustedUptime := range []bool{false, true} {
+		t.Run(fmt.Sprintf("trusted uptime %t", trustedUptime), func(t *testing.T) {
 			preparer, _ := basicInfoDeliveryFixture(t)
-			previousSource, previousSampler, previousTraffic := nodeMetrics, nodeTemperatureSampler, trafficTracker
+			previousSource, previousSampler := nodeMetrics, nodeTemperatureSampler
 			previousInclude, previousExclude := mountInclude, mountExclude
 			t.Cleanup(func() {
-				nodeMetrics, nodeTemperatureSampler, trafficTracker = previousSource, previousSampler, previousTraffic
+				nodeMetrics, nodeTemperatureSampler = previousSource, previousSampler
 				mountInclude, mountExclude = previousInclude, previousExclude
 			})
 			mountinfo := sharedContainerMount
-			if tc.trustedUptime {
+			if trustedUptime {
 				mountinfo += lxcfsUptimeMount
 			}
 			nodeMetrics = containerMetricFixture(t, mountinfo)
@@ -326,11 +279,11 @@ func TestContainerMetricsCollectorWiring(t *testing.T) {
 				return &disk.UsageStat{Used: 12951896064, Total: 1055735824384}, nil
 			}
 			var reads atomic.Int32
-			nodeTemperatureSampler = newHostTemperatureSampler("linux", func(context.Context) ([]host.TemperatureStat, error) {
+			nodeTemperatureSampler = newHostTemperatureSampler("linux", func(context.Context) ([]sensors.TemperatureStat, error) {
 				reads.Add(1)
-				return []host.TemperatureStat{{SensorKey: "coretemp", Temperature: 60}}, nil
+				return []sensors.TemperatureStat{{SensorKey: "coretemp", Temperature: 60}}, nil
 			})
-			trafficTracker, mountInclude, mountExclude = nil, "", ""
+			mountInclude, mountExclude = "", ""
 			gpuDetailsMu.Lock()
 			globalGPUDetails = nil
 			gpuDetailsMu.Unlock()
@@ -338,21 +291,21 @@ func TestContainerMetricsCollectorWiring(t *testing.T) {
 			t.Setenv("PATH", t.TempDir())
 			report := collectReportWithInterval(3)
 			preparer.attachBasicInfoIfDue(&report, time.Now())
-			wantBasicTotal := max(tc.wantTotal, 0)
-			if report.BasicInfo == nil || report.BasicInfo.DiskTotal != wantBasicTotal {
-				t.Errorf("basic disk total did not match verified capacity: %#v", report.BasicInfo)
+			if report.BasicInfo == nil || report.BasicInfo.DiskTotal != 1055735824384 {
+				t.Errorf("basic disk total did not come from statfs: %#v", report.BasicInfo)
 			}
 			wantUptime, wantBasicUptime := int64(-1), int64(0)
-			if tc.trustedUptime {
+			if trustedUptime {
 				wantUptime, wantBasicUptime = 123, 123
 			}
 			assertContainerMetricInt(t, "report uptime", report.Uptime, wantUptime)
 			if report.BasicInfo != nil && report.BasicInfo.Uptime != wantBasicUptime {
 				t.Errorf("basic uptime = %d, want %d", report.BasicInfo.Uptime, wantBasicUptime)
 			}
-			assertContainerMetricInt(t, "reported total", report.DiskTotal, tc.wantTotal)
-			if report.Disk != nil || report.Temp != nil || reads.Load() != 0 {
-				t.Error("normal report collector retained host disk or temperature")
+			assertContainerMetricInt(t, "reported used", report.Disk, 12951896064)
+			assertContainerMetricInt(t, "reported total", report.DiskTotal, 1055735824384)
+			if report.Temp != nil || reads.Load() != 0 {
+				t.Error("container report retained a host temperature reading")
 			}
 			data, err := json.Marshal(report)
 			if err != nil {
@@ -362,14 +315,310 @@ func TestContainerMetricsCollectorWiring(t *testing.T) {
 			if err := json.Unmarshal(data, &fields); err != nil {
 				t.Fatal(err)
 			}
-			for _, name := range []string{"disk", "temp"} {
-				if string(fields[name]) != "null" {
-					t.Errorf("prepared report %s = %s, want null", name, fields[name])
-				}
+			if string(fields["disk"]) != "12951896064" || string(fields["temp"]) != "null" {
+				t.Errorf("prepared report disk=%s temp=%s", fields["disk"], fields["temp"])
 			}
 			if report.ReportInterval != 3 || report.Timestamp <= 0 || report.RAMTotal <= 0 {
 				t.Error("normal interval, timestamp or memory collection was lost")
 			}
 		})
+	}
+}
+
+func TestTemperatureUnknownReportJSON(t *testing.T) {
+	body, err := json.Marshal(Report{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if value := string(fields["temp"]); value != "null" {
+		t.Fatalf("unmeasured host temperature = %s; want explicit JSON null", value)
+	}
+}
+
+func assertTemperatureJSON(t *testing.T, report Report, want *float64) {
+	t.Helper()
+	body, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		t.Fatal(err)
+	}
+	value, present := fields["temp"]
+	if !present {
+		t.Fatal("temperature field is missing")
+	}
+	if want == nil {
+		if string(value) != "null" {
+			t.Fatalf("unavailable temperature = %s, want null", value)
+		}
+		return
+	}
+	if string(value) == "null" {
+		t.Fatalf("measured temperature became null, want %v", *want)
+	}
+	var got float64
+	if err := json.Unmarshal(value, &got); err != nil || got != *want {
+		t.Fatalf("temperature = %s, want %v (decode error: %v)", value, *want, err)
+	}
+}
+
+func TestTemperatureSensorContract(t *testing.T) {
+	pointer := func(v float64) *float64 { return &v }
+	for _, tc := range []struct {
+		name    string
+		sensors []sensors.TemperatureStat
+		err     error
+		want    *float64
+	}{
+		{
+			name: "maximum identified CPU package and SoC, not GPU or disk",
+			sensors: []sensors.TemperatureStat{
+				{SensorKey: "coretemp_package_id_0", Temperature: 61.25},
+				{SensorKey: "coretemp_core_1", Temperature: 58},
+				{SensorKey: "cpu-thermal", Temperature: 72.125},
+				{SensorKey: "amdgpu_edge", Temperature: 95},
+				{SensorKey: "nvme_composite", Temperature: 110},
+			},
+			want: pointer(72.125),
+		},
+		{name: "real zero", sensors: []sensors.TemperatureStat{{SensorKey: "k10temp_tdie", Temperature: 0}}, want: pointer(0)},
+		{name: "negative Celsius", sensors: []sensors.TemperatureStat{{SensorKey: "k8temp", Temperature: -7.5}}, want: pointer(-7.5)},
+		{name: "lower bound", sensors: []sensors.TemperatureStat{{SensorKey: "soc_thermal", Temperature: -100}}, want: pointer(-100)},
+		{name: "upper bound", sensors: []sensors.TemperatureStat{{SensorKey: "x86_pkg_temp", Temperature: 150}}, want: pointer(150)},
+		{name: "unlabelled CPU driver", sensors: []sensors.TemperatureStat{{SensorKey: "coretemp", Temperature: 42}}, want: pointer(42)},
+		{name: "explicit SoC driver", sensors: []sensors.TemperatureStat{{SensorKey: "bcm2835_thermal", Temperature: 38}}, want: pointer(38)},
+		{name: "normalized known key", sensors: []sensors.TemperatureStat{{SensorKey: " Coretemp_Core_0 ", Temperature: 39}}, want: pointer(39)},
+		{
+			name: "invalid CPU readings do not hide valid measurements",
+			sensors: []sensors.TemperatureStat{
+				{SensorKey: "coretemp_core_0", Temperature: math.NaN()},
+				{SensorKey: "coretemp_core_1", Temperature: math.Inf(1)},
+				{SensorKey: "coretemp_core_2", Temperature: math.Inf(-1)},
+				{SensorKey: "coretemp_core_3", Temperature: -100.1},
+				{SensorKey: "coretemp_core_4", Temperature: 150.1},
+				{SensorKey: "coretemp_core_5", Temperature: 31.5},
+			},
+			want: pointer(31.5),
+		},
+		{name: "only invalid", sensors: []sensors.TemperatureStat{{SensorKey: "coretemp", Temperature: math.NaN()}, {SensorKey: "cpu-thermal", Temperature: 1000}}},
+		{name: "GPU only", sensors: []sensors.TemperatureStat{{SensorKey: "amdgpu_core", Temperature: 90}, {SensorKey: "nouveau_core", Temperature: 95}}},
+		{name: "unknown ACPI and board sensors", sensors: []sensors.TemperatureStat{{SensorKey: `ACPI\ThermalZone\TZ00_0`, Temperature: 27}, {SensorKey: "acpitz", Temperature: 28}, {SensorKey: "board_cpu", Temperature: 80}, {SensorKey: "ambient", Temperature: 25}}},
+		{name: "similar labels are not CPU proof", sensors: []sensors.TemperatureStat{{SensorKey: "coretemperature", Temperature: 75}, {SensorKey: "coretemp_gpu", Temperature: 85}, {SensorKey: "gpu_coretemp_core_1", Temperature: 90}, {SensorKey: "k10temp_tccd1_gpu", Temperature: 95}}},
+		{name: "Tctl is not measured Celsius", sensors: []sensors.TemperatureStat{{SensorKey: "k10temp_tctl", Temperature: 95}, {SensorKey: "k10temp", Temperature: 85}}},
+		{name: "Tdie and Tccd survive a hotter control value", sensors: []sensors.TemperatureStat{{SensorKey: "k10temp_tctl", Temperature: 100}, {SensorKey: "k10temp_tdie", Temperature: 45.25}, {SensorKey: "k10temp_tccd1", Temperature: 48.5}, {SensorKey: "k10temp_tccd2", Temperature: 47}}, want: pointer(48.5)},
+		{name: "no devices"},
+		{name: "read failed", err: errors.New("synthetic sensor read failed")},
+		{name: "partial samples with read failure", sensors: []sensors.TemperatureStat{{SensorKey: "coretemp", Temperature: 42}}, err: errors.New("synthetic partial read")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sampler := newHostTemperatureSampler("linux", func(ctx context.Context) ([]sensors.TemperatureStat, error) {
+				return tc.sensors, tc.err
+			})
+			value := sampler.sample(context.Background())
+			assertTemperatureJSON(t, Report{Temp: value, CPU: 17}, tc.want)
+		})
+	}
+}
+
+func TestTemperaturePlatformReadBoundary(t *testing.T) {
+	for _, goos := range []string{"linux", "windows", "darwin", "freebsd", "unknown"} {
+		t.Run(goos, func(t *testing.T) {
+			var calls atomic.Int32
+			sampler := newHostTemperatureSampler(goos, func(ctx context.Context) ([]sensors.TemperatureStat, error) {
+				calls.Add(1)
+				return []sensors.TemperatureStat{{SensorKey: "coretemp", Temperature: 23}}, nil
+			})
+			value := sampler.sample(context.Background())
+			if goos == "linux" {
+				if calls.Load() != 1 || value == nil || *value != 23 {
+					t.Fatal("identified Linux source was not read")
+				}
+			} else if calls.Load() != 0 || value != nil {
+				t.Fatalf("unsupported platform queried the sensor driver: calls=%d", calls.Load())
+			}
+		})
+	}
+}
+
+func TestTemperatureCollectorWiring(t *testing.T) {
+	previousSampler := nodeTemperatureSampler
+	previousSource := nodeMetrics
+	// This test exercises a supported physical host sensor regardless of
+	// whether the CI process itself happens to run inside a container.
+	nodeMetrics.root = t.TempDir()
+	gpuDetailsMu.Lock()
+	previousGPU := globalGPUDetails
+	globalGPUDetails = nil
+	gpuDetailsMu.Unlock()
+	t.Cleanup(func() {
+		nodeTemperatureSampler = previousSampler
+		nodeMetrics = previousSource
+		gpuDetailsMu.Lock()
+		globalGPUDetails = previousGPU
+		gpuDetailsMu.Unlock()
+	})
+	for _, tc := range []struct {
+		name    string
+		present bool
+		value   float64
+	}{
+		{"missing", false, 0},
+		{"measured zero", true, 0},
+		{"measured negative", true, -2.75},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			nodeTemperatureSampler = newHostTemperatureSampler("linux", func(ctx context.Context) ([]sensors.TemperatureStat, error) {
+				calls.Add(1)
+				if !tc.present {
+					return nil, nil
+				}
+				return []sensors.TemperatureStat{{SensorKey: "cpu-thermal", Temperature: tc.value}}, nil
+			})
+			report := collectReportWithInterval(3)
+			if calls.Load() != 1 || report.ReportInterval != 3 || report.Timestamp <= 0 {
+				t.Fatal("normal report collection did not include exactly one sensor sample")
+			}
+			var want *float64
+			if tc.present {
+				want = &tc.value
+			}
+			assertTemperatureJSON(t, report, want)
+		})
+	}
+}
+
+func TestTemperatureSlowReadBudgetAndSingleFlight(t *testing.T) {
+	started, release, readerReturned := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	var calls atomic.Int32
+	sampler := newHostTemperatureSampler("linux", func(ctx context.Context) ([]sensors.TemperatureStat, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-release // Model an OS read that does not observe ctx cancellation.
+			close(readerReturned)
+			return []sensors.TemperatureStat{{SensorKey: "coretemp", Temperature: 88}}, nil
+		}
+		return []sensors.TemperatureStat{{SensorKey: "coretemp", Temperature: 37}}, nil
+	})
+	firstResult := make(chan *float64, 1)
+	start := time.Now()
+	go func() { firstResult <- sampler.sample(context.Background()) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("sensor read did not start")
+	}
+	select {
+	case value := <-firstResult:
+		if value != nil {
+			t.Fatal("unresponsive sensor reported a value")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("sensor read blocked the report beyond its budget")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("temperature timeout took %s, budget is %s", elapsed, hostTemperatureReadBudget)
+	}
+
+	var retries sync.WaitGroup
+	for range 100 {
+		retries.Go(func() {
+			if value := sampler.sample(context.Background()); value != nil {
+				t.Error("blocked reader produced a later sample")
+			}
+		})
+	}
+	retries.Wait()
+	if count := calls.Load(); count != 1 {
+		t.Fatalf("timed-out OS read accumulated %d sensor calls, want 1", count)
+	}
+	unblock()
+	select {
+	case <-readerReturned:
+	case <-time.After(time.Second):
+		t.Fatal("synthetic reader was not released")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		value := sampler.sample(context.Background())
+		if value != nil {
+			if *value != 37 || calls.Load() != 2 {
+				t.Fatalf("late sample was reused or retries leaked: value=%v, calls=%d", *value, calls.Load())
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("sampler did not recover after the old OS read returned")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestTemperatureCancelledReadKeepsGateUntilReturn(t *testing.T) {
+	started, release, readerReturned := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	var calls atomic.Int32
+	sampler := newHostTemperatureSampler("linux", func(ctx context.Context) ([]sensors.TemperatureStat, error) {
+		calls.Add(1)
+		close(started)
+		<-release
+		close(readerReturned)
+		return []sensors.TemperatureStat{{SensorKey: "coretemp", Temperature: 20}}, nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan *float64, 1)
+	go func() { result <- sampler.sample(ctx) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("sensor read did not start")
+	}
+	cancel()
+	select {
+	case value := <-result:
+		if value != nil {
+			t.Fatal("cancelled reading became a measurement")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("caller cancellation did not release reporting")
+	}
+	for range 10 {
+		if value := sampler.sample(context.Background()); value != nil {
+			t.Fatal("cancelled but unfinished read became a later measurement")
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("cancelled OS read accumulated %d calls", calls.Load())
+	}
+	unblock()
+	select {
+	case <-readerReturned:
+	case <-time.After(time.Second):
+		t.Fatal("synthetic reader was not released")
+	}
+}
+
+func TestTemperatureAlreadyCancelledDoesNotRead(t *testing.T) {
+	var calls atomic.Int32
+	sampler := newHostTemperatureSampler("linux", func(ctx context.Context) ([]sensors.TemperatureStat, error) {
+		calls.Add(1)
+		return nil, nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if sampler.sample(ctx) != nil || calls.Load() != 0 {
+		t.Fatal("a previously cancelled sample still queried sensors")
 	}
 }

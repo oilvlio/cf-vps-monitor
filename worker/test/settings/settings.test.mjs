@@ -169,6 +169,11 @@ const {
   sanitizeSettingsForStorage,
 } = await import('../../src/settings/schema.ts');
 
+assert.deepEqual(normalizeSettingValue('live_poll_active_interval_sec', '2'), { ok: true, value: '2' });
+assert.equal(normalizeSettingValue('live_poll_active_interval_sec', '1').ok, false);
+assert.equal(buildPublicSettings({ live_poll_active_interval_sec: '2' }).live_poll_active_interval_sec, '2');
+assert.equal(buildAdminSettings({}).live_poll_active_interval_sec, '3');
+
 assert.equal(normalizeSettingValue('site_logo_url', '/api/site-logo?v=1').ok, true);
 assert.equal(normalizeSettingValue('site_logo_url', 'https://example.com/logo.png').ok, false);
 assert.equal(normalizeSettingValue('site_logo_type', 'image/png').ok, true);

@@ -165,7 +165,7 @@ export const SETTING_SCHEMA = {
     type: 'integer',
     defaultValue: '3',
     public: true,
-    min: 3,
+    min: 2,
     max: 300,
   },
   live_poll_idle_interval_sec: {

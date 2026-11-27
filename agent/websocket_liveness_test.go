@@ -172,7 +172,9 @@ func startLivenessSession(t *testing.T, conn *safeWebSocketConn, state *pingRepo
 	preparer := &reportPreparer{lastBasicInfoAt: time.Now(), collect: func(interval int) Report {
 		report := Report{Timestamp: time.Now().UnixMilli(), ReportInterval: interval, Version: "fixture"}
 		if large {
-			report.GPUs = []GPUInfo{{DeviceName: strings.Repeat("x", 1<<20)}}
+			// net.Pipe blocks any payload; keep JSON encoding below the 50ms
+			// heartbeat budget even with the race detector enabled.
+			report.GPUs = []GPUInfo{{DeviceName: strings.Repeat("x", 16<<10)}}
 		}
 		return report
 	}}

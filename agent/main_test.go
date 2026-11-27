@@ -392,13 +392,16 @@ func TestDetectContainerFromCgroupFindsLXC(t *testing.T) {
 }
 
 func TestPolicyDurationsKeepRealtimeAndBackgroundUploadsDistinct(t *testing.T) {
-	realtimeSample, realtimeUpload := policyDurations(agentPolicy{
-		Mode:              "active",
-		SampleIntervalSec: 3,
-		ReportIntervalSec: 3,
-	}, 120*time.Second)
-	if realtimeSample != 3*time.Second || realtimeUpload != 3*time.Second {
-		t.Fatalf("realtime policy = sample %s upload %s, want 3s/3s", realtimeSample, realtimeUpload)
+	for _, seconds := range []int{1, 2, 3} {
+		realtimeSample, realtimeUpload := policyDurations(agentPolicy{
+			Mode:              "active",
+			SampleIntervalSec: seconds,
+			ReportIntervalSec: seconds,
+		}, 120*time.Second)
+		want := time.Duration(max(seconds, 2)) * time.Second
+		if realtimeSample != want || realtimeUpload != want {
+			t.Fatalf("%ds realtime policy = sample %s upload %s, want %s/%s", seconds, realtimeSample, realtimeUpload, want, want)
+		}
 	}
 
 	backgroundSample, backgroundUpload := policyDurations(agentPolicy{
@@ -943,6 +946,16 @@ func TestPreparedReportUsesRawCountersForNetworkSpeed(t *testing.T) {
 	}, 10)
 	if report.NetOut != 40 || report.NetIn != 90 {
 		t.Fatalf("speed from raw counters = %d/%d, want 40/90", report.NetOut, report.NetIn)
+	}
+
+	report = preparer.prepareReportForInterval(Report{
+		Timestamp:       13_000,
+		hasRawNetTotals: true,
+		rawNetTotalUp:   50_480,
+		rawNetTotalDown: 81_080,
+	}, 2)
+	if report.ReportInterval != 2 || report.NetOut != 40 || report.NetIn != 90 {
+		t.Fatalf("2s report = interval %ds, speed %d/%d; want 2s, 40/90", report.ReportInterval, report.NetOut, report.NetIn)
 	}
 }
 

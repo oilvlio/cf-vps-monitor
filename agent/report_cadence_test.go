@@ -36,15 +36,19 @@ func TestWebSocketReportCadence(t *testing.T) {
 	t.Cleanup(func() { reportInterval = previousInterval })
 	for _, tc := range []struct {
 		name        string
+		sampleSec   int
 		cost        time.Duration
 		policyEvery time.Duration
 		uploadSec   int
 	}{
-		{"collection does not extend sample period", time.Second, 0, 3},
-		{"unchanged policies do not postpone sampling", 0, 200 * time.Millisecond, 3},
-		{"unchanged policies do not postpone batch upload", 0, 200 * time.Millisecond, 6},
+		{"2s collection does not extend sample period", 2, time.Second, 0, 2},
+		{"2s unchanged policies do not postpone sampling", 2, 0, 200 * time.Millisecond, 2},
+		{"collection does not extend sample period", 3, time.Second, 0, 3},
+		{"unchanged policies do not postpone sampling", 3, 0, 200 * time.Millisecond, 3},
+		{"unchanged policies do not postpone batch upload", 3, 0, 200 * time.Millisecond, 6},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			samplePeriod := time.Duration(tc.sampleSec) * time.Second
 			reports := make(chan []Report, 16)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				peer, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
@@ -68,7 +72,7 @@ func TestWebSocketReportCadence(t *testing.T) {
 							case <-ack:
 								message.Type = "ack"
 							case <-ticker.C:
-								message = serverMessage{Type: "policy", SampleIntervalSec: 3, ReportIntervalSec: tc.uploadSec}
+								message = serverMessage{Type: "policy", SampleIntervalSec: tc.sampleSec, ReportIntervalSec: tc.uploadSec}
 							}
 							if peer.WriteJSON(message) != nil {
 								return
@@ -118,7 +122,7 @@ func TestWebSocketReportCadence(t *testing.T) {
 			}}
 			done := make(chan error, 1)
 			go func() {
-				done <- runWebSocketSession(context.Background(), conn, preparer, state, 3*time.Second, time.Second)
+				done <- runWebSocketSession(context.Background(), conn, preparer, state, samplePeriod, time.Second)
 			}()
 			defer func() {
 				conn.Close()
@@ -144,22 +148,22 @@ func TestWebSocketReportCadence(t *testing.T) {
 			first := receive()[0]
 			second := receive()
 			gap := time.Duration(second[0].Timestamp-first.Timestamp) * time.Millisecond
-			if gap < 2700*time.Millisecond || gap > 3500*time.Millisecond {
-				t.Fatalf("sample gap = %s, want approximately 3s", gap)
+			if gap < samplePeriod-300*time.Millisecond || gap > samplePeriod+500*time.Millisecond {
+				t.Fatalf("sample gap = %s, want approximately %s", gap, samplePeriod)
 			}
-			if tc.uploadSec == 6 {
+			if tc.uploadSec > tc.sampleSec {
 				if len(second) < 2 {
 					second = append(second, receive()...)
 				}
 				gap = time.Duration(second[1].Timestamp-second[0].Timestamp) * time.Millisecond
-				if gap < 2700*time.Millisecond || gap > 3500*time.Millisecond {
+				if gap < samplePeriod-300*time.Millisecond || gap > samplePeriod+500*time.Millisecond {
 					t.Fatalf("batched sample gap = %s", gap)
 				}
 			} else {
 				third := receive()[0]
 				gap = time.Duration(third.Timestamp-second[0].Timestamp) * time.Millisecond
-				if gap < 2700*time.Millisecond || gap > 3500*time.Millisecond {
-					t.Fatalf("subsequent sample gap = %s, want approximately 3s", gap)
+				if gap < samplePeriod-300*time.Millisecond || gap > samplePeriod+500*time.Millisecond {
+					t.Fatalf("subsequent sample gap = %s, want approximately %s", gap, samplePeriod)
 				}
 			}
 			t.Logf("first periodic sample gap: %s", time.Duration(second[0].Timestamp-first.Timestamp)*time.Millisecond)
@@ -170,11 +174,11 @@ func TestWebSocketReportCadence(t *testing.T) {
 func TestHTTPReportCadenceIncludesCollectionAndDelivery(t *testing.T) {
 	oldURL, oldInterval := serverURL, reportInterval
 	t.Cleanup(func() { serverURL, reportInterval = oldURL, oldInterval })
-	reportInterval = 3
+	reportInterval = 2
 	reports := make(chan int64, 8)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/clients/policy" {
-			_ = json.NewEncoder(w).Encode(agentPolicy{Type: "policy", Mode: "active", SampleIntervalSec: 3, ReportIntervalSec: 3, ReportNow: true})
+			_ = json.NewEncoder(w).Encode(agentPolicy{Type: "policy", Mode: "active", SampleIntervalSec: 2, ReportIntervalSec: 2, ReportNow: true})
 			return
 		}
 		var report Report
@@ -210,8 +214,8 @@ func TestHTTPReportCadenceIncludesCollectionAndDelivery(t *testing.T) {
 		case at := <-reports:
 			if i > 0 {
 				gap := time.Duration(at-first) * time.Millisecond
-				if gap < 2700*time.Millisecond || gap > 3500*time.Millisecond {
-					t.Fatalf("HTTP sample gap = %s, want approximately 3s", gap)
+				if gap < 1700*time.Millisecond || gap > 2500*time.Millisecond {
+					t.Fatalf("HTTP sample gap = %s, want approximately 2s", gap)
 				}
 				t.Logf("HTTP sample gap: %s", gap)
 			}

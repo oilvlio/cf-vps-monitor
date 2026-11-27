@@ -86,7 +86,8 @@ assert.deepEqual(
   DEFAULT_LIVE_POLL_CONFIG,
   'DEFAULT_LIVE_POLL_CONFIG 必须等于空设置归一化的结果——两者曾在 activeMaxDurationMs 上不一致',
 );
-assert.equal(normalizeLivePollConfig({ live_poll_active_interval_sec: '1' }).activeIntervalMs, 3_000, '下限 3 秒');
+assert.equal(normalizeLivePollConfig({ live_poll_active_interval_sec: '1' }).activeIntervalMs, 2_000, '下限 2 秒');
+assert.equal(normalizeLivePollConfig({ live_poll_active_interval_sec: '2' }).activeIntervalMs, 2_000, '允许 2 秒');
 assert.equal(normalizeLivePollConfig({ live_poll_active_interval_sec: '9999' }).activeIntervalMs, 300_000, '上限 300 秒');
 assert.equal(normalizeLivePollConfig({ live_poll_idle_interval_sec: '1' }).idleIntervalMs, 60_000, '下限 60 秒');
 assert.equal(normalizeLivePollConfig({ live_poll_idle_interval_sec: '99999' }).idleIntervalMs, 3_600_000, '上限 3600 秒');

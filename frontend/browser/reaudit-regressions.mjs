@@ -7,6 +7,20 @@ const playwrightModule = moduleFlag >= 0 ? process.argv[moduleFlag + 1] : proces
 const { origin, check, finish } = await createHarness({ selection, playwrightModule });
 
 try {
+  await check('AGENT-2S', 'general settings preserve a two-second Agent report interval', async (page, data) => {
+    await page.goto(origin + '/admin/settings/general');
+    const interval = page.getByRole('spinbutton', { name: '有人观看时 · 上报间隔（秒）', exact: true });
+    await interval.fill('2');
+    await page.getByRole('button', { name: '保存', exact: true }).click();
+    await page.getByText('设置已保存', { exact: true }).waitFor();
+    const saved = await waitForCall(data, call => call.path === '/api/admin/settings' && call.method === 'POST');
+    assert.equal(saved.body.live_poll_active_interval_sec, '2');
+    assert.equal(data.general.live_poll_active_interval_sec, '2');
+    await page.reload();
+    await interval.waitFor();
+    assert.equal(await interval.inputValue(), '2');
+  });
+
   for (const scope of ['general', 'site']) {
     for (const failure of ['server', 'network', 'invalid']) {
       await check(`R-F02-${scope}-${failure}`, 'failed settings initialization cannot unlock default-value saving', async (page, data) => {

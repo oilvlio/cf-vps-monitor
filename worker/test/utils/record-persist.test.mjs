@@ -20,7 +20,7 @@ assert.equal(isRecordPersistDue(114_999, 120_000), false, '114.999s 仍应跳过
 assert.equal(isRecordPersistDue(60_000, 120_000), false, '半个间隔应跳过');
 assert.equal(isRecordPersistDue(0, 120_000), false, '刚落过库应跳过');
 
-// ── 3 秒最小间隔（活跃态）：提前量按比例缩放，不退化成每次都写 ──
+// ── 3 秒落库间隔：提前量按比例缩放，不退化成每次都写 ──
 assert.equal(recordPersistToleranceMs(3_000), 150);
 assert.equal(recordPersistThresholdMs(3_000), 2_850);
 assert.equal(isRecordPersistDue(2_900, 3_000), true, '3s 间隔下略早也应落库');

@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strconv"
@@ -37,7 +38,7 @@ var Version = "dev"
 
 const basicInfoRefreshInterval = 30 * time.Minute
 const defaultPingIntervalSec = 120
-const minReportInterval = 3 * time.Second
+const minReportInterval = 2 * time.Second
 const maxHTTPErrorBodyBytes = 4096
 const publicIPProbeTimeout = 3 * time.Second
 const publicIPProbeBodyLimit = 4096
@@ -825,6 +826,7 @@ func (s *pingReportState) applyPolicy(policy agentPolicy) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	previousInterval := s.intervalSec
 	if policy.PingIntervalSec > 0 {
 		s.intervalSec = policy.PingIntervalSec
 	}
@@ -839,11 +841,13 @@ func (s *pingReportState) applyPolicy(policy agentPolicy) {
 		task.TimeoutMS = int(normalizePingTimeout(task.TimeoutMS) / time.Millisecond)
 		tasks = append(tasks, task)
 	}
+	changed := s.policyVersion != policy.PingPolicyVersion || previousInterval != s.intervalSec || !reflect.DeepEqual(s.tasks, tasks)
+	hadTasks := len(s.tasks) > 0
 	s.invalidateResultsForPolicyLocked(tasks)
 	s.tasks = tasks
 	s.policyVersion = policy.PingPolicyVersion
 	s.signalProbeScheduler()
-	if len(tasks) > 0 {
+	if changed && (len(tasks) > 0 || hadTasks) {
 		logInfof("policy updated: %d ping task(s), interval=%ds, version=%s", len(tasks), s.intervalSec, s.policyVersion)
 	}
 }

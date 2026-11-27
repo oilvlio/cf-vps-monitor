@@ -57,3 +57,49 @@ func TestLogLevelsFilterAndRoute(t *testing.T) {
 		t.Fatalf("error level leaked lines: stdout=%q stderr=%q", out.String(), errOut.String())
 	}
 }
+
+func TestPolicyLogsOnlyWhenPingConfigurationChanges(t *testing.T) {
+	var out bytes.Buffer
+	previousLogger, previousLevel := stdoutLogger, currentLogLevel.Load()
+	stdoutLogger = log.New(&out, "", 0)
+	currentLogLevel.Store(logLevelInfo)
+	t.Cleanup(func() { stdoutLogger = previousLogger; currentLogLevel.Store(previousLevel) })
+
+	// No scheduler goroutine is needed to check policy application and logging.
+	state := &pingReportState{intervalSec: defaultPingIntervalSec, scheduler: newPingTaskScheduler()}
+	policy := agentPolicy{
+		PingIntervalSec:   120,
+		PingPolicyVersion: "v1",
+		PingTasks:         []PingTask{{ID: 1, Type: "tcp", Target: "example.com:443"}},
+	}
+	check := func(name string, wantLog bool) {
+		t.Helper()
+		out.Reset()
+		state.applyPolicy(policy)
+		wantCount := 0
+		if wantLog {
+			wantCount = 1
+		}
+		if count := strings.Count(out.String(), "INFO policy updated:"); count != wantCount {
+			t.Fatalf("%s: policy log = %q, want log=%t", name, out.String(), wantLog)
+		}
+	}
+
+	check("initial tasks", true)
+	check("identical refresh", false)
+	policy.PingTasks[0].IntervalSec = 120
+	policy.PingTasks[0].TimeoutMS = int(normalizePingTimeout(0).Milliseconds())
+	check("equivalent normalized tasks", false)
+	policy.PingPolicyVersion = "v2"
+	check("version change", true)
+	policy.PingIntervalSec = 180
+	check("interval change", true)
+	policy.PingTasks[0].Target = "example.com:80"
+	check("task change", true)
+	policy.PingTasks = nil
+	check("clear tasks", true)
+	if !strings.Contains(out.String(), "0 ping task(s)") {
+		t.Fatalf("clearing tasks must be visible, got %q", out.String())
+	}
+	check("repeated empty policy", false)
+}

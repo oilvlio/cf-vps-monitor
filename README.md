@@ -16,7 +16,7 @@
 - **通知**：Telegram、SMTP Email、Webhook；支持离线、到期、负载、IP 变更。
 - **主题**：内置 `monitor` 和 `aurora`，支持主题包、自定义 CSS；也可在后台填写 GitHub 仓库启用第三方 Monitor 主题（读取其最新 Release 的 `theme.tar.gz`；填写 `https://github.com/owner/repo/releases/tag/vX.Y.Z` 可固定 Release，由 Worker 托管并提供兼容 API 与 WebSocket）。
 - **管理员恢复**：忘记账号或密码时，可在登录页用当前部署的 Supabase Secret key 重置唯一管理员。
-- **省配额**：有人观看时 Agent 约 3 秒上报，无人时约 120 秒批量上报。可用节点数取决于 Ping 任务、访问量及数据库和实时服务额度，请以平台控制台实际用量为准。
+- **省配额**：有人观看时 Agent 默认约 3 秒上报（最短可设为 2 秒），无人时约 120 秒批量上报。可用节点数取决于 Ping 任务、访问量及数据库和实时服务额度，请以平台控制台实际用量为准。
 
 > 温度仅支持 Linux 上可识别的 CPU/SoC 传感器（多个读数取最高值）；无传感器、读取失败，以及 Windows、macOS、FreeBSD 均显示“不可用”。GPU 温度独立显示。
 

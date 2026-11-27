@@ -1330,7 +1330,7 @@ export class LiveDataDO {
     const pending = (async () => {
       const settings = buildAdminSettings(await db.getSettingsByKeys(database, AGENT_POLICY_SETTING_KEYS));
       this.policySettings = {
-        activeIntervalSec: this.boundIntegerSetting(settings.live_poll_active_interval_sec, 3, 3, 300),
+        activeIntervalSec: this.boundIntegerSetting(settings.live_poll_active_interval_sec, 3, 2, 300),
         idleIntervalSec: this.boundIntegerSetting(settings.live_poll_idle_interval_sec, 120, 60, 3600),
         viewerTtlSec: this.boundIntegerSetting(settings.live_poll_active_max_duration_sec, 120, 60, 3600),
         pingIntervalSec: this.boundIntegerSetting(settings.ping_record_persist_interval_sec, 120, 60, 3600),

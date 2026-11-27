@@ -67,7 +67,7 @@ function buildSavePayload(settings: SettingsMap): SettingsMap {
     record_preserve_time: String(clampInteger(settings.record_preserve_time, DEFAULT_RETENTION_HOURS, 48, MAX_RETENTION_HOURS)),
     ping_record_preserve_time: String(clampInteger(settings.ping_record_preserve_time, DEFAULT_PING_RAW_RETENTION_HOURS, 48, MAX_PING_RAW_RETENTION_HOURS)),
     rollup_preserve_time: String(clampInteger(settings.rollup_preserve_time, DEFAULT_PING_ROLLUP_RETENTION_HOURS, 168, MAX_PING_ROLLUP_RETENTION_HOURS)),
-    live_poll_active_interval_sec: String(clampInteger(settings.live_poll_active_interval_sec, DEFAULT_ACTIVE_SAMPLE_SEC, 3, 300)),
+    live_poll_active_interval_sec: String(clampInteger(settings.live_poll_active_interval_sec, DEFAULT_ACTIVE_SAMPLE_SEC, 2, 300)),
     live_poll_idle_interval_sec: String(clampInteger(settings.live_poll_idle_interval_sec, DEFAULT_IDLE_UPLOAD_SEC, MIN_IDLE_UPLOAD_SEC, 3600)),
     live_poll_active_max_duration_sec: String(clampInteger(settings.live_poll_active_max_duration_sec, DEFAULT_VIEWER_TTL_SEC, 60, 3600)),
     record_persist_interval_sec: String(clampInteger(settings.record_persist_interval_sec, DEFAULT_RECORD_PERSIST_SEC, 3, 3600)),
@@ -283,7 +283,7 @@ export default function SettingsGeneral() {
             placeholder={String(DEFAULT_ACTIVE_SAMPLE_SEC)}
             value={field('live_poll_active_interval_sec', DEFAULT_ACTIVE_SAMPLE_SEC)}
             onChange={(value) => updateSetting('live_poll_active_interval_sec', value)}
-            hint="有人开着页面时汇报的频率。越小数字跳得越勤，也越耗额度。"
+            hint="有人开着页面时汇报的频率，最少 2 秒，默认 3 秒。越小数字跳得越勤，也越耗额度。"
           />
           <Field
             label="无人观看时 · 上报间隔（秒）"

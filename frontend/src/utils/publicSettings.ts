@@ -88,7 +88,7 @@ export function normalizePublicSettings(payload: unknown): PublicSettings | null
     script_domain: stringSetting(record.script_domain, DEFAULT_PUBLIC_SETTINGS.script_domain, 256),
     site_logo_url: stringSetting(record.site_logo_url, DEFAULT_PUBLIC_SETTINGS.site_logo_url, 256),
     ping_record_persist_interval_sec: secondsSetting(record.ping_record_persist_interval_sec, '120', 60, 3600),
-    live_poll_active_interval_sec: secondsSetting(record.live_poll_active_interval_sec, '3', 3, 300),
+    live_poll_active_interval_sec: secondsSetting(record.live_poll_active_interval_sec, '3', 2, 300),
     live_poll_idle_interval_sec: secondsSetting(record.live_poll_idle_interval_sec, '120', 60, 3600),
     live_poll_active_max_duration_sec: secondsSetting(record.live_poll_active_max_duration_sec, '120', 60, 3600),
     active_theme: activeThemeSetting(record.active_theme, DEFAULT_PUBLIC_SETTINGS.active_theme),

@@ -957,6 +957,17 @@ test('Monitor 订阅者计入活跃观看人数，驱动 Agent 快速采样并�
   assert.equal(idlePolicy.sample_interval_sec, 120);
 });
 
+test('Agent active 策略支持 2 秒采样和上报', async () => {
+  const f = fixture({ dbOverrides: { getSettingsByKeys: async () => ({ live_poll_active_interval_sec: '2' }) } });
+  const socket = monitoredSocket({ id: 'm-policy-2s' });
+  f.object.registerSession(socket.ws, socket.ws.deserializeAttachment());
+
+  const policy = await f.object.buildAgentPolicy(f.now, false, true, 'node-1');
+  assert.equal(policy.mode, 'active');
+  assert.equal(policy.sample_interval_sec, 2);
+  assert.equal(policy.report_interval_sec, 2);
+});
+
 test('首个 Monitor WebSocket 建连时向 Agent 推送 active 策略，最后断开后推送 idle 策略', async () => {
   const f = fixture({ storageEntries: [['admin-clients:snapshot', ADMIN_SNAPSHOT]] });
   await f.object.httpClientsReady;

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { createDurableState, createWorkerLoader } from '../../test-support/worker-module.mjs';
 
 const { validateClientUpdateInput } = await import('../../src/utils/client.ts');
 
@@ -67,9 +68,19 @@ assert.ok(
   /traffic_reset_day\?: number;/.test(live),
   'AgentPolicyMessage 的 traffic_reset_day 必须是可选字段',
 );
-assert.ok(
-  /traffic_reset_day: await this\.trafficResetDayFor\(clientId\)/.test(live),
-  'policy 必须按 clientId 取该节点自己的重置日',
-);
+const state = createDurableState([['admin-clients:snapshot', {
+  clients: [{ uuid: 'billing-15', traffic_reset_day: 15 }, { uuid: 'billing-27', traffic_reset_day: 27 }],
+  complete: true, removed: [], updatedAt: Date.now(),
+}]]);
+const { LiveDataDO } = createWorkerLoader({ db: {
+  getSettingsByKeys: async () => ({}), listPingTasks: async () => [],
+} }).load('worker/src/do/live-data.ts');
+const object = new LiveDataDO(state.state, {});
+await object.httpClientsReady;
+for (const [clientId, expected] of [['billing-15', 15], ['billing-27', 27], ['missing', undefined]]) {
+  const policy = await object.buildAgentPolicy(Date.now(), false, false, clientId);
+  assert.equal(policy.traffic_reset_day, expected, `policy 必须按 ${clientId} 取该节点自己的重置日`);
+  if (expected === undefined) assert.ok(!Object.hasOwn(JSON.parse(JSON.stringify(policy)), 'traffic_reset_day'));
+}
 
 console.log('ok - 流量重置日的接口、RPC 列清单与 policy 下发');

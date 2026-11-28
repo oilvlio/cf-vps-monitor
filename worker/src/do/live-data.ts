@@ -110,9 +110,9 @@ const PING_RESULT_STORAGE_PREFIX = 'ping-result:';
 // 详情页与 Monitor 按 hours/points 和保留期选择 raw/rollup 网格（见 history-bucket.ts），
 // 首页探测点的最新 24 格（utils/home-ping.ts）按落库间隔读取。
 const ADMIN_CLIENTS_SNAPSHOT_KEY = 'admin-clients:snapshot';
-// monitor 主题契约的 /api/ws：帧本身是全量快照，节流只是避免同一轮上报刷屏。
-// 真正的推送节奏跟 agent 上报（3–5s）走，不复制上游 hub 的 2s。
-const MONITOR_FRAME_MIN_INTERVAL_MS = 2_000;
+// monitor 主题契约的 /api/ws：按 active 上报间隔合并各节点的最新值。
+// 使用 DO 自己的推帧时钟，不要求不同网络上的 Agent 同时到达。
+const MONITOR_FRAME_AT_KEY = 'monitor:frame_at';
 const MONITOR_WS_HEARTBEAT_MS = 15_000;
 const MONITOR_WS_HEARTBEAT_KEY = 'monitor:ws_heartbeat_at';
 const MONITOR_FRAME_PENDING_KEY = 'monitor:frame_pending_at';
@@ -510,10 +510,16 @@ export class LiveDataDO {
       this.lastViewerLeftAt = lastLeftAt;
     }
     await this.readAdminClientsSnapshot();
-    const pendingAt = await this.state.storage.get<number>(MONITOR_FRAME_PENDING_KEY);
+    const frameState = await this.state.storage.get<number>([MONITOR_FRAME_AT_KEY, MONITOR_FRAME_PENDING_KEY]);
+    const frameAt = frameState.get(MONITOR_FRAME_AT_KEY);
+    const pendingAt = frameState.get(MONITOR_FRAME_PENDING_KEY);
+    if (typeof frameAt === 'number' && Number.isFinite(frameAt) && frameAt > 0) {
+      this.monitorFrameAt = frameAt;
+    }
     if (typeof pendingAt === 'number' && Number.isFinite(pendingAt) && pendingAt > 0) {
       this.monitorFramePendingAt = pendingAt;
-      this.monitorFrameAt = pendingAt - MONITOR_FRAME_MIN_INTERVAL_MS;
+      // 兼容升级前按固定 2s 保存的尾帧；新版本独立持久化上次推帧时间。
+      if (!this.monitorFrameAt) this.monitorFrameAt = pendingAt - 2_000;
     }
     const now = Date.now();
     const stored = await this.state.storage.list<ClientState>({ prefix: HTTP_LIVE_STATE_PREFIX });
@@ -901,9 +907,13 @@ export class LiveDataDO {
     return false;
   }
 
+  private monitorHeartbeatIntervalMs(): number {
+    return Math.max(MONITOR_WS_HEARTBEAT_MS, this.policySettings.activeIntervalSec * 1000);
+  }
+
   /**
    * monitor hub 的 WS 帧：`{admin, nodes}`（与 /api/nodes 同形）。
-   * 只用 DO 内存里的静态投影 + 实时报告拼装，**不查库**；节奏跟随 agent 上报。
+   * 只用 DO 内存里的静态投影 + 实时报告拼装，**不查库**；按配置的 active 间隔合帧。
    * `admin` 取该连接建连时的身份，不能存在共享投影里——否则会广播给所有人。
    */
   private buildMonitorFrameText(nowMs: number, admin: boolean): string {
@@ -976,21 +986,17 @@ export class LiveDataDO {
     // 没有 monitor 订阅者就不刷新也不出帧：totals 的数据库查询只在有观看者时发生。
     if (!this.hasOpenMonitorSubscriber()) return;
     const now = Date.now();
-    if (!force && now - this.monitorFrameAt < MONITOR_FRAME_MIN_INTERVAL_MS) {
+    const intervalMs = this.policySettings.activeIntervalSec * 1000;
+    if (!force && now - this.monitorFrameAt < intervalMs) {
       if (!this.monitorFramePendingAt) {
         // Persist the trailing edge so hibernation cannot discard a throttled update.
-        this.monitorFramePendingAt = this.monitorFrameAt + MONITOR_FRAME_MIN_INTERVAL_MS;
+        this.monitorFramePendingAt = this.monitorFrameAt + intervalMs;
         this.state.waitUntil(this.state.storage.put(MONITOR_FRAME_PENDING_KEY, this.monitorFramePendingAt)
           .then(() => this.scheduleExpiryAlarm(Date.now())));
       }
       return;
     }
-    if (this.monitorFramePendingAt) {
-      this.monitorFramePendingAt = 0;
-      this.state.waitUntil(this.state.storage.delete(MONITOR_FRAME_PENDING_KEY));
-    }
-    this.monitorFrameAt = now;
-    // 投影或 totals 过期时先刷新，刷新后再补一帧，让节点增删/流量立刻可见。
+    // 投影或 totals 过期时后台刷新，补帧也遵守合帧窗口。
     const stale = now - this.monitorDataRefreshedAt >= MONITOR_DATA_REFRESH_MS;
     if (this.monitorStaticNodes === null || stale) {
       if (!this.monitorRefreshBroadcastPending) {
@@ -999,16 +1005,27 @@ export class LiveDataDO {
           this.refreshMonitorData(now)
             .then(() => {
               this.monitorRefreshBroadcastPending = false;
-              this.broadcastMonitorFrame(true);
+              if (this.monitorStaticNodes !== null) this.broadcastMonitorFrame();
             })
             .catch(() => {
               this.monitorRefreshBroadcastPending = false;
             }),
         );
       }
-      // 还没有任何投影时不发空帧：等刷新完成后的补帧。
-      if (this.monitorStaticNodes === null) return;
+      // 首次加载或元数据变更先等新投影；周期 totals 刷新不阻塞已有实时数据。
+      if (this.monitorStaticNodes === null || this.monitorDataRefreshedAt === 0) return;
     }
+    if (this.monitorFramePendingAt) {
+      this.monitorFramePendingAt = 0;
+      this.state.waitUntil(this.state.storage.delete(MONITOR_FRAME_PENDING_KEY));
+    }
+    this.monitorFrameAt = now;
+    // 正常数据帧也证明连接存活；从这帧重新计算保活期限，避免固定心跳插帧。
+    // 单独保存上次推帧时间，DO 即使在没有待发尾帧时休眠也不会重置合帧窗口。
+    this.state.waitUntil(this.state.storage.put({
+      [MONITOR_FRAME_AT_KEY]: now,
+      [MONITOR_WS_HEARTBEAT_KEY]: now + this.monitorHeartbeatIntervalMs(),
+    }).then(() => this.scheduleExpiryAlarm(Date.now())));
     // 同一轮广播里，管理员帧与公开帧各序列化一次；gzip 也按分组复用。
     const monitorFrames = new Map<boolean, MonitorFrameContent>();
     for (const [id, session] of this.sessions) {
@@ -1313,6 +1330,7 @@ export class LiveDataDO {
 
     const pending = (async () => {
       const settings = buildAdminSettings(await db.getSettingsByKeys(database, AGENT_POLICY_SETTING_KEYS));
+      const previousIntervalSec = this.policySettings.activeIntervalSec;
       this.policySettings = {
         activeIntervalSec: this.boundIntegerSetting(settings.live_poll_active_interval_sec, 3, 2, 300),
         idleIntervalSec: this.boundIntegerSetting(settings.live_poll_idle_interval_sec, 120, 60, 3600),
@@ -1320,6 +1338,19 @@ export class LiveDataDO {
         pingIntervalSec: this.boundIntegerSetting(settings.ping_record_persist_interval_sec, 120, 60, 3600),
       };
       this.policySettingsCheckedAt = now;
+      if (previousIntervalSec !== this.policySettings.activeIntervalSec && this.monitorFrameAt && this.hasOpenMonitorSubscriber()) {
+        this.state.waitUntil(this.state.storage.put(MONITOR_WS_HEARTBEAT_KEY,
+          this.monitorFrameAt + this.monitorHeartbeatIntervalMs())
+          .then(() => this.scheduleExpiryAlarm(Date.now())));
+      }
+      if (this.monitorFramePendingAt) {
+        const pendingAt = this.monitorFrameAt + this.policySettings.activeIntervalSec * 1000;
+        if (pendingAt !== this.monitorFramePendingAt) {
+          this.monitorFramePendingAt = pendingAt;
+          this.state.waitUntil(this.state.storage.put(MONITOR_FRAME_PENDING_KEY, pendingAt)
+            .then(() => this.scheduleExpiryAlarm(Date.now())));
+        }
+      }
       return this.policySettings;
     })();
     this.policySettingsPending = pending;
@@ -1628,7 +1659,7 @@ export class LiveDataDO {
 
   private async scheduleExpiryAlarm(now: number) {
     try {
-      if (this.lastViewerLeftAt && this.activeViewerCount() === 0) {
+      if (this.hasOpenMonitorSubscriber() || (this.lastViewerLeftAt && this.activeViewerCount() === 0)) {
         await this.getAgentPolicySettings(now);
       }
       now = Date.now();
@@ -1646,14 +1677,14 @@ export class LiveDataDO {
         if (this.monitorFramePendingAt) expiries.push(this.monitorFramePendingAt);
         let heartbeatAt = await this.state.storage.get<number>(MONITOR_WS_HEARTBEAT_KEY);
         if (typeof heartbeatAt !== 'number' || !Number.isFinite(heartbeatAt)) {
-          heartbeatAt = now + MONITOR_WS_HEARTBEAT_MS;
+          heartbeatAt = now + this.monitorHeartbeatIntervalMs();
           await this.state.storage.put(MONITOR_WS_HEARTBEAT_KEY, heartbeatAt);
         }
         expiries.push(heartbeatAt);
       } else {
-        await this.state.storage.delete(MONITOR_WS_HEARTBEAT_KEY);
+        this.monitorFrameAt = 0;
         this.monitorFramePendingAt = 0;
-        await this.state.storage.delete(MONITOR_FRAME_PENDING_KEY);
+        await this.state.storage.delete([MONITOR_WS_HEARTBEAT_KEY, MONITOR_FRAME_AT_KEY, MONITOR_FRAME_PENDING_KEY]);
       }
       const holdUntil = this.viewerHoldDeadline();
       if (this.activeViewerCount() === 0 && holdUntil > now) expiries.push(holdUntil);
@@ -2624,6 +2655,7 @@ export class LiveDataDO {
 
   async alarm(): Promise<void> {
     await this.httpClientsReady;
+    if (this.hasOpenMonitorSubscriber()) await this.getAgentPolicySettings(Date.now());
     const now = Date.now();
     await this.removeExpiredClients(now);
     const hasMonitorSubscribers = [...this.sessionRoles].some(([id, role]) =>
@@ -2633,13 +2665,13 @@ export class LiveDataDO {
       const heartbeatAt = await this.state.storage.get<number>(MONITOR_WS_HEARTBEAT_KEY);
       const heartbeatDue = typeof heartbeatAt !== 'number' || !Number.isFinite(heartbeatAt) || heartbeatAt <= now;
       if (heartbeatDue) {
-        await this.state.storage.put(MONITOR_WS_HEARTBEAT_KEY, now + MONITOR_WS_HEARTBEAT_MS);
+        await this.state.storage.put(MONITOR_WS_HEARTBEAT_KEY, now + this.monitorHeartbeatIntervalMs());
       }
       if (heartbeatDue || (this.monitorFramePendingAt && this.monitorFramePendingAt <= now)) {
         await this.readyMonitorData();
         // An unchanged snapshot still serves as a keepalive for clients that
         // declare the stream timed out when no node happens to report.
-        this.broadcastMonitorFrame(heartbeatDue);
+        this.broadcastMonitorFrame();
       }
     } else {
       await this.state.storage.delete(MONITOR_WS_HEARTBEAT_KEY);

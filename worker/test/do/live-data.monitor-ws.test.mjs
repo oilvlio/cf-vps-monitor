@@ -960,7 +960,7 @@ test('?gzip 发 gzip 二进制帧，解压后与明文帧一致', async () => {
   assert.deepEqual(gzipFrame, plainFrame);
 });
 
-test('帧节流：2s 内只发一帧，超过间隔才补发', async () => {
+test('帧节流：默认 3s 内只发一帧，超过间隔才补发', async () => {
   const f = fixture({ storageEntries: [['admin-clients:snapshot', ADMIN_SNAPSHOT]] });
   await ready(f.object);
   seedLive(f.object, f.now);
@@ -977,7 +977,7 @@ test('帧节流：2s 内只发一帧，超过间隔才补发', async () => {
   await f.storage.drain();
   assert.equal(socket.frames.length, 1);
 
-  f.advance(1500);                         // 累计 2.5s
+  f.advance(2000);                         // 累计 3s
   f.object.broadcastMonitorFrame(false);
   await f.storage.drain();
   assert.equal(socket.frames.length, 2);
@@ -986,6 +986,267 @@ test('帧节流：2s 内只发一帧，超过间隔才补发', async () => {
   f.object.broadcastMonitorFrame(true);
   await f.storage.drain();
   assert.equal(socket.frames.length, 3);
+});
+
+for (const intervalSec of [2, 3, 5, 10, 20]) {
+  test(`Monitor 合帧读取 active=${intervalSec}s，错峰上报与心跳不增加推帧频率`, async () => {
+    let policyReads = 0;
+    const f = fixture({ dbOverrides: { getSettingsByKeys: async () => {
+      policyReads++;
+      return { live_poll_active_interval_sec: String(intervalSec), record_enabled: 'false' };
+    } } });
+    await ready(f.object);
+    seedLive(f.object, f.now);
+    const socket = monitoredSocket();
+    f.object.registerSession(socket.ws, socket.ws.deserializeAttachment());
+    f.storage.state.acceptWebSocket(socket.ws);
+    const base = f.now;
+    const times = [];
+    socket.ws.send = value => { times.push(f.now - base); socket.frames.push(value); };
+    // 首次调度加载策略，后续在内存中复用，不能每个报告都查询设置。
+    await f.object.scheduleExpiryAlarm(f.now);
+    f.object.broadcastMonitorFrame();
+    await f.storage.drain();
+    for (let elapsed = 100; elapsed <= 30_000; elapsed += 100) {
+      f.advance(100);
+      if (f.alarmAt !== null && f.alarmAt <= f.now) {
+        await f.object.alarm();
+        await f.storage.drain();
+      }
+      // 多节点不断到达，窗口仍按上次出帧计算，不随每条报告后移。
+      if (elapsed % 500 === 100) {
+        f.object.clients.get('node-1').lastReport.cpu = elapsed;
+        f.object.broadcastMonitorFrame();
+        await f.storage.drain();
+      }
+    }
+    const step = intervalSec * 1000;
+    assert.deepEqual(times, Array.from({ length: Math.floor(30_000 / step) + 1 }, (_, i) => i * step));
+    assert.ok(policyReads <= 2, `settings read ${policyReads} times in 30 seconds`);
+  });
+}
+
+test('单节点 3s 上报保持 3s 推帧，无需对齐 Agent 时钟', async () => {
+  const f = fixture();
+  await ready(f.object);
+  seedLive(f.object, f.now);
+  const socket = monitoredSocket();
+  f.object.registerSession(socket.ws, socket.ws.deserializeAttachment());
+  f.storage.state.acceptWebSocket(socket.ws);
+  const base = f.now;
+  const times = [];
+  socket.ws.send = value => { times.push(f.now - base); socket.frames.push(value); };
+  for (let round = 0; round < 12; round++) {
+    if (round) f.advance(3000);
+    if (f.alarmAt !== null && f.alarmAt <= f.now) await f.object.alarm();
+    f.object.clients.get('node-1').lastReport.cpu = round;
+    f.object.broadcastMonitorFrame();
+    await f.storage.drain();
+  }
+  assert.deepEqual(times, Array.from({ length: 12 }, (_, i) => i * 3000));
+});
+
+test('DO 在同一窗口汇总延迟报告，慢节点不阻塞下一帧', async () => {
+  const f = fixture();
+  await ready(f.object);
+  const socket = monitoredSocket();
+  f.object.registerSession(socket.ws, socket.ws.deserializeAttachment());
+  f.storage.state.acceptWebSocket(socket.ws);
+  f.object.broadcastMonitorFrame();
+  await f.storage.drain();
+  const base = f.now;
+  const report = async (uuid, cpu) => {
+    await f.object.updateClientReport({ clientId: uuid, receivedAt: f.now, removalVersion: 0 }, uuid, false,
+      { cpu, timestamp: f.now - 500, ram: 10 });
+    await f.storage.drain();
+  };
+  f.advance(100);
+  await report('node-1', 11);
+  f.advance(2800);
+  await report('node-2', 21);
+  assert.equal(socket.frames.length, 1);
+  f.advance(100);
+  await f.object.alarm();
+  await f.storage.drain();
+  const values = () => new Map(frameJson(socket.frames.at(-1)).nodes.map(n => [n.name, n.metrics?.cpu]));
+  assert.equal(values().get('东京'), 11);
+  assert.equal(values().get('离线节点'), 21);
+  // node-2 的下一份报告跨过窗口，只会进入下一帧，不强制同步或阻塞 node-1。
+  f.advance(50);
+  await report('node-2', 22);
+  f.advance(50);
+  await report('node-1', 12);
+  f.advance(2900);
+  assert.equal(f.now, base + 6000);
+  await f.object.alarm();
+  await f.storage.drain();
+  assert.equal(values().get('东京'), 12);
+  assert.equal(values().get('离线节点'), 22);
+  f.advance(100);
+  await report('node-1', 13);
+  f.advance(2900);
+  await f.object.alarm();
+  await f.storage.drain();
+  assert.equal(values().get('东京'), 13);
+  assert.equal(values().get('离线节点'), 22, 'the quiet node retains its last value without blocking the frame');
+  assert.equal(socket.frames.length, 4);
+});
+
+for (const pending of [false, true]) {
+  test(`Monitor 休眠恢复保留 5s 合帧窗口（${pending ? '有' : '无'}待发报告）`, async () => {
+    const f = fixture({ dbOverrides: { getSettingsByKeys: async () => ({ live_poll_active_interval_sec: '5' }) } });
+    await ready(f.object);
+    seedLive(f.object, f.now);
+    const socket = monitoredSocket();
+    f.object.registerSession(socket.ws, socket.ws.deserializeAttachment());
+    f.storage.state.acceptWebSocket(socket.ws);
+    const agent = createSocket({ role: 'agent', clientId: 'node-1', clientName: '东京', hidden: false,
+      lastReport: f.object.clients.get('node-1').lastReport, lastReportTime: f.now });
+    f.storage.state.acceptWebSocket(agent.ws);
+    await f.object.scheduleExpiryAlarm(f.now);
+    f.object.broadcastMonitorFrame();
+    await f.storage.drain();
+    const frameAt = f.now;
+    f.advance(1000);
+    if (pending) f.object.broadcastMonitorFrame();
+    await f.storage.drain();
+    const restored = f.cold();
+    await ready(restored);
+    restored.clients.get('node-1').lastReport.cpu = 83;
+    restored.broadcastMonitorFrame();
+    await f.storage.drain();
+    assert.equal(socket.frames.length, 1);
+    assert.equal(await f.storage.state.storage.get('monitor:frame_at'), frameAt);
+    assert.equal(f.alarmAt, frameAt + 5000);
+    f.advance(3999);
+    await restored.alarm();
+    await f.storage.drain();
+    assert.equal(socket.frames.length, 1, 'early alarm cannot shorten the configured window');
+    f.advance(1);
+    await restored.alarm();
+    await f.storage.drain();
+    assert.equal(socket.frames.length, 2);
+    assert.equal(frameJson(socket.frames.at(-1)).nodes.find(n => n.name === '东京').metrics.cpu, 83);
+  });
+}
+
+test('修改 active 间隔按上次推帧时间重排尾帧，无需等待新报告', async () => {
+  let activeSec = 3;
+  const f = fixture({ dbOverrides: { getSettingsByKeys: async () => ({ live_poll_active_interval_sec: String(activeSec) }) } });
+  await ready(f.object);
+  seedLive(f.object, f.now);
+  const socket = monitoredSocket();
+  f.object.registerSession(socket.ws, socket.ws.deserializeAttachment());
+  f.storage.state.acceptWebSocket(socket.ws);
+  await f.object.scheduleExpiryAlarm(f.now);
+  f.object.broadcastMonitorFrame();
+  await f.storage.drain();
+  const frameAt = f.now;
+  f.advance(500);
+  f.object.clients.get('node-1').lastReport.cpu = 91;
+  f.object.broadcastMonitorFrame();
+  await f.storage.drain();
+  assert.equal(f.alarmAt, frameAt + 3000);
+  const refresh = async seconds => {
+    activeSec = seconds;
+    await f.object.fetch(new Request('https://do/policy-refresh', { method: 'POST' }));
+    await f.storage.drain();
+  };
+  await refresh(5);
+  assert.equal(f.alarmAt, frameAt + 5000);
+  f.advance(500);
+  await refresh(2);
+  assert.equal(f.alarmAt, frameAt + 2000);
+  f.advance(1000);
+  await f.object.alarm();
+  await f.storage.drain();
+  assert.equal(socket.frames.length, 2);
+  assert.equal(frameJson(socket.frames.at(-1)).nodes.find(n => n.name === '东京').metrics.cpu, 91);
+  f.advance(100);
+  f.object.broadcastMonitorFrame();
+  await f.storage.drain();
+  await refresh(5);
+  assert.equal(f.alarmAt, frameAt + 7000);
+  f.advance(2900);
+  await refresh(2);
+  assert.equal(f.alarmAt, f.now + 1, 'an overdue shorter window flushes on the next alarm');
+  f.advance(1);
+  await f.object.alarm();
+  await f.storage.drain();
+  assert.equal(socket.frames.length, 3);
+});
+
+test('正常数据帧顺延心跳期限，15s 不插入额外快照', async () => {
+  const f = fixture();
+  await ready(f.object);
+  seedLive(f.object, f.now);
+  const socket = monitoredSocket();
+  f.object.registerSession(socket.ws, socket.ws.deserializeAttachment());
+  f.storage.state.acceptWebSocket(socket.ws);
+  const base = f.now;
+  await f.object.scheduleExpiryAlarm(f.now);
+  f.advance(14_000);
+  f.object.broadcastMonitorFrame();
+  await f.storage.drain();
+  assert.equal(await f.storage.state.storage.get('monitor:ws_heartbeat_at'), base + 29_000);
+  f.advance(1000);
+  await f.object.alarm();
+  await f.storage.drain();
+  assert.equal(socket.frames.length, 1);
+  f.advance(14_000);
+  await f.object.alarm();
+  await f.storage.drain();
+  assert.equal(socket.frames.length, 2, 'a silent stream still receives its keepalive');
+});
+
+test('流量投影刷新按 active 窗口合帧，不紧接数据帧再补一帧', async () => {
+  let rx = 100;
+  const f = fixture({ dbOverrides: { getTrafficTotals: async () => ({ ...TOTALS, 'node-1': { ...TOTALS['node-1'], day_rx: rx } }) } });
+  await ready(f.object);
+  const socket = monitoredSocket();
+  f.object.registerSession(socket.ws, socket.ws.deserializeAttachment());
+  f.storage.state.acceptWebSocket(socket.ws);
+  f.object.broadcastMonitorFrame();
+  await f.storage.drain();
+  f.advance(60_000);
+  rx = 200;
+  f.object.broadcastMonitorFrame();
+  await f.storage.drain();
+  assert.equal(socket.frames.length, 2);
+  f.advance(3000);
+  await f.object.alarm();
+  await f.storage.drain();
+  assert.equal(socket.frames.length, 3);
+  assert.equal(frameJson(socket.frames.at(-1)).nodes.find(n => n.name === '东京').day_rx, 200);
+});
+
+test('周期 totals 查询变慢仍推送已有实时数据，刷新结果在下一窗口合并', async () => {
+  const delayed = Promise.withResolvers();
+  const entered = Promise.withResolvers();
+  let slow = false;
+  const f = fixture({ dbOverrides: { getTrafficTotals: async () => {
+    if (!slow) return TOTALS;
+    entered.resolve();
+    return delayed.promise;
+  } } });
+  await ready(f.object);
+  seedLive(f.object, f.now);
+  const socket = monitoredSocket();
+  f.object.registerSession(socket.ws, socket.ws.deserializeAttachment());
+  f.storage.state.acceptWebSocket(socket.ws);
+  f.object.broadcastMonitorFrame();
+  await f.storage.drain();
+  f.advance(60_000);
+  slow = true;
+  f.object.clients.get('node-1').lastReport.cpu = 99;
+  f.object.broadcastMonitorFrame();
+  await entered.promise;
+  await Promise.resolve();
+  assert.equal(socket.frames.length, 2);
+  assert.equal(frameJson(socket.frames.at(-1)).nodes.find(n => n.name === '东京').metrics.cpu, 99);
+  delayed.resolve(TOTALS);
+  await f.storage.drain();
+  assert.equal(socket.frames.length, 2, 'query completion does not immediately emit another frame');
 });
 
 for (const cold of [false, true]) test(`throttled Monitor update flushes without another report${cold ? ' after hibernation' : ''}`, async () => {
@@ -1003,7 +1264,7 @@ for (const cold of [false, true]) test(`throttled Monitor update flushes without
   f.object.clients.get('node-1').lastReport.cpu = 71;
   f.object.broadcastMonitorFrame();
   await f.storage.drain();
-  const deadline = f.now + 1900;
+  const deadline = f.now + 2900;
   assert.equal(alarms.at(-1), deadline);
   assert.equal(socket.frames.length, 1);
   f.advance(500);
@@ -1018,7 +1279,7 @@ for (const cold of [false, true]) test(`throttled Monitor update flushes without
       lastReport: client.lastReport, lastReportTime: client.lastReportTime });
     f.storage.state.acceptWebSocket(agent.ws);
   }
-  f.advance(1400);
+  f.advance(2400);
   const object = cold ? f.cold() : f.object;
   await object.alarm();
   await f.storage.drain();
@@ -1078,7 +1339,7 @@ test('staggered 3s reports survive the 15s heartbeat without skipping projected 
   await f.storage.drain();
   const base = f.now;
   const expected = [];
-  for (let elapsed = 100; elapsed <= 32_000; elapsed += 100) {
+  for (let elapsed = 100; elapsed <= 33_000; elapsed += 100) {
     f.advance(100);
     // Process a due heartbeat before the next slightly staggered Agent report.
     if (alarmAt <= f.now) {

@@ -156,8 +156,8 @@ function jwtSecret(c: WsContext): string {
 /**
  * monitor 主题契约的实时通道：`{admin, nodes}` 全量帧，`?gzip` 发 gzip 二进制。
  *
- * 帧由 Durable Object 从内存里的静态投影 + 实时报告拼装（每帧不查库），推送节奏
- * 跟随 agent 上报（3–5s），而不是上游 hub 的 2s。普通 GET 按契约回 426。
+ * 帧由 Durable Object 从内存里的静态投影 + 实时报告拼装（每帧不查库），按配置的
+ * live_poll_active_interval_sec 合并错峰到达的上报。普通 GET 按契约回 426。
  */
 wsRoutes.get('/ws', async (c) => {
   if (!isWebSocketUpgrade(c)) {

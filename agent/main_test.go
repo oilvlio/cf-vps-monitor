@@ -959,6 +959,30 @@ func TestPreparedReportUsesRawCountersForNetworkSpeed(t *testing.T) {
 	}
 }
 
+func TestPreparedReportUsesElapsedMillisecondsForNetworkSpeed(t *testing.T) {
+	preparer := &reportPreparer{}
+	preparer.prepareReportForInterval(Report{
+		Timestamp:       1_000,
+		hasRawNetTotals: true,
+		rawNetTotalUp:   10_000,
+		rawNetTotalDown: 20_000,
+	}, 2)
+
+	report := preparer.prepareReportForInterval(Report{
+		Timestamp:       3_500,
+		hasRawNetTotals: true,
+		rawNetTotalUp:   10_050,
+		rawNetTotalDown: 20_050,
+	}, 2)
+	if report.NetOut != 20 || report.NetIn != 20 {
+		t.Fatalf("jittered 2.5s report = %d/%d B/s, want 20/20 (rounding to 3s would report 16)",
+			report.NetOut, report.NetIn)
+	}
+	if report.ReportInterval != 3 {
+		t.Fatalf("report interval = %ds, want the rounded 3s still reported", report.ReportInterval)
+	}
+}
+
 func TestPostJSONWithContextReturnsHTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "too large", http.StatusRequestEntityTooLarge)

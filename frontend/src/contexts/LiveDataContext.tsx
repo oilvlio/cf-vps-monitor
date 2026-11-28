@@ -9,6 +9,7 @@ import {
   getLiveWsReconnectDelay,
   isLiveWsCircuitOpen,
   LIVE_POLL_SETTINGS_UPDATED_EVENT,
+  LIVE_WS_HIDDEN_CLOSE_MS,
   normalizeLivePollConfig,
   shouldPollLiveData,
   shouldReconnectLiveWebSocket,
@@ -342,6 +343,8 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const initialSnapshotTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** 标签页隐藏后延迟断开观看连接，避免后台标签页长期把 Agent 压在 active。 */
+  const hiddenCloseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const wsOpenRef = useRef(false);
   /** 连续重连失败次数；`open` 成功归零，达到阈值即熔断（见 livePolling.ts）。 */
@@ -579,7 +582,7 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
     };
 
     const connect = async () => {
-      if (cancelled || typeof WebSocket === 'undefined') return;
+      if (cancelled || document.hidden || typeof WebSocket === 'undefined') return;
       const connection = ++connectionRequest;
 
       let viewerToken = '';
@@ -607,7 +610,7 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
         scheduleReconnect();
         return;
       }
-      if (cancelled || !scope.active || connectionRequest !== connection || !viewerToken) return;
+      if (cancelled || document.hidden || !scope.active || connectionRequest !== connection || !viewerToken) return;
 
       const ws = new WebSocket(
         buildLiveWebSocketUrl(window.location.origin, `/api/ws/live${includeHidden ? '?include_hidden=1' : ''}`),
@@ -735,12 +738,51 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
       reconnectTimeoutRef.current = setTimeout(() => { void connect(); }, 0);
     };
 
+    const clearHiddenCloseTimeout = () => {
+      if (hiddenCloseTimeoutRef.current) {
+        clearTimeout(hiddenCloseTimeoutRef.current);
+        hiddenCloseTimeoutRef.current = null;
+      }
+    };
+
+    /**
+     * 隐藏超过 LIVE_WS_HIDDEN_CLOSE_MS 就主动断开观看连接：
+     * - 服务端把这次断开当作离开，按保持时长把 Agent 切回 idle 上报；
+     * - 先摘掉 wsRef 再 close，close 回调就不会把它记成一次重连失败；
+     * - 切回可见时由 handleWsVisibility 立即重连。
+     */
+    const scheduleHiddenClose = () => {
+      if (!document.hidden || hiddenCloseTimeoutRef.current) return;
+      hiddenCloseTimeoutRef.current = setTimeout(() => {
+        hiddenCloseTimeoutRef.current = null;
+        if (cancelled || !document.hidden) return;
+        connectionRequest += 1;
+        const ws = wsRef.current;
+        wsRef.current = null;
+        wsOpenRef.current = false;
+        clearReconnectTimeout();
+        clearInitialSnapshotTimeout();
+        if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+          try {
+            ws.close();
+          } catch {
+            // Closing an already-closed socket is harmless.
+          }
+        }
+      }, LIVE_WS_HIDDEN_CLOSE_MS);
+    };
+
     /**
      * 切回前台时：熔断计数归零并立刻重连一次。
      * 网络环境可能已经变了（换 WiFi、离开公司代理），值得免费再试一次。
      */
     const handleWsVisibility = () => {
-      if (cancelled || document.hidden) return;
+      if (cancelled) return;
+      if (document.hidden) {
+        scheduleHiddenClose();
+        return;
+      }
+      clearHiddenCloseTimeout();
       wsFailStreakRef.current = 0;
       if (!wsRef.current) {
         clearReconnectTimeout();
@@ -753,6 +795,7 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
     // 多挂一个入口让熔断后的恢复更及时（有 wsRef 判空兜底，不会重复建连）。
     window.addEventListener('focus', handleWsVisibility);
     void connect();
+    scheduleHiddenClose();
 
     return () => {
       cancelled = true;
@@ -760,6 +803,7 @@ export function LiveDataProvider({ children, enabled = true, viewer = true }: Li
       window.removeEventListener('focus', handleWsVisibility);
       clearReconnectTimeout();
       clearInitialSnapshotTimeout();
+      clearHiddenCloseTimeout();
       wsOpenRef.current = false;
       const ws = wsRef.current;
       wsRef.current = null;

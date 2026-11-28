@@ -2836,20 +2836,27 @@ func (p *reportPreparer) prepareReportForInterval(report Report, intervalSec int
 		}
 	}
 
-	effectiveIntervalSec := intervalSec
+	// 速率分母用真实经过的毫秒数，而不是四舍五入后的整数秒：
+	// 定时器抖动/网络延迟会把 2.5s 的真实间隔算成 3s，速率被低估约 17%。
+	// 上报的 report_interval 字段仍保持整数秒（并受 2s 下限约束）。
+	effectiveIntervalMs := float64(intervalSec) * 1000
 	if report.Timestamp > 0 && p.lastTimestampMs > 0 {
 		elapsedMs := report.Timestamp - p.lastTimestampMs
 		if elapsedMs > 0 {
-			effectiveIntervalSec = int((elapsedMs + 500) / 1000)
+			effectiveIntervalMs = float64(elapsedMs)
 		}
 	}
-	minIntervalSec := int(minReportInterval / time.Second)
-	if effectiveIntervalSec < minIntervalSec {
-		effectiveIntervalSec = minIntervalSec
+	minIntervalMs := float64(minReportInterval / time.Millisecond)
+	if effectiveIntervalMs < minIntervalMs {
+		effectiveIntervalMs = minIntervalMs
 	}
-	report.ReportInterval = effectiveIntervalSec
-	report.NetOut = upDelta / int64(effectiveIntervalSec)
-	report.NetIn = downDelta / int64(effectiveIntervalSec)
+	effectiveIntervalSec := (int64(effectiveIntervalMs) + 500) / 1000
+	if effectiveIntervalSec < int64(minReportInterval/time.Second) {
+		effectiveIntervalSec = int64(minReportInterval / time.Second)
+	}
+	report.ReportInterval = int(effectiveIntervalSec)
+	report.NetOut = int64(float64(upDelta) * 1000 / effectiveIntervalMs)
+	report.NetIn = int64(float64(downDelta) * 1000 / effectiveIntervalMs)
 	p.lastNetUp = speedTotalUp
 	p.lastNetDown = speedTotalDown
 	p.lastNetPerInterface = report.netPerInterface

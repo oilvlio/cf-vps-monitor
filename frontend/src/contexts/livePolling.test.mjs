@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 const {
   DEFAULT_LIVE_POLL_CONFIG,
   LIVE_WS_FAILURE_CIRCUIT_BREAK,
+  LIVE_WS_HIDDEN_CLOSE_MS,
   LIVE_WS_RECONNECT_BACKOFF_MS,
   getLivePollDelay,
   getLiveWsReconnectDelay,
@@ -50,6 +51,12 @@ assert.equal(isLiveWsCircuitOpen(9), false, '第 9 次失败不熔断');
 assert.equal(isLiveWsCircuitOpen(10), true, '第 10 次失败熔断');
 assert.equal(isLiveWsCircuitOpen(11), true);
 assert.equal(isLiveWsCircuitOpen(Number.NaN), false);
+
+// --- 隐藏标签页断开观看连接 ---
+// 后台标签页的定时器可能被冻结，所以服务端兜底是必须的；前端这边负责
+// 在 30–60 秒内主动离开，让 Agent 不必等到服务端兜底期限才回落到 idle。
+assert.ok(LIVE_WS_HIDDEN_CLOSE_MS >= 30_000, '隐藏断开不得早于 30 秒，避免切换标签页就断流');
+assert.ok(LIVE_WS_HIDDEN_CLOSE_MS <= 60_000, '隐藏断开不得晚于 60 秒，否则后台标签页仍会长期保持 active');
 
 // --- 轮询间隔 ---
 const config = DEFAULT_LIVE_POLL_CONFIG;

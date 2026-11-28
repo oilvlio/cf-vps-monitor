@@ -323,69 +323,96 @@ for (const reason of ['revoked', 'expired-token', 'database-failure', 'missing-t
   });
 }
 
-for (const role of ['monitor', 'viewer']) {
-  test(`${role} stays open and keeps Agent reports fast beyond 120s and across hibernation`, async () => {
-    const f = fixture({ dbOverrides: { getSettingsByKeys: async () => ({
-      record_enabled: 'false', live_poll_active_interval_sec: '2', live_poll_active_max_duration_sec: '120',
-    }) } });
-    await ready(f.object);
-    const agent = monitoredSocket({ id: 'persistent-agent', role: 'agent' });
-    f.object.registerSession(agent.ws, agent.ws.deserializeAttachment());
-    f.storage.state.acceptWebSocket(agent.ws);
-    assert.equal((await upgrade(f.object, role, 'continuous-viewer')).status, 101);
+test('monitor stays open and keeps Agent reports fast beyond 120s and across hibernation', async () => {
+  const f = fixture({ dbOverrides: { getSettingsByKeys: async () => ({
+    record_enabled: 'false', live_poll_active_interval_sec: '2', live_poll_active_max_duration_sec: '120',
+  }) } });
+  await ready(f.object);
+  const agent = monitoredSocket({ id: 'persistent-agent', role: 'agent' });
+  f.object.registerSession(agent.ws, agent.ws.deserializeAttachment());
+  f.storage.state.acceptWebSocket(agent.ws);
+  assert.equal((await upgrade(f.object, 'monitor', 'continuous-viewer')).status, 101);
+  await f.storage.drain();
+  const socket = f.storage.sockets[1];
+  let frames = 0;
+  socket.send = value => {
+    assert.notEqual(frameJson(value).type, 'viewer_expired');
+    frames++;
+  };
+  let object = f.object;
+  for (let round = 0; round < 12; round++) {
+    f.advance(30_000);
+    object = f.cold();
+    await ready(object);
+    await object.alarm();
     await f.storage.drain();
-    const socket = f.storage.sockets[1];
-    let frames = 0;
-    socket.send = value => {
-      assert.notEqual(frameJson(value).type, 'viewer_expired');
-      frames++;
-    };
-    let object = f.object;
-    for (let round = 0; round < 12; round++) {
-      f.advance(30_000);
-      object = f.cold();
-      await ready(object);
-      await object.alarm();
-      if (role === 'viewer') object.sendSnapshot(socket);
-      await f.storage.drain();
-      assert.equal(socket.readyState, 1, `connection closed after ${(round + 1) * 30}s`);
-      const policy = await object.buildAgentPolicy(f.now, false);
-      assert.equal(policy.mode, 'active');
-      assert.equal(policy.viewer_count, 1);
-      assert.equal(policy.report_interval_sec, 2);
-    }
-    assert.ok(frames >= 12, 'the same socket must continue receiving data');
-    assert.ok(agent.frames.every(value => JSON.parse(value).mode === 'active'));
-    assert.equal(await f.storage.state.storage.get('viewer:last_left_at'), undefined);
-  });
+    assert.equal(socket.readyState, 1, `connection closed after ${(round + 1) * 30}s`);
+    const policy = await object.buildAgentPolicy(f.now, false);
+    assert.equal(policy.mode, 'active');
+    assert.equal(policy.viewer_count, 1);
+    assert.equal(policy.report_interval_sec, 2);
+  }
+  assert.ok(frames >= 12, 'the same socket must continue receiving data');
+  assert.ok(agent.frames.every(value => JSON.parse(value).mode === 'active'));
+  assert.equal(await f.storage.state.storage.get('viewer:last_left_at'), undefined);
+});
 
-  test(`${role} last departure keeps active for exactly 120s then pushes idle to Agents`, async () => {
-    const f = fixture();
-    await ready(f.object);
-    const agent = monitoredSocket({ id: 'grace-agent', role: 'agent' });
-    f.object.registerSession(agent.ws, agent.ws.deserializeAttachment());
-    await upgrade(f.object, role, 'last-viewer');
-    await f.storage.drain();
-    // The holding period starts at departure, even after a long viewing session.
-    f.advance(300_000);
-    const socket = f.storage.sockets[0];
-    socket.close();
-    const leftAt = f.now;
-    await f.object.webSocketClose(socket);
-    assert.equal(f.alarmAt, leftAt + 120_000);
-    assert.equal(JSON.parse(agent.frames.at(-1)).mode, 'active');
-    assert.equal(JSON.parse(agent.frames.at(-1)).viewer_count, 0);
-    f.advance(119_999);
-    assert.equal((await f.object.buildAgentPolicy(f.now, false)).mode, 'active');
-    f.advance(1);
-    await f.object.alarm();
-    await f.storage.drain();
-    const idle = JSON.parse(agent.frames.at(-1));
-    assert.equal(idle.mode, 'idle');
-    assert.equal(idle.report_interval_sec, 120);
-    assert.equal(f.alarmAt, null);
-  });
-}
+test('native viewer lease expires after the holding time and immediately restores idle sampling', async () => {
+  const f = fixture({ dbOverrides: { getSettingsByKeys: async () => ({
+    record_enabled: 'false', live_poll_active_interval_sec: '2', live_poll_active_max_duration_sec: '120',
+  }) } });
+  await ready(f.object);
+  const agent = monitoredSocket({ id: 'lease-agent', role: 'agent' });
+  f.object.registerSession(agent.ws, agent.ws.deserializeAttachment());
+  f.storage.state.acceptWebSocket(agent.ws);
+  assert.equal((await upgrade(f.object, 'viewer', 'lease-viewer')).status, 101);
+  await f.storage.drain();
+  const socket = f.storage.sockets[1];
+  const frames = [];
+  socket.send = value => frames.push(frameJson(value));
+
+  f.advance(119_000);
+  await f.object.alarm();
+  await f.storage.drain();
+  assert.equal(socket.readyState, 1, 'the lease is not shortened');
+  assert.equal(f.object.activeViewerCount(f.now), 1);
+
+  f.advance(1_000);
+  await f.object.alarm();
+  await f.storage.drain();
+  assert.equal(socket.readyState, 3, 'the built-in viewer is closed when its lease ends');
+  assert.equal(frames.at(-1).type, 'viewer_expired');
+  assert.equal(f.object.activeViewerCount(f.now), 0);
+  assert.equal((await f.object.buildAgentPolicy(f.now, false)).mode, 'idle',
+    'lease expiry is not a normal departure and must not start the holding grace period');
+});
+
+test('monitor last departure keeps active for exactly 120s then pushes idle to Agents', async () => {
+  const f = fixture();
+  await ready(f.object);
+  const agent = monitoredSocket({ id: 'grace-agent', role: 'agent' });
+  f.object.registerSession(agent.ws, agent.ws.deserializeAttachment());
+  await upgrade(f.object, 'monitor', 'last-viewer');
+  await f.storage.drain();
+  // The holding period starts at departure, even after a long viewing session.
+  f.advance(300_000);
+  const socket = f.storage.sockets[0];
+  socket.close();
+  const leftAt = f.now;
+  await f.object.webSocketClose(socket);
+  assert.equal(f.alarmAt, leftAt + 120_000);
+  assert.equal(JSON.parse(agent.frames.at(-1)).mode, 'active');
+  assert.equal(JSON.parse(agent.frames.at(-1)).viewer_count, 0);
+  f.advance(119_999);
+  assert.equal((await f.object.buildAgentPolicy(f.now, false)).mode, 'active');
+  f.advance(1);
+  await f.object.alarm();
+  await f.storage.drain();
+  const idle = JSON.parse(agent.frames.at(-1));
+  assert.equal(idle.mode, 'idle');
+  assert.equal(idle.report_interval_sec, 120);
+  assert.equal(f.alarmAt, null);
+});
 
 test('refreshing and returning within the grace period never sends idle or closes a live viewer', async () => {
   const f = fixture();
@@ -400,7 +427,8 @@ test('refreshing and returning within the grace period never sends idle or close
   f.advance(119_000);
   assert.equal((await upgrade(f.object, 'viewer', 'after-refresh')).status, 101);
   await f.storage.drain();
-  f.advance(300_000);
+  // Stay inside the returning viewer's own 120s lease while crossing the old grace deadline.
+  f.advance(60_000);
   await f.object.alarm();
   await f.storage.drain();
   assert.equal(f.storage.sockets[1].readyState, 1);
@@ -422,7 +450,7 @@ test('only the last of mixed Monitor/native viewers starts grace, and duplicate 
   f.storage.sockets[0].close();
   await f.object.webSocketClose(f.storage.sockets[0]);
   assert.equal(await f.storage.state.storage.get('viewer:last_left_at'), undefined);
-  f.advance(180_000);
+  f.advance(60_000);
   assert.equal((await f.object.buildAgentPolicy(f.now, false)).mode, 'active');
   f.storage.sockets[1].close();
   const leftAt = f.now;
@@ -567,20 +595,20 @@ test('Agent reports during grace do not renew the holding deadline', async () =>
   }
 });
 
-test('old viewer expiry attachments are removed during restoration without closing live connections', async () => {
+test('viewer leases restored from attachments are not renewed and expired ones are closed', async () => {
   const f = fixture();
-  for (const role of ['monitor', 'viewer']) {
-    const socket = monitoredSocket({ id: `legacy-${role}`, role });
-    socket.ws.serializeAttachment({ ...socket.ws.deserializeAttachment(), viewerExpiresAt: f.now - 1 });
-    f.storage.state.acceptWebSocket(socket.ws);
-  }
+  const expired = monitoredSocket({ id: 'expired-viewer', role: 'viewer' });
+  expired.ws.serializeAttachment({ ...expired.ws.deserializeAttachment(), viewerExpiresAt: f.now - 1 });
+  f.storage.state.acceptWebSocket(expired.ws);
+  const live = monitoredSocket({ id: 'live-monitor', role: 'monitor' });
+  live.ws.serializeAttachment({ ...live.ws.deserializeAttachment(), viewerExpiresAt: f.now + 60_000 });
+  f.storage.state.acceptWebSocket(live.ws);
   const restored = f.cold();
   await ready(restored);
-  for (const socket of f.storage.sockets) {
-    assert.equal(socket.readyState, 1);
-    assert.equal(socket.deserializeAttachment().viewerExpiresAt, undefined);
-  }
-  assert.equal(restored.activeViewerCount(), 2);
+  assert.equal(expired.ws.readyState, 3, 'a stale lease is closed instead of being renewed on wake');
+  assert.equal(live.ws.readyState, 1);
+  assert.equal(live.ws.deserializeAttachment().viewerExpiresAt, f.now + 60_000);
+  assert.equal(restored.activeViewerCount(), 1);
   assert.equal((await restored.buildAgentPolicy(f.now, false)).mode, 'active');
 });
 
@@ -988,7 +1016,7 @@ test('帧节流：默认 3s 内只发一帧，超过间隔才补发', async () =
   assert.equal(socket.frames.length, 3);
 });
 
-for (const intervalSec of [2, 3, 5, 10, 20]) {
+for (const intervalSec of [2, 3, 5, 10, 15, 20, 300]) {
   test(`Monitor 合帧读取 active=${intervalSec}s，错峰上报与心跳不增加推帧频率`, async () => {
     let policyReads = 0;
     const f = fixture({ dbOverrides: { getSettingsByKeys: async () => {
@@ -1020,11 +1048,75 @@ for (const intervalSec of [2, 3, 5, 10, 20]) {
         await f.storage.drain();
       }
     }
-    const step = intervalSec * 1000;
+    const step = Math.min(intervalSec * 1000, 15_000);
     assert.deepEqual(times, Array.from({ length: Math.floor(30_000 / step) + 1 }, (_, i) => i * step));
     assert.ok(policyReads <= 2, `settings read ${policyReads} times in 30 seconds`);
   });
 }
+
+test('Monitor frames never write storage and a throttle window schedules only once', async () => {
+  const f = fixture();
+  await ready(f.object);
+  await f.storage.drain();
+  const socket = monitoredSocket();
+  f.object.registerSession(socket.ws, socket.ws.deserializeAttachment());
+  let writes = 0;
+  let alarms = 0;
+  f.storage.state.storage.put = async () => { writes++; };
+  f.storage.state.storage.delete = async () => { writes++; };
+  f.storage.state.storage.setAlarm = async () => { alarms++; };
+
+  for (let round = 0; round < 10; round++) {
+    if (round) f.advance(3000);
+    f.object.broadcastMonitorFrame();
+    await f.storage.drain();
+  }
+  assert.equal(socket.frames.length, 10);
+  assert.equal(writes, 0, 'normal frames must not persist frame/heartbeat state');
+  assert.equal(alarms, 0, 'normal frames must not reset the expiry alarm');
+
+  for (let report = 0; report < 20; report++) {
+    f.advance(10);
+    f.object.broadcastMonitorFrame();
+    await f.storage.drain();
+  }
+  assert.equal(writes, 0, 'trailing frames must remain in memory');
+  assert.equal(alarms, 1, 'all reports inside one window share one scheduled flush');
+});
+
+test('Monitor fallback expires after 15 minutes across wakes without starting departure grace', async () => {
+  const f = fixture();
+  await ready(f.object);
+  await upgrade(f.object, 'monitor', 'fallback-monitor');
+  await f.storage.drain();
+  const ws = f.storage.sockets[0];
+  const expiresAt = f.now + 15 * 60_000;
+  assert.equal(ws.deserializeAttachment().viewerExpiresAt, expiresAt);
+  f.advance(14 * 60_000);
+  const restored = f.cold();
+  await ready(restored);
+  assert.equal(ws.deserializeAttachment().viewerExpiresAt, expiresAt);
+  assert.equal(restored.activeViewerCount(), 1);
+  f.advance(60_000);
+  await restored.alarm();
+  await f.storage.drain();
+  assert.equal(ws.readyState, 3);
+  await restored.webSocketClose(ws);
+  assert.equal((await restored.buildAgentPolicy(f.now, false)).mode, 'idle');
+  assert.equal(await f.storage.state.storage.get('viewer:last_left_at'), undefined);
+});
+
+test('rescheduling an alarm closes overdue viewers instead of dropping their expiry tracking', async () => {
+  const f = fixture();
+  await ready(f.object);
+  await upgrade(f.object, 'viewer', 'overdue-viewer');
+  await f.storage.drain();
+  f.advance(120_000);
+  await f.object.scheduleExpiryAlarm(f.now);
+  assert.equal(f.storage.sockets[0].readyState, 3);
+  assert.equal(f.object.activeViewerCount(), 0);
+  assert.equal((await f.object.buildAgentPolicy(f.now, false)).mode, 'idle');
+});
 
 test('单节点 3s 上报保持 3s 推帧，无需对齐 Agent 时钟', async () => {
   const f = fixture();
@@ -1093,7 +1185,7 @@ test('DO 在同一窗口汇总延迟报告，慢节点不阻塞下一帧', async
 });
 
 for (const pending of [false, true]) {
-  test(`Monitor 休眠恢复保留 5s 合帧窗口（${pending ? '有' : '无'}待发报告）`, async () => {
+  test(`Monitor 休眠后重新建立内存合帧窗口（${pending ? '有' : '无'}待发报告）`, async () => {
     const f = fixture({ dbOverrides: { getSettingsByKeys: async () => ({ live_poll_active_interval_sec: '5' }) } });
     await ready(f.object);
     seedLive(f.object, f.now);
@@ -1106,7 +1198,6 @@ for (const pending of [false, true]) {
     await f.object.scheduleExpiryAlarm(f.now);
     f.object.broadcastMonitorFrame();
     await f.storage.drain();
-    const frameAt = f.now;
     f.advance(1000);
     if (pending) f.object.broadcastMonitorFrame();
     await f.storage.drain();
@@ -1115,17 +1206,9 @@ for (const pending of [false, true]) {
     restored.clients.get('node-1').lastReport.cpu = 83;
     restored.broadcastMonitorFrame();
     await f.storage.drain();
-    assert.equal(socket.frames.length, 1);
-    assert.equal(await f.storage.state.storage.get('monitor:frame_at'), frameAt);
-    assert.equal(f.alarmAt, frameAt + 5000);
-    f.advance(3999);
-    await restored.alarm();
-    await f.storage.drain();
-    assert.equal(socket.frames.length, 1, 'early alarm cannot shorten the configured window');
-    f.advance(1);
-    await restored.alarm();
-    await f.storage.drain();
-    assert.equal(socket.frames.length, 2);
+    assert.equal(await f.storage.state.storage.get('monitor:frame_at'), undefined);
+    assert.equal(await f.storage.state.storage.get('monitor:frame_pending_at'), undefined);
+    assert.equal(socket.frames.length, 2, 'the first report after wake starts a fresh in-memory window');
     assert.equal(frameJson(socket.frames.at(-1)).nodes.find(n => n.name === '东京').metrics.cpu, 83);
   });
 }
@@ -1188,11 +1271,12 @@ test('正常数据帧顺延心跳期限，15s 不插入额外快照', async () =
   f.advance(14_000);
   f.object.broadcastMonitorFrame();
   await f.storage.drain();
-  assert.equal(await f.storage.state.storage.get('monitor:ws_heartbeat_at'), base + 29_000);
+  assert.equal(await f.storage.state.storage.get('monitor:ws_heartbeat_at'), undefined);
   f.advance(1000);
   await f.object.alarm();
   await f.storage.drain();
   assert.equal(socket.frames.length, 1);
+  assert.equal(f.alarmAt, base + 29_000, 'keepalive is due 15s after the last frame');
   f.advance(14_000);
   await f.object.alarm();
   await f.storage.drain();
@@ -1271,7 +1355,8 @@ for (const cold of [false, true]) test(`throttled Monitor update flushes without
   f.object.clients.get('node-1').lastReport.cpu = 83;
   f.object.broadcastMonitorFrame();
   await f.storage.drain();
-  assert.equal(await f.storage.state.storage.get('monitor:frame_pending_at'), deadline, 'new reports do not slide the trailing deadline');
+  assert.equal(f.object.monitorFramePendingAt, deadline, 'new reports do not slide the trailing deadline');
+  assert.equal(await f.storage.state.storage.get('monitor:frame_pending_at'), undefined);
   // Preserve the latest report the same way accepted Agent sockets do on hibernation.
   const client = f.object.clients.get('node-1');
   if (cold) {
@@ -1297,10 +1382,10 @@ test('closing the last Monitor removes the pending trailing update', async () =>
   f.advance(100);
   f.object.broadcastMonitorFrame();
   await f.storage.drain();
-  assert.ok(await f.storage.state.storage.get('monitor:frame_pending_at'));
+  assert.ok(f.object.monitorFramePendingAt);
   await f.object.webSocketClose(socket.ws);
   await f.storage.drain();
-  assert.equal(await f.storage.state.storage.get('monitor:frame_pending_at'), undefined);
+  assert.equal(f.object.monitorFramePendingAt, 0);
 });
 
 test('an intervening forced frame consumes the pending update without a duplicate trailing frame', async () => {
@@ -1372,29 +1457,31 @@ test('空闲期间定时推送快照，避免 Monitor WebSocket 被客户端判�
   f.object.registerSession(socket.ws, socket.ws.deserializeAttachment());
   f.storage.state.acceptWebSocket(socket.ws);
   await f.object.scheduleExpiryAlarm(f.now);
-  const dueAt = await f.storage.state.storage.get('monitor:ws_heartbeat_at');
+  f.object.broadcastMonitorFrame(true);
+  await f.storage.drain();
+  await f.object.scheduleExpiryAlarm(f.now);
+  const dueAt = f.alarmAt;
   assert.equal(dueAt, f.now + 15_000);
 
-  // Agent reports may recalculate the shared expiry alarm, but must not slide
-  // the persisted monitor heartbeat deadline.
+  // Recalculating the alarm does not slide the deadline from the last frame.
   f.advance(5_000);
   await f.object.scheduleExpiryAlarm(f.now);
-  assert.equal(await f.storage.state.storage.get('monitor:ws_heartbeat_at'), dueAt);
+  assert.equal(f.alarmAt, dueAt);
 
   f.advance(10_000);
   const resumed = f.cold();
   await resumed.alarm();
   await f.storage.drain();
-  assert.equal(socket.frames.length, 1);
+  assert.equal(socket.frames.length, 2);
   assert.equal(frameJson(socket.frames[0]).nodes.length, 2);
   assert.equal(
-    await f.storage.state.storage.get('monitor:ws_heartbeat_at'),
+    f.alarmAt,
     f.now + 15_000,
     'next heartbeat remains scheduled after a hibernation wake',
   );
 
   await resumed.webSocketClose(socket.ws);
-  assert.equal(await f.storage.state.storage.get('monitor:ws_heartbeat_at'), undefined);
+  assert.equal(resumed.monitorFramePendingAt, 0);
 });
 
 test('Monitor 订阅者计入活跃观看人数，最后离开后等待保持时长才恢复闲置采样', async () => {

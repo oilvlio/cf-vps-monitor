@@ -16,6 +16,15 @@ export const LIVE_WS_RECONNECT_BACKOFF_MS = [5_000, 10_000, 30_000, 60_000] as c
 /** 连续失败达到此次数即判定为硬故障（如代理阻断 WebSocket），停止重连。 */
 export const LIVE_WS_FAILURE_CIRCUIT_BREAK = 10;
 
+/**
+ * 标签页隐藏后保留观看身份的时间。
+ *
+ * 隐藏超过这个时长就主动断开 WebSocket：DO 会在最后一个观看连接离开后
+ * 按保持时长把 Agent 切回 idle 上报。手机后台/被遗忘的标签页不会因为
+ * 服务端的绝对到期时间另行兜住浏览器冻结定时器的情况。
+ */
+export const LIVE_WS_HIDDEN_CLOSE_MS = 45_000;
+
 export interface LivePollConfig {
   activeIntervalMs: number;
   idleIntervalMs: number;

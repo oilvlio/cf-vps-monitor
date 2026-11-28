@@ -48,18 +48,20 @@ test('AUD-31: a cold object loads the configured interval before its first persi
   assert.equal(due.writes.length, 1);
 });
 
-test('AUD-31: a cold viewer loads the configured departure holding time without a connection deadline', async () => {
+test('AUD-31: a cold viewer loads the configured holding time for both its lease and departure grace', async () => {
   const f = fixture({ settings: { live_poll_active_max_duration_sec: '600' } });
+  const before = Date.now();
   const response = await f.object.fetch(new Request('https://do/?role=viewer&id=fixture-viewer', { headers: { Upgrade: 'websocket' } }));
   assert.equal(response.status, 101);
   const attachment = f.state.sockets[0].deserializeAttachment();
-  assert.equal(attachment.viewerExpiresAt, undefined);
+  assert.ok(attachment.viewerExpiresAt >= before + 599_000, 'viewer lease uses the configured ten-minute holding time');
+  assert.ok(attachment.viewerExpiresAt <= before + 601_000);
   assert.equal((await f.object.buildAgentPolicy(Date.now(), false)).viewer_ttl_sec, 600);
   const ws = f.state.sockets[0];
   ws.close();
-  const before = Date.now();
+  const leftAt = Date.now();
   await f.object.webSocketClose(ws);
-  assert.ok(f.object.viewerHoldDeadline() - before >= 599000, 'configured ten-minute holding time was replaced with the two-minute default');
+  assert.ok(f.object.viewerHoldDeadline() - leftAt >= 599000, 'configured ten-minute holding time was replaced with the two-minute default');
   await f.state.drain();
 });
 
